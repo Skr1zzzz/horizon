@@ -327,7 +327,7 @@ impl Game<'_> {
 
     /// `Entity.getPassengerRidingPosition` of a vehicle: where the feet of a
     /// passenger whose own vehicle attachment is 0 land.
-    fn passenger_riding_position(
+    pub(super) fn passenger_riding_position(
         &self,
         vehicle: u32,
         me: Option<u32>,
@@ -376,15 +376,10 @@ impl Game<'_> {
                 a.position.z,
             ));
         }
-        // Any other tracked entity sits on its feet; an area effect cloud is
-        // 0.5 tall, and ModelEngine parks a model's pivot half a block below
-        // its feet for exactly that.
+        // Entity's default passenger attachment is the top of its type's box;
+        // zero-sized pivots such as markers therefore seat riders at their feet.
         let (kind, position) = self.remote.as_ref()?.tracked(vehicle as i32)?;
-        let lift = if kind == "minecraft:area_effect_cloud" {
-            0.5
-        } else {
-            0.0
-        };
+        let lift = self.res.mob_types().get(kind).map_or(0.0, |t| t.height);
         Some(glam::DVec3::new(
             position[0],
             position[1] + lift,
