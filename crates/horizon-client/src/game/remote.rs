@@ -589,6 +589,8 @@ pub(super) struct Remote {
     /// A mod menu's extra data, kept for the `OpenScreen` of its window that
     /// follows (`horizon:menu_extra`).
     menu_extra: Option<horizon_protocol::menu_extra::Message>,
+    pending_pod: Option<play::OpenScreen>,
+    pod_menu: Option<horizon_client::net::pod::Menu>,
     entities: HashMap<i32, Tracked>,
     lerps: HashMap<i32, Lerp>,
     /// The minecarts the server moves with `ClientboundMoveMinecartPacket`
@@ -1130,6 +1132,8 @@ impl Game<'_> {
             state_id: 0,
             use_target: None,
             menu_extra: None,
+            pending_pod: None,
+            pod_menu: None,
             entities: HashMap::new(),
             lerps: HashMap::new(),
             cart_lerps: HashMap::new(),
@@ -3158,7 +3162,12 @@ impl Game<'_> {
         if container != 0 && menu == "inventory" {
             return;
         }
-        let Some(internal) = Self::menu_slot(&menu, slot) else {
+        let internal = if let Some(layout) = self.pod_layout() {
+            usize::try_from(slot).ok().and_then(|s| layout.internal(s))
+        } else {
+            Self::menu_slot(&menu, slot)
+        };
+        let Some(internal) = internal else {
             return;
         };
         if internal == 200 {
@@ -3254,6 +3263,12 @@ impl Game<'_> {
             }
             // A mod menu type's block and its mod's bytes, just before the
             // menu's `OpenScreen`.
+            C::CustomPayload(p) if p.channel == "pod:menu" => {
+                match horizon_client::net::pod::Menu::decode(&p.data) {
+                    Ok(layout) => self.remote_pod_menu(layout),
+                    Err(e) => log::warn!("Ignoring malformed pod:menu: {e}"),
+                }
+            }
             C::CustomPayload(p) if p.channel == horizon_protocol::menu_extra::CHANNEL => {
                 match horizon_protocol::menu_extra::decode(&p.data) {
                     Ok(extra) => {
@@ -4652,6 +4667,12 @@ impl Game<'_> {
                 }
             }
             C::ContainerSetContent(p) => {
+                let pending = self.remote.as_mut().and_then(|r| r.pending_pod.take());
+                if let Some(pending) = pending {
+                    self.send(S::ContainerClose(play::ContainerClose {
+                        container: pending.container,
+                    }));
+                }
                 self.remote_menu_state(p.container, p.state);
                 for (slot, item) in p.items.iter().enumerate() {
                     let stack = self.to_stack(item);
@@ -9534,7 +9555,10 @@ impl Game<'_> {
         for &(slot, button, input) in ops {
             let slot = match slot {
                 None => -999,
-                Some(internal) => match Self::menu_slot_index(&menu, internal) {
+                Some(internal) => match self.pod_layout().map_or_else(
+                    || Self::menu_slot_index(&menu, internal),
+                    |l| l.index(internal),
+                ) {
                     Some(s) => s as i16,
                     None => return false,
                 },
@@ -9788,11 +9812,50 @@ impl Game<'_> {
             m.session.villager = p.show_progress;
         }
     }
+    pub(super) fn pod_layout(&self) -> Option<&horizon_client::net::pod::Menu> {
+        let r = self.remote.as_ref()?;
+        let layout = r.pod_menu.as_ref()?;
+        (self.pod_screen_shown() && r.menu.as_ref()?.0 == layout.sync_id).then_some(layout)
+    }
+    fn remote_pod_menu(&mut self, layout: horizon_client::net::pod::Menu) {
+        let Some(r) = self.remote.as_mut() else {
+            return;
+        };
+        if !layout.accepts(
+            r.pending_pod.as_ref().map(|p| p.container),
+            r.menu.as_ref().map(|(id, name)| (*id, name.as_str())),
+        ) {
+            return;
+        }
+        let title = if !layout.title.is_empty() {
+            horizon_client::scoreboard::comp_text(
+                &serde_json::from_str(&layout.title).unwrap_or_default(),
+            )
+            .resolve_legacy()
+        } else if let Some(p) = r.pending_pod.as_ref() {
+            menu_title(&p.title)
+        } else {
+            r.menu_title
+                .clone()
+                .unwrap_or_else(|| horizon_client::text::Text::tr(&layout.menu, &[]))
+        };
+        r.pending_pod = None;
+        r.menu = Some((layout.sync_id, layout.menu.clone()));
+        r.menu_title = Some(title);
+        self.open_pod_screen(&layout);
+        self.remote.as_mut().unwrap().pod_menu = Some(layout);
+        self.screen = Screen::Inventory;
+        self.capture(false);
+    }
     /// ClientboundOpenScreenPacket for the menus Horizon draws.
     fn remote_open_screen(&mut self, p: play::OpenScreen) {
         // A new RecipeBookComponent owns fresh ghost slots and an overlay,
         // even when the server replaces a menu without a close packet.
         self.recipe_ui.reset_screen();
+        if let Some(r) = self.remote.as_mut() {
+            r.pending_pod = None;
+            r.pod_menu = None;
+        }
         let menu = self
             .remote
             .as_ref()
@@ -9893,16 +9956,10 @@ impl Game<'_> {
                 .into(),
             ))),
             _ => {
-                // Unsupported menu: tell the server we closed it.
-                self.send(S::ContainerClose(play::ContainerClose {
-                    container: p.container,
-                }));
-                self.chat_line(
-                    horizon_client::text::Text::literal(format!(
-                        "(Horizon cannot show {menu} screens yet)"
-                    )),
-                    horizon_client::chat::ChatSource::Client,
-                );
+                // The live layout precedes contents; do not acknowledge a close yet.
+                if let Some(r) = self.remote.as_mut() {
+                    r.pending_pod = Some(p);
+                }
                 return;
             }
         };
@@ -9936,9 +9993,9 @@ impl Game<'_> {
                     r.menu = None;
                     r.menu_title = None;
                 }
-                self.send(S::ContainerClose(play::ContainerClose {
-                    container: p.container,
-                }));
+                if let Some(r) = self.remote.as_mut() {
+                    r.pending_pod = Some(p);
+                }
                 return;
             }
         }

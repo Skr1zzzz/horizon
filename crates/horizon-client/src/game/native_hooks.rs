@@ -1967,8 +1967,8 @@ fn shake_pose(shake: NativeShake) -> glam::Mat4 {
 /// the server sent them, and what the server sent before the menu opened
 /// (`horizon:menu_extra`), when it did.
 pub(super) struct OpenNativeScreen {
-    key: Pos,
-    window: i32,
+    pub(super) key: Pos,
+    pub(super) window: i32,
     block: String,
     screen: NativeScreen,
     data: Vec<i32>,
@@ -10134,6 +10134,43 @@ impl Game<'_> {
             });
         }
     }
+    pub(super) fn open_pod_screen(&mut self, layout: &horizon_client::net::pod::Menu) {
+        let key = (i32::MIN, 0, 0);
+        self.world.block_entities.insert(
+            key,
+            BlockEntity::Mod(Box::new(
+                horizon_client::containers::ModBlockEntityFields {
+                    items: vec![None; layout.slots.len()],
+                    ..Default::default()
+                }
+                .into(),
+            )),
+        );
+        self.container = Some(key);
+        self.mod_screen = Some(OpenNativeScreen {
+            key,
+            window: layout.sync_id,
+            block: "pod:menu".into(),
+            screen: {
+                let l = layout.layout();
+                NativeScreen {
+                    width: l.width,
+                    height: l.height,
+                    slots: l.slots,
+                    inventory_x: 8.0,
+                    inventory_y: l.height,
+                    own_labels: false,
+                    own_background: false,
+                }
+            },
+            data: vec![0; layout.data_slots],
+            extra: None,
+        });
+    }
+    pub(super) fn pod_screen_shown(&self) -> bool {
+        self.shown_native_screen()
+            .is_some_and(|s| s.block == "pod:menu")
+    }
     /// The mod screen showing now, if any.
     fn shown_native_screen(&self) -> Option<&OpenNativeScreen> {
         self.mod_screen
@@ -10219,7 +10256,12 @@ impl Game<'_> {
                 rgba(198, 198, 198, 255),
             );
             let container = self.native_screen_slots().unwrap_or_default();
-            for i in (0..36).chain(container) {
+            let slots = if self.pod_screen_shown() {
+                self.slots()
+            } else {
+                (0..36).chain(container).collect()
+            };
+            for i in slots {
                 let (x, y) = self.slot_position(i);
                 let (x, y) = (ox + x - 1.0, oy + y - 1.0);
                 batch.fill(atlas, x, y, 18.0, 18.0, rgba(55, 55, 55, 255));
