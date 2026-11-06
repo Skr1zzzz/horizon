@@ -23,6 +23,7 @@ pub mod registry;
 mod resolver;
 pub use resolver::server_redirect;
 pub mod rsa;
+pub mod rsnap;
 pub mod secure_chat;
 pub mod servers;
 pub mod text;
