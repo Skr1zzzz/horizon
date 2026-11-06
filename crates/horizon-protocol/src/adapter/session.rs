@@ -249,6 +249,7 @@ mod tests {
         let profile = Arc::new(Profile {
             states: vec![0, 70000],
             items: vec![0, 6000, 1012],
+            registries: Default::default(),
             local_states: 70001,
             server_items: [(0, 0), (6000, 1), (1012, 2)].into(),
             server_states: [(0, 0), (70000, 1)].into(),

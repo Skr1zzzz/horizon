@@ -125,14 +125,13 @@ pub fn clientbound(
         (State::Play, cb::ADD_ENTITY) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::AddEntity(e) = &mut p {
-                let falling_block = ids.entity_type.down(packet_ids_entity::FALLING_BLOCK);
-                if Some(e.kind) == falling_block {
+                let kind = ids::up_registry(ids, "minecraft:entity_type", e.kind);
+                if kind < 0 {
+                    return Ok(None);
+                }
+                if kind == packet_ids_entity::FALLING_BLOCK {
                     e.data = ids::up_state(ids, e.data);
                 }
-                // An unknown server type may name an unrelated mob in the pinned registry.
-                let Some(kind) = ids.entity_type.up(e.kind) else {
-                    return Ok(None);
-                };
                 e.kind = kind;
             }
             strip_id(p.encode())
@@ -141,9 +140,10 @@ pub fn clientbound(
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::BlockEntityData(b) = &mut p {
                 // Match the chunk path: the block still draws without an unsupported block entity.
-                let Some(kind) = ids.block_entity_type.up(b.kind) else {
+                let kind = ids::up_registry(ids, "minecraft:block_entity_type", b.kind);
+                if kind < 0 {
                     return Ok(None);
-                };
+                }
                 b.kind = kind;
             }
             strip_id(p.encode())
@@ -175,12 +175,28 @@ pub fn clientbound(
             }
             strip_id(p.encode())
         }
+        (State::Play, cb::OPEN_SCREEN | cb::UPDATE_MOB_EFFECT | cb::REMOVE_MOB_EFFECT) => {
+            let mut p = decode_play(ids, id, payload)?;
+            match &mut p {
+                play::Clientbound::OpenScreen(p) => {
+                    p.menu = ids::up_registry(ids, "minecraft:menu", p.menu)
+                }
+                play::Clientbound::UpdateMobEffect(p) => {
+                    p.effect = ids::up_registry(ids, "minecraft:mob_effect", p.effect)
+                }
+                play::Clientbound::RemoveMobEffect(p) => {
+                    p.effect = ids::up_registry(ids, "minecraft:mob_effect", p.effect)
+                }
+                _ => unreachable!(),
+            }
+            strip_id(p.encode())
+        }
         (State::Play, cb::UPDATE_ATTRIBUTES) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::UpdateAttributes(a) = &mut p {
                 // An attribute the pinned version lacks can't be: 26.3 only added some.
                 for v in &mut a.values {
-                    v.attribute = ids.attribute.up(v.attribute).unwrap_or(v.attribute);
+                    v.attribute = ids::up_registry(ids, "minecraft:attribute", v.attribute);
                 }
             }
             strip_id(p.encode())
@@ -299,7 +315,19 @@ const V26_2_SWING: i32 = 63;
 /// A play packet decoded with the older version's ids renumbered as they are read.
 fn decode_play(ids: &'static Ids, id: i32, payload: &[u8]) -> Result<play::Clientbound> {
     let _up = ids::renumbering(ids, Way::Up);
-    play::Clientbound::decode(id, payload)
+    let mut packet = play::Clientbound::decode(id, payload)?;
+    if let play::Clientbound::SetEntityData(data) = &mut packet {
+        for (_, serializer, value) in &mut data.values {
+            if *serializer == crate::entity_data::serializer::VILLAGER_DATA
+                && let crate::entity_data::Value::Ids(values) = value
+                && values.len() >= 2
+            {
+                values[0] = ids::registry("minecraft:villager_type", values[0]);
+                values[1] = ids::registry("minecraft:villager_profession", values[1]);
+            }
+        }
+    }
+    Ok(packet)
 }
 
 /// The packet's payload once its registry ids are renumbered by decoding it.
@@ -318,9 +346,13 @@ fn strip_id(body: Vec<u8>) -> Vec<u8> {
 
 fn tags(ids: &Ids, registries: &mut [configuration::RegistryTags]) {
     for registry in registries {
-        let remap = ids.by_registry(&registry.registry);
         for tag in &mut registry.tags {
-            tag.ids = tag.ids.iter().filter_map(|&id| remap.up(id)).collect();
+            tag.ids = tag
+                .ids
+                .iter()
+                .map(|&id| ids::up_registry(ids, &registry.registry, id))
+                .filter(|&id| id >= 0)
+                .collect();
         }
     }
 }
@@ -390,12 +422,9 @@ fn chunk(ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
     let buffer = r.byte_array(r.remaining())?;
     let mut block_entities = <crate::buf::List<crate::chunk::BlockEntityInfo>>::read(&mut r)?;
     // A block entity type the pinned version dropped (26.1's bed) goes; the block still draws.
-    block_entities.retain_mut(|b| match ids.block_entity_type.up(b.kind) {
-        Some(kind) => {
-            b.kind = kind;
-            true
-        }
-        None => false,
+    block_entities.retain_mut(|b| {
+        b.kind = ids::up_registry(ids, "minecraft:block_entity_type", b.kind);
+        b.kind >= 0
     });
     let light = light(&mut r)?;
     let (old_bits, new_bits) = ids.state_bits();
@@ -729,7 +758,8 @@ mod v1_21_11 {
                 r.uuid()?;
                 let kind = r.varint()?;
                 if let Some(ids) = session.version.ids()
-                    && let Some(kind) = ids.entity_type.up(kind)
+                    && let kind = ids::up_registry(ids, "minecraft:entity_type", kind)
+                    && kind >= 0
                 {
                     session.kinds.lock().unwrap().insert(entity, kind);
                 }
@@ -1089,6 +1119,7 @@ mod tests {
             let _profile = ids::profile(Some(Arc::new(super::super::pod::Profile {
                 states,
                 items: vec![0, 42],
+                registries: Default::default(),
                 local_states: 80000,
                 server_items: Default::default(),
                 server_states: Default::default(),

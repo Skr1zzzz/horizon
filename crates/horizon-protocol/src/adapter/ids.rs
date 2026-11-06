@@ -199,6 +199,41 @@ fn apply(id: i32, pick: impl Fn(&Ids) -> Remap) -> i32 {
     }
 }
 
+/// Map a server registry id even in translation paths outside the reader context.
+pub fn up_registry(ids: &Ids, registry: &str, id: i32) -> i32 {
+    PROFILE.with(|p| {
+        if let Some(table) = p.borrow().as_ref().and_then(|p| p.registries.get(registry)) {
+            return usize::try_from(id)
+                .ok()
+                .and_then(|i| table.get(i))
+                .copied()
+                .unwrap_or(-1);
+        }
+        ids.by_registry(registry).up(id).unwrap_or(-1)
+    })
+}
+
+/// A registry id read under the active adapter; pinned reads must not map twice.
+pub fn registry(registry: &str, id: i32) -> i32 {
+    match ACTIVE.get() {
+        Some((ids, Way::Up)) => up_registry(ids, registry, id),
+        Some((ids, Way::Down)) => PROFILE.with(|p| {
+            if let Some(table) = p.borrow().as_ref().and_then(|p| p.registries.get(registry)) {
+                return if id < 0 {
+                    -1
+                } else {
+                    table
+                        .iter()
+                        .position(|&local| local == id)
+                        .map_or(-1, |raw| raw as i32)
+                };
+            }
+            ids.by_registry(registry).down(id).unwrap_or(-1)
+        }),
+        None => id,
+    }
+}
+
 /// An item id as read or about to be written on this thread.
 pub fn item(id: i32) -> i32 {
     if reading_older()
@@ -230,7 +265,7 @@ pub fn item(id: i32) -> i32 {
 }
 /// A data component type id as read or about to be written on this thread.
 pub fn component(id: i32) -> i32 {
-    apply(id, |ids| ids.data_component_type)
+    registry("minecraft:data_component_type", id)
 }
 /// The name of the data component an older server sent as `id` (its own number) that the pinned version
 /// no longer has, while such a server's packet is read on this thread. The readers read its value past and
@@ -247,7 +282,7 @@ pub fn dropped_component(id: i32) -> Option<&'static str> {
 }
 /// A particle type id as read or about to be written on this thread.
 pub fn particle(id: i32) -> i32 {
-    apply(id, |ids| ids.particle_type)
+    registry("minecraft:particle_type", id)
 }
 /// A block state id as read or about to be written on this thread.
 pub fn block_state(id: i32) -> i32 {
@@ -267,11 +302,11 @@ pub fn block_state(id: i32) -> i32 {
 }
 /// An entity type id as read or about to be written on this thread.
 pub fn entity_type(id: i32) -> i32 {
-    apply(id, |ids| ids.entity_type)
+    registry("minecraft:entity_type", id)
 }
 /// A sound event id as read or about to be written on this thread.
 pub fn sound_event(id: i32) -> i32 {
-    apply(id, |ids| ids.sound_event)
+    registry("minecraft:sound_event", id)
 }
 /// An entity data serializer id as read on this thread.
 pub fn entity_data_serializer(id: i32) -> i32 {

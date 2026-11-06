@@ -63,6 +63,63 @@ mod tests {
     }
 
     #[test]
+    fn pod_registries_map_known_mod_names_and_reject_unknowns() {
+        use super::super::ids::{self, Way};
+        use crate::{
+            buf::{Codec, Writer},
+            packets::play,
+        };
+        let blocks = BlockRegistry::from_facts_json(&br#"{"states":[[0,true,false,0,{"id":"minecraft:air"}]],"defaults":{"minecraft:air":0}}"#[..]).unwrap();
+        let builtin = Builtin::parse(r#"{"minecraft:sound_event":{"entries":{"pod:chime":{"protocol_id":2000}}},"minecraft:menu":{"entries":{"pod:machine":{"protocol_id":40}}}}"#).unwrap();
+        let snapshot = Snapshot {
+            protocol: 774,
+            blocks: vec![],
+            states: vec![],
+            shapes: vec![],
+            boxes: vec![],
+            registries: vec![
+                (
+                    "minecraft:sound_event".into(),
+                    vec!["pod:chime".into(), "missing:sound".into()],
+                ),
+                (
+                    "minecraft:menu".into(),
+                    vec!["pod:machine".into(), "missing:menu".into()],
+                ),
+            ],
+        };
+        let _profile = ids::profile(Some(Arc::new(Profile::build(&snapshot, &blocks, &builtin))));
+        let tables = super::super::ServerVersion::V1_21_11.ids().unwrap();
+        assert_eq!(ids::up_registry(tables, "minecraft:menu", 0), 40);
+        assert_eq!(ids::up_registry(tables, "minecraft:menu", 1), -1);
+        let _up = ids::renumbering(tables, Way::Up);
+        assert_eq!(ids::sound_event(0), 2000);
+        assert_eq!(ids::sound_event(1), -1);
+        assert_eq!(ids::sound_event(2), -1);
+        let mut unknown = Writer::new();
+        unknown.varint(2); // Server sound 1, unknown locally; following bytes must never become inline.
+        unknown.bytes(&[0; 40]);
+        let error = play::Sound::read(&mut crate::buf::Reader::new(&unknown.data)).unwrap_err();
+        assert!(error.to_string().contains("unknown sound event holder"));
+        let sound = play::Sound {
+            sound: (-1, Some(("pod:inline".into(), Some(12.0)))),
+            source: 0,
+            x: 1,
+            y: 2,
+            z: 3,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: 7,
+        };
+        let mut sent = Writer::new();
+        play::Sound::write(&sound, &mut sent);
+        let read = play::Sound::read(&mut crate::buf::Reader::new(&sent.data)).unwrap();
+        let mut out = Writer::new();
+        play::Sound::write(&read, &mut out);
+        assert_eq!(out.data, sent.data);
+    }
+
+    #[test]
     fn reverse_items_only_include_resolved_names() {
         let blocks = BlockRegistry::from_facts_json(&br#"{"states":[[0,true,false,0,{"id":"minecraft:air"}]],"defaults":{"minecraft:air":0}}"#[..]).unwrap();
         let builtin = Builtin::parse(r#"{"minecraft:item":{"entries":{"minecraft:air":{"protocol_id":0},"minecraft:stone":{"protocol_id":1},"pod:lamp":{"protocol_id":2}}}}"#).unwrap();
@@ -102,6 +159,7 @@ mod tests {
 pub struct Profile {
     pub states: Vec<i32>,
     pub items: Vec<i32>,
+    pub registries: BTreeMap<String, Vec<i32>>,
     pub local_states: u32,
     pub server_items: BTreeMap<i32, i32>,
     pub server_states: BTreeMap<i32, i32>,
@@ -184,9 +242,43 @@ impl Profile {
                     .collect()
             })
             .unwrap_or_default();
+        // RSNAP order is authoritative, including reordered vanilla and appended mod entries.
+        let registries = snapshot
+            .registries
+            .iter()
+            .filter(|(name, _)| {
+                matches!(
+                    name.as_str(),
+                    "minecraft:block"
+                        | "minecraft:entity_type"
+                        | "minecraft:fluid"
+                        | "minecraft:game_event"
+                        | "minecraft:particle_type"
+                        | "minecraft:sound_event"
+                        | "minecraft:mob_effect"
+                        | "minecraft:attribute"
+                        | "minecraft:block_entity_type"
+                        | "minecraft:menu"
+                        | "minecraft:villager_type"
+                        | "minecraft:villager_profession"
+                        | "minecraft:data_component_type"
+                )
+            })
+            .map(|(name, entries)| {
+                let local = builtin.get(name);
+                (
+                    name.clone(),
+                    entries
+                        .iter()
+                        .map(|entry| local.and_then(|ids| ids.id(entry)).unwrap_or(-1))
+                        .collect(),
+                )
+            })
+            .collect();
         Self {
             states,
             items,
+            registries,
             local_states: blocks.len() as u32,
             server_items,
             server_states,
