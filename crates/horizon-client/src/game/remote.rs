@@ -1955,6 +1955,12 @@ impl Game<'_> {
                 }
             };
             match event {
+                Event::PodEnabled(ids) => {
+                    for id in ids {
+                        self.settings.mods.disabled.remove(&id);
+                        self.settings.mods.enabled.insert(id);
+                    }
+                }
                 Event::Status(s) => {
                     if let Some(r) = self.remote.as_mut() {
                         r.status = s;

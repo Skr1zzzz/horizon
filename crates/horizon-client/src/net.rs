@@ -6,6 +6,8 @@
 //! Online-mode servers need the Microsoft account the launcher signed in
 //! (crate::auth): the login joins the server through the session service and
 //! encrypts the connection (ClientHandshakePacketListenerImpl.handleHello).
+mod pod;
+
 use crate::auth::AuthSession;
 use crate::studio::{Metadata, RecorderStatus, StudioRecorder};
 use horizon_protocol::{
@@ -42,6 +44,8 @@ pub type Cookies = Arc<Mutex<HashMap<String, Vec<u8>>>>;
 pub enum Event {
     /// Progress text for the connecting screen.
     Status(String),
+    /// Generated startup content must survive the game thread's later settings saves.
+    PodEnabled(Vec<String>),
     /// The server's `minecraft:brand` custom payload.
     Brand(String),
     /// The server runs mods' quiet commands (`horizon_protocol::quiet`).
@@ -1012,6 +1016,8 @@ fn configure(
         && std::env::var_os("HORIZON_POD").is_some_and(|v| v == "1")
         && std::env::var_os("HORIZON_POD_RSNAP").is_none();
     let mut pod = horizon_protocol::registry::fabric::PodParts::default();
+    let mut asset_parts = horizon_protocol::registry::fabric::PodParts::default();
+    let (mut snapshot, mut assets) = (None, None);
     let mut fabric =
         horizon_protocol::registry::fabric::Handshake::new(fabric_enabled).with_pod(pod_enabled);
     let reply = |p: cfg::Serverbound| -> Result<(), Reason> {
@@ -1044,8 +1050,22 @@ fn configure(
                     reader
                         .install_pod_snapshot(&bytes, resources)
                         .map_err(|e| Reason::plain(e.to_string()))?;
+                    snapshot = Some(bytes);
                     reply(cfg::Serverbound::CustomPayload(cfg::CustomPayload {
                         channel: "pod:rsnap/ack".into(),
+                        data: Vec::new(),
+                    }))?;
+                }
+            }
+            cfg::Clientbound::CustomPayload(p) if pod_enabled && p.channel == "pod:assets/part" => {
+                if let Some(bytes) = asset_parts
+                    .receive_assets(&p.data)
+                    .map_err(|e| Reason::plain(e.to_string()))?
+                {
+                    pod::validate_assets(&bytes).map_err(|e| Reason::plain(e.to_string()))?;
+                    assets = Some(bytes);
+                    reply(cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                        channel: "pod:assets/ack".into(),
                         data: Vec::new(),
                     }))?;
                 }
@@ -1143,6 +1163,22 @@ fn configure(
             }
             cfg::Clientbound::Disconnect(d) => return Err(Reason::tag(&d.reason, lang)),
             cfg::Clientbound::FinishConfiguration(_) => {
+                if asset_parts.pending() {
+                    return Err(Reason::plain("PoD: incomplete assets"));
+                }
+                if let (Some(snapshot), Some(assets)) = (&snapshot, &assets) {
+                    let dir = std::env::current_dir().map_err(|e| Reason::plain(e.to_string()))?;
+                    let messages = pod::install(snapshot, assets, &dir)
+                        .map_err(|e| Reason::plain(e.to_string()))?;
+                    if !messages.is_empty() {
+                        let enabled = crate::mod_list::ModList::load(&dir)
+                            .enabled
+                            .into_iter()
+                            .collect();
+                        let _ = send.send(Event::PodEnabled(enabled));
+                        return Err(Reason::plain(messages.join("\n")));
+                    }
+                }
                 if pod.pending() {
                     return Err(Reason::plain(
                         "PoD: configuration finished before RSNAP was complete",

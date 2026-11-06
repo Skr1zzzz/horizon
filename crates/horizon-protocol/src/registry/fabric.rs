@@ -186,7 +186,7 @@ impl Handshake {
                 self.registered = true;
                 let mut receivers = RECEIVERS.to_vec();
                 if self.pod {
-                    receivers.extend_from_slice(b"\0pod:rsnap/part");
+                    receivers.extend_from_slice(b"\0pod:rsnap/part\0pod:assets/part");
                 }
                 ("minecraft:register", receivers)
             }
@@ -247,7 +247,13 @@ impl PodParts {
         self.next != 0 && !self.complete
     }
     pub fn receive(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>> {
-        let invalid = || Error::new("PoD: invalid, out-of-order or oversized RSNAP part");
+        self.receive_bounded(data, 64 << 20)
+    }
+    pub fn receive_assets(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.receive_bounded(data, 32 << 20)
+    }
+    fn receive_bounded(&mut self, data: &[u8], limit: usize) -> Result<Option<Vec<u8>>> {
+        let invalid = || Error::new("PoD: invalid, out-of-order or oversized part");
         if data.len() < 12 || self.complete {
             return Err(invalid());
         }
@@ -255,7 +261,7 @@ impl PodParts {
             |offset| u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         let (index, count, total) = (field(0), field(4), field(8));
         if total == 0
-            || total > 64 << 20
+            || total > limit
             || count != total.div_ceil(32768)
             || index != self.next
             || index >= count
@@ -340,6 +346,34 @@ mod tests {
         assert_eq!(bytes, vec![42; 32769]);
         assert!(!state.pending());
         assert!(state.receive(&pod_part(1, 2, 32769, 1)).is_err());
+    }
+    #[test]
+    fn assets_reassembly_budget_and_order() {
+        let mut state = PodParts::default();
+        assert!(
+            state
+                .receive_assets(&pod_part(0, 2, 32769, 32768))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .receive_assets(&pod_part(1, 2, 32769, 1))
+                .unwrap()
+                .unwrap(),
+            vec![42; 32769]
+        );
+        assert!(state.receive_assets(&pod_part(1, 2, 32769, 1)).is_err());
+        assert!(
+            PodParts::default()
+                .receive_assets(&pod_part(0, 1025, (32 << 20) + 1, 32768))
+                .is_err()
+        );
+        assert!(
+            PodParts::default()
+                .receive_assets(&pod_part(1, 2, 32769, 1))
+                .is_err()
+        );
     }
     #[test]
     fn pod_rejects_invalid_parts() {
