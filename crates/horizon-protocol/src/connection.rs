@@ -470,6 +470,25 @@ enum Next {
     Partial(usize),
 }
 impl ConnReader {
+    /// Install before acknowledging the configuration task, so queued play packets use it.
+    pub fn install_pod_snapshot(&self, bytes: &[u8], resources: &std::path::Path) -> Result<()> {
+        let session = self
+            .adapter
+            .as_ref()
+            .filter(|s| s.version == crate::adapter::ServerVersion::V1_21_11)
+            .ok_or_else(|| Error::new("PoD: live RSNAP requires a 1.21.11 adapter"))?;
+        let profile = crate::adapter::pod::Profile::from_bytes(bytes, resources)?;
+        let states = profile.states.len();
+        session
+            .profile
+            .set(profile)
+            .map_err(|_| Error::new("PoD: snapshot already installed"))?;
+        log::info!(
+            "PoD: received RSNAP ({} bytes) — mapped {states} server states",
+            bytes.len()
+        );
+        Ok(())
+    }
     /// Read exactly `len` bytes as they are, with no framing.
     pub fn read_raw(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut out = vec![0u8; len];

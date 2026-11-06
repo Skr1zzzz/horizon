@@ -141,6 +141,7 @@ pub fn decode(data: &[u8]) -> Result<RegistryMap> {
 pub struct Handshake {
     enabled: bool,
     registered: bool,
+    pod: bool,
     server_channels: BTreeSet<String>,
     map: Option<std::sync::Arc<RegistryMap>>,
 }
@@ -150,6 +151,10 @@ impl Handshake {
             enabled,
             ..Self::default()
         }
+    }
+    pub fn with_pod(mut self, enabled: bool) -> Self {
+        self.pod = enabled;
+        self
     }
     pub fn into_map(self) -> Option<std::sync::Arc<RegistryMap>> {
         self.map
@@ -179,7 +184,11 @@ impl Handshake {
                     return Ok(None);
                 }
                 self.registered = true;
-                ("minecraft:register", RECEIVERS.to_vec())
+                let mut receivers = RECEIVERS.to_vec();
+                if self.pod {
+                    receivers.extend_from_slice(b"\0pod:rsnap/part");
+                }
+                ("minecraft:register", receivers)
             }
             "fabric:split" => {
                 return Err(Error::new("Fabric split payloads are not supported yet"));
@@ -224,6 +233,49 @@ impl Handshake {
     }
 }
 
+/// Ordered transport state, separate from container validation and profile installation.
+#[derive(Default)]
+pub struct PodParts {
+    next: usize,
+    count: usize,
+    total: usize,
+    bytes: Vec<u8>,
+    complete: bool,
+}
+impl PodParts {
+    pub fn pending(&self) -> bool {
+        self.next != 0 && !self.complete
+    }
+    pub fn receive(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>> {
+        let invalid = || Error::new("PoD: invalid, out-of-order or oversized RSNAP part");
+        if data.len() < 12 || self.complete {
+            return Err(invalid());
+        }
+        let field =
+            |offset| u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let (index, count, total) = (field(0), field(4), field(8));
+        if total == 0
+            || total > 64 << 20
+            || count != total.div_ceil(32768)
+            || index != self.next
+            || index >= count
+            || (index != 0 && (count != self.count || total != self.total))
+        {
+            return Err(invalid());
+        }
+        let expected = (total - index * 32768).min(32768);
+        if data.len() - 12 != expected {
+            return Err(invalid());
+        }
+        self.count = count;
+        self.total = total;
+        self.bytes.extend_from_slice(&data[12..]);
+        self.next += 1;
+        self.complete = self.next == count;
+        Ok(self.complete.then(|| std::mem::take(&mut self.bytes)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +297,71 @@ mod tests {
     }
     fn fixture() -> Vec<u8> {
         b"\x01\x00\x01\x05block\x00\x02\x00\x01\x00\x01\x03air\x07podtest\x01\x04\x02\x04lamp\x08lamp_alt".to_vec()
+    }
+    fn pod_part(index: u32, count: u32, total: u32, size: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for n in [index, count, total] {
+            bytes.extend_from_slice(&n.to_be_bytes());
+        }
+        bytes.resize(12 + size, 42);
+        bytes
+    }
+    #[test]
+    fn pod_registration_flag() {
+        for (fabric, pod, expected) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+        ] {
+            let mut state = Handshake::new(fabric).with_pod(pod);
+            let reply = state
+                .receive(&payload("minecraft:register", b"pod:rsnap/ack"))
+                .unwrap();
+            let advertised = match reply {
+                Some(cfg::Serverbound::CustomPayload(p)) => {
+                    registration(&p.data).unwrap().contains("pod:rsnap/part")
+                }
+                _ => false,
+            };
+            assert_eq!(advertised, expected);
+        }
+    }
+    #[test]
+    fn pod_reassembly_and_single_completion() {
+        let mut state = PodParts::default();
+        assert!(
+            state
+                .receive(&pod_part(0, 2, 32769, 32768))
+                .unwrap()
+                .is_none()
+        );
+        assert!(state.pending());
+        let bytes = state.receive(&pod_part(1, 2, 32769, 1)).unwrap().unwrap();
+        assert_eq!(bytes, vec![42; 32769]);
+        assert!(!state.pending());
+        assert!(state.receive(&pod_part(1, 2, 32769, 1)).is_err());
+    }
+    #[test]
+    fn pod_rejects_invalid_parts() {
+        for bytes in [
+            pod_part(1, 2, 32769, 1),
+            pod_part(0, 3, 32769, 32768),
+            pod_part(0, 1, 1, 2),
+            pod_part(0, 2049, (64 << 20) + 1, 1),
+            pod_part(0, 0, 0, 0),
+            vec![0; 11],
+        ] {
+            assert!(PodParts::default().receive(&bytes).is_err());
+        }
+        for bytes in [
+            pod_part(1, 3, 65537, 32768),
+            pod_part(0, 2, 32769, 32768),
+            pod_part(1, 2, 32770, 2),
+        ] {
+            let mut state = PodParts::default();
+            state.receive(&pod_part(0, 2, 32769, 32768)).unwrap();
+            assert!(state.receive(&bytes).is_err());
+        }
     }
     #[test]
     fn fabric_registration_order_and_flag() {

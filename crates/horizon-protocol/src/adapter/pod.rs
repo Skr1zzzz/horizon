@@ -48,7 +48,10 @@ impl Profile {
         std::fs::File::open(path)?
             .take((64 << 20) + 1)
             .read_to_end(&mut bytes)?;
-        let snapshot = Snapshot::parse(&bytes)?;
+        Self::from_bytes(&bytes, resources)
+    }
+    pub fn from_bytes(bytes: &[u8], resources: &Path) -> Result<Arc<Self>> {
+        let snapshot = Snapshot::parse(bytes)?;
         if snapshot.protocol != 774 {
             return Err(Error::new("PoD snapshot protocol is not 774"));
         }

@@ -1006,9 +1006,14 @@ fn configure(
 ) -> Result<Dynamic, Reason> {
     let mut registries = Dynamic::default();
     let mut content_verified = false;
-    let mut fabric = horizon_protocol::registry::fabric::Handshake::new(
-        std::env::var_os("HORIZON_FABRIC_SYNC").is_some_and(|v| v == "1"),
-    );
+    let fabric_enabled = std::env::var_os("HORIZON_FABRIC_SYNC").is_some_and(|v| v == "1");
+    // The offline override must not opt into a server task it will not consume.
+    let pod_enabled = fabric_enabled
+        && std::env::var_os("HORIZON_POD").is_some_and(|v| v == "1")
+        && std::env::var_os("HORIZON_POD_RSNAP").is_none();
+    let mut pod = horizon_protocol::registry::fabric::PodParts::default();
+    let mut fabric =
+        horizon_protocol::registry::fabric::Handshake::new(fabric_enabled).with_pod(pod_enabled);
     let reply = |p: cfg::Serverbound| -> Result<(), Reason> {
         match writer.lock().unwrap().as_mut() {
             Some(w) => w
@@ -1031,6 +1036,20 @@ fn configure(
             continue;
         }
         match packet {
+            cfg::Clientbound::CustomPayload(p) if pod_enabled && p.channel == "pod:rsnap/part" => {
+                if let Some(bytes) = pod
+                    .receive(&p.data)
+                    .map_err(|e| Reason::plain(e.to_string()))?
+                {
+                    reader
+                        .install_pod_snapshot(&bytes, resources)
+                        .map_err(|e| Reason::plain(e.to_string()))?;
+                    reply(cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                        channel: "pod:rsnap/ack".into(),
+                        data: Vec::new(),
+                    }))?;
+                }
+            }
             cfg::Clientbound::KeepAlive(k) => reply(cfg::Serverbound::KeepAlive(k))?,
             cfg::Clientbound::CustomPayload(p) if p.channel == crate::content_identity::CHANNEL => {
                 let hash = crate::content_identity::identity(resources)
@@ -1124,6 +1143,11 @@ fn configure(
             }
             cfg::Clientbound::Disconnect(d) => return Err(Reason::tag(&d.reason, lang)),
             cfg::Clientbound::FinishConfiguration(_) => {
+                if pod.pending() {
+                    return Err(Reason::plain(
+                        "PoD: configuration finished before RSNAP was complete",
+                    ));
+                }
                 registries.custom_components = content_verified;
                 registries.fabric = fabric.into_map();
                 let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
