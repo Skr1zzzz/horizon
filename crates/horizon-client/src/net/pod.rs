@@ -12,6 +12,7 @@ type Result<T> = crate::Result<T>;
 type Files = BTreeMap<String, Vec<u8>>;
 const FILE: usize = 8 << 20;
 const OCCLUDES: u32 = 1 << 8;
+const FULL_CUBE: u32 = 1 << 3;
 
 fn safe(path: &str) -> bool {
     !path.contains(['\\', ':', '\0']) && path.split('/').all(|p| !matches!(p, "" | "." | ".."))
@@ -107,7 +108,7 @@ fn declaration(
         if s.flags & 3 != 0 || boxes.len() > 16 {
             return Err("PoD: unsupported collision".into());
         }
-        cube &= s.flags & 8 != 0 && boxes == [[0., 0., 0., 1., 1., 1.]];
+        cube &= s.flags & FULL_CUBE != 0 && boxes == [[0., 0., 0., 1., 1., 1.]];
         collisions.insert(p.values().cloned().collect::<Vec<_>>().join(","), boxes);
     }
     let count = domains
@@ -178,8 +179,11 @@ fn declaration(
     if lights.len() == 1 {
         out["properties"] = json!({"light":lights.first()});
     }
-    // Per-state occlusion cannot be expressed; extra neighbour faces are safer than holes.
-    if rows.iter().any(|s| s.flags & OCCLUDES == 0) {
+    // Vanilla culls a neighbour's face by this block's occlusion shape, which a template can't
+    // carry: only a full cube that occludes hides whole faces. Per-state occlusion cannot be
+    // expressed either; extra neighbour faces are safer than holes.
+    let hides = OCCLUDES | FULL_CUBE;
+    if rows.iter().any(|s| s.flags & hides != hides) {
         out["properties"]["occludes"] = json!(false);
     }
     Ok(out)
@@ -251,7 +255,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 4;
+const GENERATOR_REVISION: u32 = 5;
 
 fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
     for menu in meta["menus"].as_array().into_iter().flatten() {
@@ -733,7 +737,8 @@ mod tests {
     fn declaration_preserves_light_and_conservatively_disables_occlusion() {
         for (flags, expected) in [
             ([0, 0], Some(json!(false))),
-            ([OCCLUDES, OCCLUDES], None),
+            ([OCCLUDES | FULL_CUBE, OCCLUDES | FULL_CUBE], None),
+            ([OCCLUDES, OCCLUDES], Some(json!(false))),
             ([OCCLUDES, 0], Some(json!(false))),
         ] {
             let mut snap = declaration_snapshot();
