@@ -43,6 +43,7 @@ fn from_u8(v: u8) -> State {
 /// Shared by a connection's reader and writer.
 pub struct Session {
     pub version: ServerVersion,
+    pub profile: std::sync::OnceLock<std::sync::Arc<super::pod::Profile>>,
     reading: AtomicU8,
     writing: AtomicU8,
     /// Entity UUIDs by network id, for a server that is told which entity a spectator picked by its UUID.
@@ -60,6 +61,7 @@ impl Session {
     pub fn new(version: ServerVersion) -> Self {
         Self {
             version,
+            profile: Default::default(),
             reading: AtomicU8::new(0),
             writing: AtomicU8::new(0),
             uuids: Mutex::new(HashMap::new()),
@@ -84,6 +86,7 @@ impl Session {
     /// A packet the server sent, as the pinned version numbers and lays it out. `None` drops it: Horizon
     /// knows no such packet.
     pub fn clientbound(&self, id: i32, payload: Vec<u8>) -> Result<Option<(i32, Vec<u8>)>> {
+        let _profile = super::ids::profile(self.profile.get().cloned());
         let state = self.reading();
         let Some(pinned) = self.version.clientbound_id(state, id) else {
             return Ok(None);

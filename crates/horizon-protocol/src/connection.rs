@@ -385,6 +385,26 @@ impl Connection {
         self.reader.adapter = session.clone();
         self.writer.adapter = session;
     }
+    /// Load the opt-in snapshot against the startup resource root before login.
+    pub fn pod_snapshot(&self, resources: &std::path::Path) {
+        let Some(session) = self
+            .reader
+            .adapter
+            .as_ref()
+            .filter(|s| s.version == crate::adapter::ServerVersion::V1_21_11)
+        else {
+            return;
+        };
+        let Some(path) = std::env::var_os("HORIZON_POD_RSNAP") else {
+            return;
+        };
+        match crate::adapter::pod::Profile::load(std::path::Path::new(&path), resources) {
+            Ok(profile) => {
+                let _ = session.profile.set(profile);
+            }
+            Err(e) => log::warn!("PoD: ignoring snapshot: {e}"),
+        }
+    }
     /// Serve a client of `version` from now on (after its handshake): packets are renumbered both ways
     /// (crate::adapter::ClientSession). The pinned version needs nothing.
     pub fn serve_older(&mut self, version: crate::adapter::ServerVersion) {

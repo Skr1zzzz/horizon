@@ -2,7 +2,31 @@
 //! writes, and the per-thread context the item and particle readers consult while a packet from such a
 //! server is decoded (an id there decides how the bytes after it read, so it must be renumbered as it is
 //! read, not afterwards).
-use std::cell::Cell;
+use super::pod::Profile;
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
+
+thread_local! {
+    static PROFILE: RefCell<Option<Arc<Profile>>> = const { RefCell::new(None) };
+}
+pub struct ProfileGuard(Option<Arc<Profile>>);
+impl Drop for ProfileGuard {
+    fn drop(&mut self) {
+        PROFILE.with(|p| *p.borrow_mut() = self.0.take());
+    }
+}
+pub fn profile(profile: Option<Arc<Profile>>) -> ProfileGuard {
+    ProfileGuard(PROFILE.with(|p| p.replace(profile)))
+}
+pub fn up_state(ids: &Ids, id: i32) -> i32 {
+    PROFILE.with(|p| {
+        p.borrow()
+            .as_ref()
+            .map_or_else(|| ids.block_state.up(id).unwrap_or(0), |p| p.state(id))
+    })
+}
 
 /// How one registry's ids differ between an older version and the pinned one.
 #[derive(Clone, Copy, Debug)]
@@ -131,7 +155,11 @@ impl Ids {
     /// (`Mth.ceillog2` of the state count).
     pub fn state_bits(&self) -> (u8, u8) {
         let bits = |n: u32| (u32::BITS - n.saturating_sub(1).leading_zeros()) as u8;
-        (bits(self.states.0), bits(self.states.1))
+        PROFILE.with(|p| {
+            p.borrow()
+                .as_ref()
+                .map_or_else(|| (bits(self.states.0), bits(self.states.1)), |p| p.bits())
+        })
     }
 }
 
@@ -173,6 +201,22 @@ fn apply(id: i32, pick: impl Fn(&Ids) -> Remap) -> i32 {
 
 /// An item id as read or about to be written on this thread.
 pub fn item(id: i32) -> i32 {
+    if reading_older()
+        && let Some(mapped) = PROFILE.with(|p| {
+            p.borrow()
+                .as_ref()
+                .filter(|p| !p.items.is_empty())
+                .map(|p| {
+                    usize::try_from(id)
+                        .ok()
+                        .and_then(|i| p.items.get(i))
+                        .copied()
+                        .unwrap_or(0)
+                })
+        })
+    {
+        return mapped;
+    }
     apply(id, |ids| ids.item)
 }
 /// A data component type id as read or about to be written on this thread.
@@ -198,6 +242,9 @@ pub fn particle(id: i32) -> i32 {
 }
 /// A block state id as read or about to be written on this thread.
 pub fn block_state(id: i32) -> i32 {
+    if let Some((ids, Way::Up)) = ACTIVE.get() {
+        return up_state(ids, id);
+    }
     apply(id, |ids| ids.block_state)
 }
 /// An entity type id as read or about to be written on this thread.

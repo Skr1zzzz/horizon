@@ -127,7 +127,7 @@ pub fn clientbound(
             if let play::Clientbound::AddEntity(e) = &mut p {
                 let falling_block = ids.entity_type.down(packet_ids_entity::FALLING_BLOCK);
                 if Some(e.kind) == falling_block {
-                    e.data = ids.block_state.up(e.data).unwrap_or(0);
+                    e.data = ids::up_state(ids, e.data);
                 }
                 e.kind = ids.entity_type.up(e.kind).unwrap_or(e.kind);
             }
@@ -143,7 +143,7 @@ pub fn clientbound(
         (State::Play, cb::BLOCK_UPDATE) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::BlockUpdate(b) = &mut p {
-                b.state = ids.block_state.up(b.state).unwrap_or(0);
+                b.state = ids::up_state(ids, b.state);
             }
             strip_id(p.encode())
         }
@@ -151,7 +151,7 @@ pub fn clientbound(
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::SectionBlocksUpdate(s) = &mut p {
                 for change in &mut s.changes {
-                    let state = ids.block_state.up((*change >> 12) as i32).unwrap_or(0);
+                    let state = ids::up_state(ids, (*change >> 12) as i32);
                     *change = i64::from(state) << 12 | (*change & 0xfff);
                 }
             }
@@ -162,7 +162,7 @@ pub fn clientbound(
             if let play::Clientbound::LevelEvent(e) = &mut p {
                 // LevelEvent.PARTICLES_DESTROY_BLOCK and the brush's BLOCK_FINISHED_BRUSHING carry a state.
                 if matches!(e.kind, 2001 | 3008) {
-                    e.data = ids.block_state.up(e.data).unwrap_or(0);
+                    e.data = ids::up_state(ids, e.data);
                 }
             }
             strip_id(p.encode())
@@ -450,7 +450,7 @@ fn light_update(payload: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn renumber_states(ids: &Ids, states: &Paletted, new_bits: u8) -> Paletted {
-    let up = |id: i32| ids.block_state.up(id).unwrap_or(0);
+    let up = |id: i32| ids::up_state(ids, id);
     if !states.palette.is_empty() {
         // A palette: renumbering its entries is enough.
         let mut out = states.clone();
@@ -1069,6 +1069,51 @@ mod v26_1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pod_palettes_and_context_are_connection_scoped() {
+        use std::sync::Arc;
+        let ids = super::super::ServerVersion::V1_21_11.ids().unwrap();
+        let original = ids::up_state(ids, 29000);
+        {
+            let mut states = vec![0; 29677];
+            states[29000] = 70000;
+            let _profile = ids::profile(Some(Arc::new(super::super::pod::Profile {
+                states,
+                items: vec![0, 42],
+                local_states: 80000,
+            })));
+            assert_eq!(ids.state_bits(), (15, 17));
+            let values: Vec<_> = (0..4096)
+                .map(|i| if i % 2 == 0 { 29000 } else { 0 })
+                .collect();
+            let palette = Paletted::from_values(&values, Strategy::Blocks, 15);
+            let mut w = Writer::new();
+            palette.write(&mut w);
+            let decoded = Paletted::read(&mut Reader::new(&w.data), Strategy::Blocks, 15).unwrap();
+            let mapped = renumber_states(ids, &decoded, 17);
+            assert_eq!(mapped.get(0), 70000);
+            assert_eq!(mapped.get(1), 0);
+            let single = Paletted::from_values(&vec![29000; 4096], Strategy::Blocks, 15);
+            assert_eq!(renumber_states(ids, &single, 17).get(4095), 70000);
+            let direct =
+                Paletted::from_values(&(0..4096).collect::<Vec<_>>(), Strategy::Blocks, 15);
+            assert_eq!(direct.bits, 15);
+            let mut w = Writer::new();
+            direct.write(&mut w);
+            let direct = Paletted::read(
+                &mut Reader::new(&w.data),
+                Strategy::Blocks,
+                ids.state_bits().0,
+            )
+            .unwrap();
+            assert_eq!(renumber_states(ids, &direct, 17).get(4095), 0);
+            let _up = ids::renumbering(ids, Way::Up);
+            assert_eq!(ids::item(1), 42);
+            assert_eq!(ids::block_state(-1), 0);
+        }
+        assert_eq!(ids::up_state(ids, 29000), original);
+    }
 
     fn ids() -> &'static Ids {
         super::super::ServerVersion::V26_2.ids().unwrap()

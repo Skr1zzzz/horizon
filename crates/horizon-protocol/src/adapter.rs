@@ -8,6 +8,7 @@
 //! ([`ClientSession`], roadmap `older-clients`), when its owner lets such clients join.
 pub mod client_session;
 pub mod ids;
+pub mod pod;
 pub mod session;
 mod translate;
 pub mod v1_21_10;

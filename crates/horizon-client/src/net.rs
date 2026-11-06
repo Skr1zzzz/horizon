@@ -681,6 +681,7 @@ fn run(
         {
             log::info!("Joining {address} as a {} server", version.name());
             c.adapt(version);
+            c.pod_snapshot(resources);
         }
         (host, port, c)
     };
