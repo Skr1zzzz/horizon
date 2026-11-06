@@ -217,6 +217,15 @@ pub fn item(id: i32) -> i32 {
     {
         return mapped;
     }
+    if matches!(ACTIVE.get(), Some((_, Way::Down)))
+        && let Some(mapped) = PROFILE.with(|p| {
+            p.borrow()
+                .as_ref()
+                .and_then(|p| p.server_items.get(&id).copied())
+        })
+    {
+        return mapped;
+    }
     apply(id, |ids| ids.item)
 }
 /// A data component type id as read or about to be written on this thread.
@@ -244,6 +253,15 @@ pub fn particle(id: i32) -> i32 {
 pub fn block_state(id: i32) -> i32 {
     if let Some((ids, Way::Up)) = ACTIVE.get() {
         return up_state(ids, id);
+    }
+    if matches!(ACTIVE.get(), Some((_, Way::Down)))
+        && let Some(mapped) = PROFILE.with(|p| {
+            p.borrow()
+                .as_ref()
+                .and_then(|p| p.server_states.get(&id).copied())
+        })
+    {
+        return mapped;
     }
     apply(id, |ids| ids.block_state)
 }

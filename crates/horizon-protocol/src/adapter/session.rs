@@ -122,6 +122,7 @@ impl Session {
     /// A packet body (VarInt id + payload) Horizon sends, as this server numbers and lays it out. `None`:
     /// the server has no such packet, so nothing is sent.
     pub fn serverbound(&self, body: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _profile = super::ids::profile(self.profile.get().cloned());
         let state = self.writing();
         let mut r = Reader::new(body);
         let id = r.varint()?;
@@ -234,6 +235,67 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(s.writing(), State::Play);
+    }
+
+    #[test]
+    fn pod_stack_round_trips_and_creative_uses_connection_ids() {
+        use crate::adapter::{ids as mapping, pod::Profile};
+        use crate::buf::Codec;
+        use crate::item::{Slot, Stack};
+        use std::sync::Arc;
+        let s = Session::new(ServerVersion::V1_21_11);
+        s.set_writing(State::Play);
+        let tables = s.version.ids().unwrap();
+        let profile = Arc::new(Profile {
+            states: vec![0, 70000],
+            items: vec![0, 6000, 1012],
+            local_states: 70001,
+            server_items: [(0, 0), (6000, 1), (1012, 2)].into(),
+            server_states: [(0, 0), (70000, 1)].into(),
+        });
+        for (raw, local) in [(1, 6000), (2, 1012)] {
+            let sent = [3, raw as u8, 0, 0];
+            let stack = {
+                let _profile = mapping::profile(Some(profile.clone()));
+                let _up = mapping::renumbering(tables, mapping::Way::Up);
+                Slot::read(&mut Reader::new(&sent)).unwrap().unwrap()
+            };
+            assert_eq!(stack.item, local);
+            let mut w = Writer::new();
+            {
+                let _profile = mapping::profile(Some(profile.clone()));
+                let _down = mapping::renumbering(tables, mapping::Way::Down);
+                Slot::write(&Some(stack), &mut w);
+                assert_eq!(mapping::block_state(70000), 1);
+                assert_eq!(mapping::item(1), tables.item.down(1).unwrap());
+                assert_eq!(mapping::item(999999), -1);
+            }
+            assert_eq!(w.data, sent);
+        }
+        let mut packet = Writer::new();
+        packet.varint(ids::play::serverbound::SET_CREATIVE_MODE_SLOT);
+        packet.i16(36);
+        Slot::write(&Some(Stack::new(6000, 3)), &mut packet);
+        s.profile.set(profile).unwrap();
+        let sent = s.serverbound(&packet.data).unwrap().unwrap();
+        let mut r = Reader::new(&sent);
+        assert_eq!(
+            r.varint().unwrap(),
+            s.version
+                .serverbound_id(State::Play, ids::play::serverbound::SET_CREATIVE_MODE_SLOT)
+                .unwrap()
+        );
+        assert_eq!(r.i16().unwrap(), 36);
+        assert_eq!(r.rest(), [3, 1, 0, 0]);
+        let plain = Session::new(ServerVersion::V1_21_11);
+        plain.set_writing(State::Play);
+        let sent = plain.serverbound(&packet.data).unwrap().unwrap();
+        let mut r = Reader::new(&sent);
+        r.varint().unwrap();
+        r.i16().unwrap();
+        assert_eq!(r.varint().unwrap(), 3);
+        assert_eq!(r.varint().unwrap(), tables.item.down(6000).unwrap_or(-1));
+        assert_eq!(mapping::item(6000), 6000);
     }
 
     #[test]

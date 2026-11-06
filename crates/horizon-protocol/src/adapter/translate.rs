@@ -1082,6 +1082,8 @@ mod tests {
                 states,
                 items: vec![0, 42],
                 local_states: 80000,
+                server_items: Default::default(),
+                server_states: Default::default(),
             })));
             assert_eq!(ids.state_bits(), (15, 17));
             let values: Vec<_> = (0..4096)

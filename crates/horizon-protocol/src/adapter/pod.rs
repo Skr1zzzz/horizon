@@ -1,7 +1,12 @@
 //! Experimental connection-owned name mappings; never replace protocol layout quirks.
 use crate::{Error, Result, registry::Builtin, rsnap::Snapshot};
 use horizon_world::{chunk::BlockState, registry::BlockRegistry};
-use std::{collections::BTreeSet, io::Read, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Read,
+    path::Path,
+    sync::Arc,
+};
 
 fn resolve(blocks: &BlockRegistry, name: &str, properties: &str) -> Option<i32> {
     let mut descriptor = BlockState {
@@ -25,6 +30,31 @@ fn resolve(blocks: &BlockRegistry, name: &str, properties: &str) -> Option<i32> 
 mod tests {
     use super::*;
     #[test]
+    fn reverse_items_only_include_resolved_names() {
+        let blocks = BlockRegistry::from_facts_json(&br#"{"states":[[0,true,false,0,{"id":"minecraft:air"}]],"defaults":{"minecraft:air":0}}"#[..]).unwrap();
+        let builtin = Builtin::parse(r#"{"minecraft:item":{"entries":{"minecraft:air":{"protocol_id":0},"minecraft:stone":{"protocol_id":1},"pod:lamp":{"protocol_id":2}}}}"#).unwrap();
+        let snapshot = Snapshot {
+            protocol: 774,
+            blocks: vec![],
+            states: vec![],
+            registries: vec![(
+                "minecraft:item".into(),
+                vec![
+                    "missing:item".into(),
+                    "pod:lamp".into(),
+                    "minecraft:air".into(),
+                    "minecraft:stone".into(),
+                ],
+            )],
+            shapes: vec![],
+            boxes: vec![],
+        };
+        let profile = Profile::build(&snapshot, &blocks, &builtin);
+        assert_eq!(profile.items, [0, 2, 0, 1]);
+        assert_eq!(profile.server_items, [(0, 2), (1, 3), (2, 1)].into());
+    }
+
+    #[test]
     fn pod_names_require_exact_properties_in_any_order() {
         let registry = BlockRegistry::from_facts_json(&br#"{"states":[[0,true,false,0,{"id":"minecraft:air"}],[0,false,false,0,{"id":"pod:lamp","properties":{"axis":"x","lit":"true"}}]],"defaults":{"minecraft:air":0,"pod:lamp":1}}"#[..]);
         let registry = registry.unwrap();
@@ -40,6 +70,8 @@ pub struct Profile {
     pub states: Vec<i32>,
     pub items: Vec<i32>,
     pub local_states: u32,
+    pub server_items: BTreeMap<i32, i32>,
+    pub server_states: BTreeMap<i32, i32>,
 }
 impl Profile {
     pub fn load(path: &Path, resources: &Path) -> Result<Arc<Self>> {
@@ -68,10 +100,12 @@ impl Profile {
             .map_or(0, |id| id.0 as i32);
         let mut unknown = 0;
         let mut namespaces = BTreeSet::new();
+        let mut server_states = BTreeMap::new();
         let states = snapshot
             .states
             .iter()
-            .map(|state| {
+            .enumerate()
+            .map(|(raw, state)| {
                 let block = snapshot.blocks.get(state.block as usize);
                 let mapped = block.and_then(|block| {
                     if state.flags & 128 != 0 {
@@ -79,6 +113,10 @@ impl Profile {
                     }
                     resolve(blocks, &block.name, &state.properties)
                 });
+                // Unknown entries become air only clientbound; they must not alias real air on writes.
+                if let Some(local) = mapped {
+                    server_states.entry(local).or_insert(raw as i32);
+                }
                 mapped.unwrap_or_else(|| {
                     unknown += 1;
                     if let Some(block) = block {
@@ -94,6 +132,7 @@ impl Profile {
             states.len()
         );
         let local_items = builtin.get("minecraft:item");
+        let mut server_items = BTreeMap::new();
         let items = snapshot
             .registries
             .iter()
@@ -101,7 +140,14 @@ impl Profile {
             .map(|(_, names)| {
                 names
                     .iter()
-                    .map(|name| local_items.and_then(|ids| ids.id(name)).unwrap_or(0))
+                    .enumerate()
+                    .map(|(raw, name)| {
+                        let local = local_items.and_then(|ids| ids.id(name));
+                        if let Some(local) = local {
+                            server_items.entry(local).or_insert(raw as i32);
+                        }
+                        local.unwrap_or(0)
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -109,6 +155,8 @@ impl Profile {
             states,
             items,
             local_states: blocks.len() as u32,
+            server_items,
+            server_states,
         }
     }
     pub fn state(&self, id: i32) -> i32 {
