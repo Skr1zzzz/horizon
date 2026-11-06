@@ -246,7 +246,61 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 2;
+const GENERATOR_REVISION: u32 = 3;
+
+fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
+    for menu in meta["menus"].as_array().into_iter().flatten() {
+        let id = menu["id"].as_str().ok_or("PoD: menu missing id")?;
+        let (owner, name) = identifier(id)?;
+        if owner != ns {
+            continue;
+        }
+        let slots = menu["slots"].as_array();
+        if menu["order"] != "container_first"
+            || !slots.is_some_and(|s| (1..=256).contains(&s.len()))
+            || menu.get("inventory").is_none()
+        {
+            log::info!(
+                "PoD: {id}: skipping unsupported menu order, slot count or missing inventory"
+            );
+            continue;
+        }
+        let point = |v: &Value| -> Option<[u32; 2]> {
+            let a = v.as_array()?;
+            if a.len() != 2 {
+                return None;
+            }
+            let x = a[0].as_u64()?;
+            let y = a[1].as_u64()?;
+            (x <= 512 && y <= 512).then_some([x as u32, y as u32])
+        };
+        let Some([x, y]) = point(&menu["inventory"]) else {
+            log::warn!("PoD: {id}: invalid inventory coordinates");
+            continue;
+        };
+        let Some(data) = menu["data_slots"].as_u64().filter(|&n| n <= 256) else {
+            log::warn!("PoD: {id}: invalid or oversized data slot count");
+            continue;
+        };
+        // Off-panel slots are parked by mods, not clickable screen positions.
+        let slots: Vec<_> = slots.unwrap().iter().map(point).collect();
+        let (mut w, mut h) = (176.max(x + 162), (y + 82).min(512).max(y + 76));
+        for &[x, y] in slots.iter().flatten() {
+            w = w.max(x + 16);
+            h = h.max(y + 16);
+        }
+        if w > 512 || h > 512 {
+            log::warn!("PoD: {id}: menu does not fit a 512 pixel panel");
+            continue;
+        }
+        files.insert(
+            format!("data/{ns}/horizon/menu/{name}.json"),
+            serde_json::to_vec(&json!({"slots":slots.len(),"data_slots":data,
+                "screen":{"size":[w,h],"slots":slots,"inventory":[x,y]}}))?,
+        );
+    }
+    Ok(())
+}
 
 fn adapt_selects(node: &mut Value) -> bool {
     let mut changed = false;
@@ -476,8 +530,15 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
     for id in snap
         .blocks
         .iter()
-        .map(|b| &b.name)
-        .chain(items.iter().copied())
+        .map(|b| b.name.as_str())
+        .chain(items.iter().map(|id| id.as_str()))
+        .chain(
+            meta["menus"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["id"].as_str()),
+        )
     {
         let (ns, _) = identifier(id)?;
         if ns != "minecraft" {
@@ -532,6 +593,7 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
             .map(|(p, b)| (p.clone(), b.clone()))
             .collect();
         adapt(&mut files, &snap, &ns);
+        menus(&mut files, &meta, &ns)?;
         let mut blocks = 0;
         let mut standalone = 0;
         for block in &snap.blocks {
@@ -597,6 +659,71 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_menu_loads_and_unsupported_menus_are_skipped() {
+        let printer = json!({"id":"computercraft:printer","slots":[[8,19],[30,19],[-1,10],[513,0]],
+            "inventory":[8,84],"data_slots":3,"order":"container_first"});
+        let mut files = Files::new();
+        menus(
+            &mut files,
+            &json!({"menus":[printer.clone()]}),
+            "computercraft",
+        )
+        .unwrap();
+        let value: Value =
+            serde_json::from_slice(&files["data/computercraft/horizon/menu/printer.json"]).unwrap();
+        assert_eq!(
+            value,
+            json!({"slots":4,"data_slots":3,"screen":{"size":[176,166],
+            "slots":[[8,19],[30,19],null,null],"inventory":[8,84]}})
+        );
+        files.insert(
+            "horizon-mod.toml".into(),
+            manifest("computercraft", "1.0", "test")
+                .unwrap()
+                .into_bytes(),
+        );
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/pod-menu-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("menu.hmod");
+        std::fs::write(&path, package(&files).unwrap()).unwrap();
+        let manifest = horizon_mods::Package::read(&path).unwrap().manifest;
+        let content = horizon_mods::Content::read(&path, &manifest).unwrap();
+        assert_eq!(content.menu_types[0].slots, 4);
+        assert_eq!(
+            content.menu_types[0].screen.as_ref().unwrap().size,
+            [176, 166]
+        );
+        std::fs::remove_file(path).unwrap();
+        for (key, replacement) in [
+            ("inventory", Value::Null),
+            ("order", json!("mixed")),
+            ("order", json!("player_first")),
+            ("slots", json!([])),
+            ("slots", json!(vec![[0, 0]; 257])),
+            ("data_slots", json!(257)),
+            ("slots", json!([[512, 0]])),
+            ("inventory", json!([400, 84])),
+        ] {
+            let mut bad = printer.clone();
+            if replacement.is_null() {
+                bad.as_object_mut().unwrap().remove(key);
+            } else {
+                bad[key] = replacement;
+            }
+            let mut files = Files::new();
+            menus(&mut files, &json!({"menus":[bad]}), "computercraft").unwrap();
+            assert!(files.is_empty(), "{key}");
+        }
+        let mut grown = printer;
+        grown["slots"] = json!([[220, 200]]);
+        let mut files = Files::new();
+        menus(&mut files, &json!({"menus":[grown]}), "computercraft").unwrap();
+        let value: Value = serde_json::from_slice(files.values().next().unwrap()).unwrap();
+        assert_eq!(value["screen"]["size"], json!([236, 216]));
+    }
+
     fn adaptation_snapshot() -> Snapshot {
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let sections = [

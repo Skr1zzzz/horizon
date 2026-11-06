@@ -30,6 +30,39 @@ fn resolve(blocks: &BlockRegistry, name: &str, properties: &str) -> Option<i32> 
 mod tests {
     use super::*;
     #[test]
+    fn synced_menu_names_survive_older_adapter_numbering() {
+        use crate::registry::{Dynamic, fabric::Registry};
+        let builtin = Builtin::parse(r#"{"minecraft:menu":{"entries":{"minecraft:generic_9x3":{"protocol_id":2},"computercraft:printer":{"protocol_id":30}}}}"#).unwrap();
+        let dynamic = Dynamic {
+            fabric: Some(Arc::new(BTreeMap::from([(
+                "minecraft:menu".into(),
+                Registry {
+                    attributes: 0,
+                    entries: vec![
+                        ("computercraft:printer".into(), 45),
+                        ("minecraft:generic_9x3".into(), 2),
+                    ],
+                },
+            )]))),
+            ..Default::default()
+        };
+        let ids = super::super::ServerVersion::V1_21_11.ids().unwrap();
+        let menu = ids.menu.up(45).unwrap();
+        let name = dynamic.menu_name(&builtin, menu).unwrap();
+        assert_eq!(name, "computercraft:printer");
+        assert_eq!(builtin.get("minecraft:menu").unwrap().id(name), Some(30));
+        assert_eq!(
+            dynamic.menu_name(&builtin, ids.menu.up(2).unwrap()),
+            Some("minecraft:generic_9x3")
+        );
+        assert_eq!(
+            Dynamic::default().menu_name(&builtin, 2),
+            Some("minecraft:generic_9x3")
+        );
+        assert_eq!(dynamic.menu_name(&builtin, 30), None);
+    }
+
+    #[test]
     fn reverse_items_only_include_resolved_names() {
         let blocks = BlockRegistry::from_facts_json(&br#"{"states":[[0,true,false,0,{"id":"minecraft:air"}]],"defaults":{"minecraft:air":0}}"#[..]).unwrap();
         let builtin = Builtin::parse(r#"{"minecraft:item":{"entries":{"minecraft:air":{"protocol_id":0},"minecraft:stone":{"protocol_id":1},"pod:lamp":{"protocol_id":2}}}}"#).unwrap();

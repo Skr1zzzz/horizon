@@ -9797,9 +9797,8 @@ impl Game<'_> {
             .remote
             .as_ref()
             .and_then(|r| {
-                r.builtin
-                    .get("minecraft:menu")?
-                    .name(p.menu)
+                r.registries
+                    .menu_name(&r.builtin, p.menu)
                     .map(str::to_owned)
             })
             .unwrap_or_default();

@@ -123,6 +123,19 @@ pub struct Dynamic {
     pub fabric: Option<std::sync::Arc<fabric::RegistryMap>>,
 }
 impl Dynamic {
+    /// Menus pass through the older-server adapter without renumbering. A
+    /// Fabric sync table therefore owns their names, not the local registry.
+    pub fn menu_name<'a>(&'a self, builtin: &'a Builtin, id: i32) -> Option<&'a str> {
+        if let Some(registry) = self.fabric.as_ref().and_then(|m| m.get("minecraft:menu")) {
+            return registry
+                .entries
+                .iter()
+                .find(|(_, raw)| *raw == id)
+                .map(|(name, _)| name.as_str());
+        }
+        builtin.get("minecraft:menu")?.name(id)
+    }
+
     /// The dialog tags of a `ClientboundUpdateTagsPacket`.
     pub fn add_tags(&mut self, packet: &UpdateTags) {
         for r in packet
