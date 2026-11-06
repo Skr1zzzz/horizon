@@ -11,6 +11,7 @@ use std::{
 type Result<T> = crate::Result<T>;
 type Files = BTreeMap<String, Vec<u8>>;
 const FILE: usize = 8 << 20;
+const OCCLUDES: u32 = 1 << 8;
 
 fn safe(path: &str) -> bool {
     !path.contains(['\\', ':', '\0']) && path.split('/').all(|p| !matches!(p, "" | "." | ".."))
@@ -177,6 +178,10 @@ fn declaration(
     if lights.len() == 1 {
         out["properties"] = json!({"light":lights.first()});
     }
+    // Per-state occlusion cannot be expressed; extra neighbour faces are safer than holes.
+    if rows.iter().any(|s| s.flags & OCCLUDES == 0) {
+        out["properties"]["occludes"] = json!(false);
+    }
     Ok(out)
 }
 fn assets(bytes: &[u8]) -> Result<(Files, Value)> {
@@ -246,7 +251,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 3;
+const GENERATOR_REVISION: u32 = 4;
 
 fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
     for menu in meta["menus"].as_array().into_iter().flatten() {
@@ -724,7 +729,33 @@ mod tests {
         assert_eq!(value["screen"]["size"], json!([236, 216]));
     }
 
+    #[test]
+    fn declaration_preserves_light_and_conservatively_disables_occlusion() {
+        for (flags, expected) in [
+            ([0, 0], Some(json!(false))),
+            ([OCCLUDES, OCCLUDES], None),
+            ([OCCLUDES, 0], Some(json!(false))),
+        ] {
+            let mut snap = declaration_snapshot();
+            for (state, flags) in snap.states.iter_mut().zip(flags) {
+                state.flags = flags;
+            }
+            let value = declaration(&snap, &snap.blocks[0], true).unwrap();
+            assert_eq!(value["template"], "minecraft:stone");
+            assert_eq!(value["properties"].get("occludes"), expected.as_ref());
+            assert_eq!(value["properties"]["light"], 7);
+        }
+    }
+
     fn adaptation_snapshot() -> Snapshot {
+        snapshot_fixture(false)
+    }
+
+    fn declaration_snapshot() -> Snapshot {
+        snapshot_fixture(true)
+    }
+
+    fn snapshot_fixture(declaration: bool) -> Snapshot {
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let sections = [
             (
@@ -738,6 +769,23 @@ mod tests {
             (*b"RENT", words(&[11, 6])),
             (*b"STRS", b"facing=easttest:aminecraft:block".to_vec()),
         ];
+        let mut sections = sections;
+        if declaration {
+            sections[0].1 = [
+                words(&[0, 0, 0, 0, 6]),
+                vec![7, 0, 0, 0],
+                words(&[0, 0, 0, 6, 6]),
+                vec![7, 0, 0, 0],
+                words(&[1, 0, OCCLUDES, 0, 0]),
+                vec![0; 4],
+            ]
+            .concat();
+            sections[1].1 = words(&[0, 0]);
+            sections[3].1 = words(&[12, 6, 0, 0, 18, 15, 1, 2]);
+            sections[4].1 = words(&[33, 15, 0, 2]);
+            sections[5].1 = words(&[12, 6, 18, 15]);
+            sections[6].1 = b"mode=amode=btest:aminecraft:stoneminecraft:block".to_vec();
+        }
         let mut bytes = vec![0; 64 + sections.len() * 24];
         bytes[..8].copy_from_slice(b"PODRSNAP");
         bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
