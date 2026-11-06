@@ -245,9 +245,182 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     }
     Ok(zip.finish()?.into_inner())
 }
+// Revisioned independently of the wire format so cached packages get new adaptations.
+const GENERATOR_REVISION: u32 = 2;
+
+fn adapt_selects(node: &mut Value) -> bool {
+    let mut changed = false;
+    match node {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                changed |= adapt_selects(child);
+            }
+            if map.get("type").and_then(Value::as_str) == Some("minecraft:select")
+                && map
+                    .get("property")
+                    .and_then(Value::as_str)
+                    .is_some_and(|p| p.contains(':') && !p.starts_with("minecraft:"))
+                && !map.contains_key("fallback")
+                && let Some(model) = map
+                    .get("cases")
+                    .and_then(Value::as_array)
+                    .and_then(|cases| cases.first())
+                    .and_then(|case| case.get("model"))
+                    .cloned()
+            {
+                map.insert("fallback".into(), model);
+                changed = true;
+            }
+        }
+        Value::Array(children) => {
+            for child in children {
+                changed |= adapt_selects(child);
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+fn geometry(files: &Files, id: &str) -> bool {
+    let mut id = id.to_owned();
+    let mut seen = BTreeSet::new();
+    loop {
+        let (ns, path) = id.split_once(':').unwrap_or(("minecraft", &id));
+        let canonical = format!("{ns}:{path}");
+        if !seen.insert(canonical) {
+            return false;
+        }
+        let Some(bytes) = files.get(&format!("assets/{ns}/models/{path}.json")) else {
+            // Vanilla's root supplies transforms, not any visible faces.
+            return ns == "minecraft" && path != "block/block";
+        };
+        let Ok(model) = serde_json::from_slice::<Value>(bytes) else {
+            return false;
+        };
+        if model.get("elements").is_some() {
+            return true;
+        }
+        let Some(parent) = model["parent"].as_str() else {
+            return false;
+        };
+        id = parent.to_owned();
+    }
+}
+
+fn item_geometry<'a>(files: &Files, node: &'a Value) -> Option<&'a str> {
+    match node["type"].as_str()? {
+        "minecraft:model" => node["model"].as_str().filter(|id| geometry(files, id)),
+        "minecraft:composite" => node["models"]
+            .as_array()?
+            .iter()
+            .find_map(|child| item_geometry(files, child)),
+        "minecraft:condition" => item_geometry(files, &node["on_false"]),
+        "minecraft:select" | "minecraft:range_dispatch" => {
+            let key = if node["type"] == "minecraft:select" {
+                "cases"
+            } else {
+                "entries"
+            };
+            let child = node
+                .get("fallback")
+                .or_else(|| node[key].as_array()?.first()?.get("model"))?;
+            item_geometry(files, child)
+        }
+        _ => None,
+    }
+}
+
+fn blockstate_models<'a>(node: &'a Value, models: &mut Vec<&'a str>) {
+    match node {
+        Value::Object(map) => {
+            if let Some(id) = map.get("model").and_then(Value::as_str) {
+                models.push(id);
+            }
+            for child in map.values() {
+                blockstate_models(child, models);
+            }
+        }
+        Value::Array(children) => {
+            for child in children {
+                blockstate_models(child, models);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn adapt(files: &mut Files, snap: &Snapshot, ns: &str) {
+    for (path, bytes) in files.iter_mut() {
+        if path.starts_with(&format!("assets/{ns}/items/"))
+            && path.ends_with(".json")
+            && let Ok(mut item) = serde_json::from_slice::<Value>(bytes)
+            && adapt_selects(&mut item)
+        {
+            *bytes = serde_json::to_vec(&item).expect("JSON value serializes");
+        }
+    }
+    for block in &snap.blocks {
+        let Some(name) = block.name.strip_prefix(&format!("{ns}:")) else {
+            continue;
+        };
+        let path = format!("assets/{ns}/blockstates/{name}.json");
+        let Some(state) = files
+            .get(&path)
+            .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+        else {
+            continue;
+        };
+        let mut models = Vec::new();
+        blockstate_models(&state, &mut models);
+        if models.is_empty() || models.iter().any(|id| geometry(files, id)) {
+            continue;
+        }
+        let Some(item) = files
+            .get(&format!("assets/{ns}/items/{name}.json"))
+            .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+        else {
+            continue;
+        };
+        let Some(model) = item_geometry(files, &item["model"]) else {
+            continue;
+        };
+        let facing = snap.states_of_block(block.raw_id).is_some_and(|range| {
+            snap.states[range].iter().any(|s| {
+                props(&s.properties)
+                    .ok()
+                    .and_then(|p| p.get("facing").cloned())
+                    .is_some_and(|v| ["north", "east", "south", "west"].contains(&v.as_str()))
+            })
+        });
+        let variants = if facing {
+            ["north", "east", "south", "west"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, direction)| {
+                    (
+                        format!("facing={direction}"),
+                        json!({"model":model,"y":i * 90}),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::from([("".into(), json!({"model":model}))])
+        };
+        files.insert(
+            path,
+            serde_json::to_vec(&json!({"variants":variants})).expect("JSON value serializes"),
+        );
+        log::info!(
+            "PoD: {}: using item geometry for block entity rendering",
+            block.name
+        );
+    }
+}
+
 fn fingerprint(rsnap: &[u8], assets: &[u8]) -> String {
     format!(
-        "PoD v1 rsnap={:x} assets={:x}",
+        "PoD v1 rsnap={:x} assets={:x} gen={GENERATOR_REVISION}",
         Sha256::digest(rsnap),
         Sha256::digest(assets)
     )
@@ -358,6 +531,7 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
             .filter(|(p, _)| p.starts_with(&format!("assets/{ns}/")))
             .map(|(p, b)| (p.clone(), b.clone()))
             .collect();
+        adapt(&mut files, &snap, &ns);
         let mut blocks = 0;
         let mut standalone = 0;
         for block in &snap.blocks {
@@ -423,6 +597,117 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn adaptation_snapshot() -> Snapshot {
+        let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let sections = [
+            (
+                *b"STAT",
+                [words(&[0, u32::MAX, 0, 0, 11]), vec![0; 4]].concat(),
+            ),
+            (*b"SHAP", vec![]),
+            (*b"BOXS", vec![]),
+            (*b"BLOK", words(&[11, 6, 0, 0])),
+            (*b"REGS", words(&[17, 15, 0, 1])),
+            (*b"RENT", words(&[11, 6])),
+            (*b"STRS", b"facing=easttest:aminecraft:block".to_vec()),
+        ];
+        let mut bytes = vec![0; 64 + sections.len() * 24];
+        bytes[..8].copy_from_slice(b"PODRSNAP");
+        bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&774_u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&7_u32.to_le_bytes());
+        for (i, (tag, data)) in sections.iter().enumerate() {
+            let at = 64 + i * 24;
+            bytes[at..at + 4].copy_from_slice(tag);
+            let start = bytes.len() as u64;
+            bytes[at + 8..at + 16].copy_from_slice(&start.to_le_bytes());
+            bytes[at + 16..at + 24].copy_from_slice(&(data.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(data);
+            bytes.resize(bytes.len().div_ceil(8) * 8, 0);
+        }
+        let digest = Sha256::digest(&bytes[64..]);
+        bytes[32..64].copy_from_slice(&digest);
+        Snapshot::parse(&bytes).unwrap()
+    }
+
+    #[test]
+    fn foreign_select_adaptation_preserves_other_nodes() {
+        let leaf = json!({"type":"minecraft:model","model":"test:block/base"});
+        let select = json!({"type":"minecraft:select","property":"mod:prop",
+            "cases":[{"when":"off","model":leaf}]});
+        let mut vanilla = select.clone();
+        vanilla["property"] = json!("minecraft:local_time");
+        let mut fallback = select.clone();
+        fallback["fallback"] = json!({"type":"minecraft:empty"});
+        let mut tree = json!({"type":"minecraft:condition","on_false":select,
+            "on_true":{"type":"minecraft:composite","models":[vanilla,fallback]}});
+        let original = tree.clone();
+        assert!(adapt_selects(&mut tree));
+        assert_eq!(tree["on_false"]["fallback"], leaf);
+        assert_eq!(tree["on_true"], original["on_true"]);
+        assert!(!adapt_selects(&mut tree));
+        let mut files = Files::from([("assets/test/items/bad.json".into(), b"not json".to_vec())]);
+        let original = files.clone();
+        adapt(&mut files, &adaptation_snapshot(), "test");
+        assert_eq!(files, original);
+    }
+
+    #[test]
+    fn block_entity_geometry_adaptation() {
+        let state_path = "assets/test/blockstates/a.json";
+        let item_path = "assets/test/items/a.json";
+        let mut files = Files::from([
+            (state_path.into(), serde_json::to_vec(&json!({"variants":{"":{"model":"test:block/particle"}}})).unwrap()),
+            ("assets/test/models/block/particle.json".into(), br#"{"parent":"minecraft:block/block","textures":{"particle":"test:a"}}"#.to_vec()),
+            ("assets/test/models/block/base.json".into(), br#"{"elements":[]}"#.to_vec()),
+            ("assets/test/models/block/body.json".into(), br#"{"parent":"test:block/base"}"#.to_vec()),
+            (item_path.into(), serde_json::to_vec(&json!({"model":{"type":"minecraft:composite","models":[
+                {"type":"mod:ignored"}, {"type":"minecraft:model","model":"test:block/particle"},
+                {"type":"minecraft:condition","on_false":{"type":"minecraft:select","fallback":{
+                    "type":"minecraft:range_dispatch","entries":[{"model":{"type":"minecraft:model","model":"test:block/body"}}]
+                }}}]}})).unwrap()),
+        ]);
+        let original = files.clone();
+        let mut snap = adaptation_snapshot();
+        adapt(&mut files, &snap, "test");
+        let state: Value = serde_json::from_slice(&files[state_path]).unwrap();
+        assert_eq!(
+            state,
+            json!({"variants":{
+            "facing=north":{"model":"test:block/body","y":0},
+            "facing=east":{"model":"test:block/body","y":90},
+            "facing=south":{"model":"test:block/body","y":180},
+            "facing=west":{"model":"test:block/body","y":270}}})
+        );
+        snap.states[0].properties = "waterlogged=false".into();
+        files = original.clone();
+        adapt(&mut files, &snap, "test");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&files[state_path]).unwrap(),
+            json!({"variants":{"":{"model":"test:block/body"}}})
+        );
+        for model in [
+            "test:block/base",
+            "test:block/body",
+            "minecraft:block/cube_all",
+            "block/cube_all",
+        ] {
+            files = original.clone();
+            files.insert(
+                state_path.into(),
+                serde_json::to_vec(&json!({"multipart":[{"apply":[{"model":model}]}]})).unwrap(),
+            );
+            let before = files.clone();
+            adapt(&mut files, &snap, "test");
+            assert_eq!(files, before, "{model}");
+        }
+        files = original;
+        files.remove(item_path);
+        let before = files.clone();
+        adapt(&mut files, &snap, "test");
+        assert_eq!(files, before);
+    }
+
     #[test]
     fn vanilla_identifiers_and_foreign_namespace_package() {
         assert!(identifier("deco-blocks:deco_end_portal_frame").is_ok());
@@ -537,6 +822,12 @@ mod tests {
         assert!(package(&BTreeMap::from([("assets/test/../a.png".into(), vec![])])).is_err());
         assert!(identifier("../test:a").is_err());
         assert!(identifier("test:../a").is_err());
+        let revised = fingerprint(b"snapshot", b"assets");
+        let old = revised.split(" gen=").next().unwrap();
+        assert!(old.starts_with("PoD v1 rsnap="));
+        assert!(revised.starts_with("PoD v1 rsnap="));
+        assert!(!current(old, &revised, true));
+        assert!(current(&revised, &revised, true));
         assert!(current("same", "same", true));
         assert!(!current("same", "different", true));
         assert!(!current("same", "same", false));
