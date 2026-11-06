@@ -9928,8 +9928,8 @@ impl Game<'_> {
             self.world.block_entities.insert(key, entity);
             self.container = Some(key);
             self.open_native_screen(key, target, p.container, &menu, extra);
-            // A mod menu type shows through its mod's screen only: without one
-            // (`MenuScreens.create` finds no screen) the window closes again.
+            // Without either a native or declared layout, there is no screen
+            // for this menu (`MenuScreens.create`), so close the window again.
             if self.mod_screen.is_none() && mod_type.is_some() {
                 self.world.block_entities.remove(&key);
                 self.container = None;

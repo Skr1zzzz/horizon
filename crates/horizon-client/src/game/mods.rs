@@ -282,6 +282,7 @@ fn register_entity_types(mods: &[horizon_client::mod_content::ContentMod]) {
 fn register_menu_types(mods: &[horizon_client::mod_content::ContentMod]) {
     use horizon_client::containers;
     let menus = horizon_client::mod_content::menu_types(mods);
+    horizon_client::mod_api::register_menu_screens(menus.iter().copied());
     let set = containers::register_mod_menu_types(menus.iter().map(|m| {
         let results = m.results.iter().map(|&r| usize::from(r)).collect();
         (m.id.clone(), m.slots.into(), m.data_slots.into(), results)

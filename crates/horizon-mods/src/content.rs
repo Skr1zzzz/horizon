@@ -432,7 +432,7 @@ impl EntityType {
 /// `IMenuTypeExtension.create`): its container's slot count, the
 /// `ContainerData` count its menu syncs, and its take-only slots
 /// (`FurnaceResultSlot.mayPlace`). The slots come first in the menu, then the
-/// player's 36, and a mod screen (`native_screen`) places them.
+/// player's 36; a native or declared screen places them.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MenuType {
@@ -447,6 +447,42 @@ pub struct MenuType {
     /// slots a player takes from but never puts into, each below `slots`.
     #[serde(default)]
     pub results: Vec<u16>,
+    /// Optional plain-panel layout, used when no native screen supplies one.
+    #[serde(default)]
+    pub screen: Option<MenuScreen>,
+}
+
+/// A menu's layout in GUI pixels, relative to the panel's top left.
+#[derive(Clone, Debug, serde::Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MenuScreen {
+    pub size: [u16; 2],
+    pub slots: Vec<Option<[u16; 2]>>,
+    pub inventory: [u16; 2],
+}
+
+impl MenuScreen {
+    fn validate(&self, slots: u16) -> Result<(), String> {
+        if self.size.iter().any(|&n| !(1..=512).contains(&n)) {
+            return Err("screen size is 1 to 512 on each axis".into());
+        }
+        if self.slots.len() != usize::from(slots) {
+            return Err(format!("screen slots must have exactly {slots} entries"));
+        }
+        let fits = |[x, y]: [u16; 2], w: u32, h: u32| {
+            u32::from(x) + w <= u32::from(self.size[0])
+                && u32::from(y) + h <= u32::from(self.size[1])
+        };
+        for (i, p) in self.slots.iter().enumerate() {
+            if p.is_some_and(|p| !fits(p, 16, 16)) {
+                return Err(format!("screen slot {i} leaves the panel"));
+            }
+        }
+        if !fits(self.inventory, 162, 76) {
+            return Err("screen inventory leaves the panel".into());
+        }
+        Ok(())
+    }
 }
 
 /// the most container or data slots a mod menu type has, as many as a mod
@@ -941,6 +977,11 @@ impl Content {
                 if !seen.insert(r) {
                     return Err(format!("{name}: result {r} is listed twice"));
                 }
+            }
+            if let Some(screen) = &file.screen {
+                screen
+                    .validate(file.slots)
+                    .map_err(|e| format!("{name}: {e}"))?;
             }
             self.menu_types.push(MenuType { id: menu, ..file });
         }
@@ -1583,6 +1624,80 @@ capabilities = ["registries"]
             let files: &[(&str, &[u8])] = &[("data/ruby/horizon/menu/a.json", file.as_bytes())];
             let e = hmod(case, MANIFEST_TEXT, files).unwrap_err();
             assert!(e.contains(why), "{case}: {e}");
+        }
+    }
+
+    #[test]
+    fn menu_screen_layout_round_trips_and_checks_bounds() {
+        let screen = serde_json::json!({
+            "size": [176, 166], "slots": [[44, 35], null], "inventory": [8, 84]
+        });
+        let load = |case: &str, screen: &serde_json::Value| {
+            let file =
+                serde_json::to_vec(&serde_json::json!({"slots": 2, "screen": screen})).unwrap();
+            hmod(
+                case,
+                MANIFEST_TEXT,
+                &[("data/ruby/horizon/menu/a.json", &file)],
+            )
+        };
+        let content = load("screen-valid", &screen).unwrap();
+        let parsed = content.menu_types[0].screen.as_ref().unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), screen);
+        for (case, key, value, why) in [
+            (
+                "count",
+                "slots",
+                serde_json::json!([null]),
+                "exactly 2 entries",
+            ),
+            (
+                "slot",
+                "slots",
+                serde_json::json!([[161, 35], null]),
+                "slot 0 leaves",
+            ),
+            (
+                "slot-y",
+                "slots",
+                serde_json::json!([[44, 151], null]),
+                "slot 0 leaves",
+            ),
+            (
+                "inventory",
+                "inventory",
+                serde_json::json!([15, 84]),
+                "inventory leaves",
+            ),
+            (
+                "inventory-y",
+                "inventory",
+                serde_json::json!([8, 91]),
+                "inventory leaves",
+            ),
+            (
+                "unknown",
+                "texture",
+                serde_json::json!("a"),
+                "unknown field",
+            ),
+            (
+                "size-zero",
+                "size",
+                serde_json::json!([0, 166]),
+                "size is 1 to 512",
+            ),
+            (
+                "size-large",
+                "size",
+                serde_json::json!([176, 513]),
+                "size is 1 to 512",
+            ),
+        ] {
+            let mut invalid = screen.clone();
+            invalid[key] = value;
+            let error = load(case, &invalid).unwrap_err();
+            assert!(error.contains(why), "{case}: {error}");
         }
     }
 

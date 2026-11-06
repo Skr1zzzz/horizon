@@ -351,7 +351,12 @@ A mod menu type (vanilla's `MenuType`) is declared in `data/<id>/horizon/menu/<n
 from (`results`, as a furnace's result slot):
 
 ```json
-{ "slots": 9, "data_slots": 2, "results": [7, 8] }
+{
+  "slots": 2,
+  "data_slots": 2,
+  "results": [1],
+  "screen": { "size": [176, 166], "slots": [[44, 35], [116, 35]], "inventory": [8, 84] }
+}
 ```
 
 It is the menu type `<id>:<name>`, with its network id after vanilla's. A mod block's container opens it when its
@@ -360,8 +365,16 @@ its slots, then the player's 36. A shift-click from the inventory goes to the fi
 slot, and one on the container goes to the inventory, as a chest's does. `results` fence players only: hoppers follow the
 container's faces and `inputs`, so leave result slots out of `inputs`. The data slots are the block entity's `data`
 (16-bit on the network, as vanilla's), all sent when it opens, then each change. A Horizon client shows it through the
-mod's own screen (`native_screen`); without one it closes again. Clients join a server only with the same mods' menu
-types, as with its blocks, and a client that isn't Horizon's is never sent one: the block opens nothing for it. Its
+mod's own screen (`native_screen`) or the menu type's declared `screen`; with neither it closes again.
+A native screen takes precedence. The declared layout belongs to the menu type the server names, not the clicked
+block, so it also works for menus opened by commands or items. `screen` is optional: `size` gives the panel's width
+and height in GUI pixels, each 1 to 512; `slots` must have exactly one entry per container slot in slot order,
+with `[x, y]` placing its 16×16 top-left inside the panel, or `null` hiding it. `inventory` places the player's
+3×9 inventory's top-left, with the hotbar 58 pixels below; its full 162×76 area must fit inside the panel.
+Visible slots must also fit; unknown keys are refused. Horizon draws the plain panel, slot frames, items, title
+and Inventory label. Background textures are not supported yet and may come later.
+
+Clients join a server only with the same mods' menu types, as with its blocks, and a client that isn't Horizon's is never sent one: the block opens nothing for it. Its
 clicks run on the server's vanilla menu engine (`menu::Kind::Mod`), shift-clicks routed as `ChestMenu`'s, and a native
 mod can decide what a slot takes in code with `native_menu_slot_rules` ([native-mods.md](native-mods.md#menu-slot-rules)).
 A native mod can hand the screen bytes of its own when the block opens it

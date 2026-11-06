@@ -311,6 +311,79 @@ pub struct NativeScreen {
     pub own_background: bool,
 }
 
+static MENU_SCREENS: std::sync::OnceLock<
+    std::collections::BTreeMap<String, horizon_mods::content::MenuScreen>,
+> = std::sync::OnceLock::new();
+
+/// Freeze layouts alongside the menu registry at startup.
+pub fn register_menu_screens<'a>(menus: impl Iterator<Item = &'a horizon_mods::content::MenuType>) {
+    let _ = MENU_SCREENS.set(
+        menus
+            .filter_map(|m| m.screen.clone().map(|s| (m.id.clone(), s)))
+            .collect(),
+    );
+}
+
+/// Prefer the native layout, falling back to the server-named menu's declaration.
+pub fn menu_screen(menu: &str, native: Option<NativeScreen>) -> Option<NativeScreen> {
+    choose_menu_screen(native, MENU_SCREENS.get().and_then(|m| m.get(menu)))
+}
+
+fn choose_menu_screen(
+    native: Option<NativeScreen>,
+    declared: Option<&horizon_mods::content::MenuScreen>,
+) -> Option<NativeScreen> {
+    native.or_else(|| {
+        declared.map(|s| NativeScreen {
+            width: f32::from(s.size[0]),
+            height: f32::from(s.size[1]),
+            slots: s
+                .slots
+                .iter()
+                .map(|p| p.map(|p| p.map(f32::from)))
+                .collect(),
+            inventory_x: f32::from(s.inventory[0]),
+            inventory_y: f32::from(s.inventory[1]),
+            own_labels: false,
+            own_background: false,
+        })
+    })
+}
+
+#[cfg(test)]
+mod menu_screen_tests {
+    use super::*;
+
+    #[test]
+    fn menu_screen_precedence_and_layout() {
+        let declared = horizon_mods::content::MenuScreen {
+            size: [176, 166],
+            slots: vec![Some([44, 35]), None],
+            inventory: [8, 84],
+        };
+        let expected = NativeScreen {
+            width: 176.0,
+            height: 166.0,
+            slots: vec![Some([44.0, 35.0]), None],
+            inventory_x: 8.0,
+            inventory_y: 84.0,
+            own_labels: false,
+            own_background: false,
+        };
+        assert_eq!(choose_menu_screen(None, Some(&declared)), Some(expected));
+        let native = NativeScreen {
+            width: 200.0,
+            own_labels: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            choose_menu_screen(Some(native.clone()), Some(&declared)),
+            Some(native)
+        );
+        assert_eq!(choose_menu_screen(None, None), None);
+    }
+}
+
 /// A native mod as Options > Mods lists it (`native_mods`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NativeMod {

@@ -10073,9 +10073,9 @@ impl Game<'_> {
     /// `pos` does not show: the server's menu does not have them either, so a
     /// shift-click never moves an item where the player cannot see it.
     pub(super) fn native_hidden_slots(&self, pos: Pos, size: usize) -> Vec<usize> {
-        if self.mod_menu_at(pos).is_none() {
+        let Some(menu) = self.mod_menu_at(pos) else {
             return Vec::new();
-        }
+        };
         let block = self
             .res
             .facts()
@@ -10084,6 +10084,7 @@ impl Game<'_> {
             .to_string();
         let mut screen = None;
         self.native_screen(&block, &mut screen);
+        let screen = horizon_client::mod_api::menu_screen(menu, screen);
         let Some(screen) = screen else {
             return Vec::new();
         };
@@ -10103,31 +10104,26 @@ impl Game<'_> {
         extra: Option<horizon_protocol::menu_extra::Message>,
     ) {
         self.mod_screen = None;
-        let Some(t) = target else {
-            return;
-        };
-        let block = self
-            .res
-            .facts()
-            .get(self.world.block(t.0, t.1, t.2))
-            .name
-            .to_string();
-        if block.starts_with("minecraft:") {
-            return;
-        }
-        // Only when this is the menu the clicked block opens: `target` outlives the
-        // use that set it, so another menu opened later (a command's, another
-        // mod's) would otherwise get the last clicked machine's screen. Asked
-        // here, as the window's world has no mod containers.
-        let mut container = None;
-        self.native_block_entity_container(&block, &mut container);
-        let opens = container.and_then(|c| mod_menu(c.menu.as_deref()?).map(|(m, _)| m));
-        if opens != Some(menu) {
-            return;
-        }
+        let mut block = String::new();
         let mut screen = None;
-        self.native_screen(&block, &mut screen);
-        if let Some(screen) = screen {
+        if let Some(t) = target {
+            let name = self
+                .res
+                .facts()
+                .get(self.world.block(t.0, t.1, t.2))
+                .name
+                .to_string();
+            // A stale clicked block must not lend its native screen to another menu.
+            let mut container = None;
+            self.native_block_entity_container(&name, &mut container);
+            let opens = container.and_then(|c| mod_menu(c.menu.as_deref()?).map(|(m, _)| m));
+            if !name.starts_with("minecraft:") && opens == Some(menu) {
+                self.native_screen(&name, &mut screen);
+                block = name;
+            }
+        }
+        // Declared layouts belong to the server-named menu, even without a block.
+        if let Some(screen) = horizon_client::mod_api::menu_screen(menu, screen) {
             self.mod_screen = Some(OpenNativeScreen {
                 key,
                 window,
