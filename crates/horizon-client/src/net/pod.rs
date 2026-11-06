@@ -11,6 +11,8 @@ use std::{
 type Result<T> = crate::Result<T>;
 type Files = BTreeMap<String, Vec<u8>>;
 const FILE: usize = 8 << 20;
+// pod-bridge sends at most 19999 assets plus its manifest; Create alone ships ~5200.
+const ENTRIES: usize = 20_000;
 const OCCLUDES: u32 = 1 << 8;
 const FULL_CUBE: u32 = 1 << 3;
 
@@ -140,7 +142,7 @@ fn declaration(
     {
         return Err("PoD: template state mismatch".into());
     }
-    let lights: BTreeSet<_> = rows.iter().map(|s| s.luminance).collect();
+    let mut lights: BTreeSet<_> = rows.iter().map(|s| s.luminance).collect();
     if lights.len() > 1
         && rows.iter().any(|s| {
             !refs.iter().any(|r| {
@@ -149,7 +151,13 @@ fn declaration(
             })
         })
     {
-        return Err("PoD: unrepresentable per-state light".into());
+        // A definition carries one light level; the server's light data stays authoritative.
+        let default = snap.states[block.default_state as usize].luminance;
+        log::warn!(
+            "PoD: {}: per-state light {lights:?} unrepresentable, using the default state's {default}",
+            block.name
+        );
+        lights = BTreeSet::from([default]);
     }
     let mut out = json!({"template": chosen, "item": item});
     if !domains.is_empty() {
@@ -190,11 +198,12 @@ fn declaration(
 }
 fn assets(bytes: &[u8]) -> Result<(Files, Value)> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))?;
-    if zip.len() > 4096 {
+    if zip.len() > ENTRIES {
         return Err("PoD: too many asset entries".into());
     }
     let mut files = Files::new();
     let mut total = 0;
+    let mut invalid = 0;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
         let name = entry.name()?.into_owned();
@@ -216,6 +225,12 @@ fn assets(bytes: &[u8]) -> Result<(Files, Value)> {
         if name != "pod-assets.json" && !allowed {
             continue;
         }
+        // Vanilla ignores files that are not resource locations (Create ships lang/lt_LT.json);
+        // packaged, they would make the whole generated mod fail to load.
+        if allowed && horizon_mods::content::check_path(&name).is_err() {
+            invalid += 1;
+            continue;
+        }
         if entry.size() > FILE as u64 {
             return Err("PoD: oversized asset".into());
         }
@@ -229,6 +244,9 @@ fn assets(bytes: &[u8]) -> Result<(Files, Value)> {
             return Err("PoD: oversized or duplicate assets".into());
         }
     }
+    if invalid > 0 {
+        log::warn!("PoD: skipped {invalid} assets whose paths are not resource locations");
+    }
     let meta = serde_json::from_slice(
         files
             .remove("pod-assets.json")
@@ -241,7 +259,8 @@ pub(super) fn validate_assets(bytes: &[u8]) -> Result<()> {
     assets(bytes).map(|_| ())
 }
 fn package(files: &Files) -> Result<Vec<u8>> {
-    if files.len() > 4096 || files.values().map(Vec::len).sum::<usize>() > 64 << 20 {
+    // Assets plus a generated block and item definition per content entry.
+    if files.len() > 2 * ENTRIES || files.values().map(Vec::len).sum::<usize>() > 64 << 20 {
         return Err("PoD: oversized package".into());
     }
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -255,7 +274,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 5;
+const GENERATOR_REVISION: u32 = 6;
 
 fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
     for menu in meta["menus"].as_array().into_iter().flatten() {
@@ -345,6 +364,96 @@ fn adapt_selects(node: &mut Value) -> bool {
     changed
 }
 
+/// Mod item model types (`create:model/wrench`) are client code; swap each for the static model the mod
+/// ships beside it, or a flat icon of the item texture, as `minecraft:model`. New model files go to `extra`.
+fn adapt_foreign_models(
+    node: &mut Value,
+    files: &Files,
+    ns: &str,
+    name: &str,
+    extra: &mut Files,
+) -> bool {
+    let Some(kind) = node["type"].as_str().map(str::to_owned) else {
+        return false;
+    };
+    let mut changed = false;
+    let mut visit = |child: Option<&mut Value>| {
+        if let Some(child) = child {
+            changed |= adapt_foreign_models(child, files, ns, name, extra);
+        }
+    };
+    match kind.as_str() {
+        "minecraft:composite" => {
+            for child in node
+                .get_mut("models")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                visit(Some(child));
+            }
+        }
+        "minecraft:condition" => {
+            visit(node.get_mut("on_true"));
+            visit(node.get_mut("on_false"));
+        }
+        "minecraft:select" | "minecraft:range_dispatch" => {
+            let key = if kind == "minecraft:select" {
+                "cases"
+            } else {
+                "entries"
+            };
+            for case in node
+                .get_mut(key)
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                visit(case.get_mut("model"));
+            }
+            visit(node.get_mut("fallback"));
+        }
+        t if t.starts_with("minecraft:") || !t.contains(':') => {}
+        _ => {
+            let model = |id: &str| {
+                let (owner, path) = id.split_once(':').unwrap_or(("minecraft", id));
+                files.contains_key(&format!("assets/{owner}/models/{path}.json"))
+            };
+            let id = node["model"]
+                .as_str()
+                .filter(|id| model(id))
+                .map(str::to_owned)
+                .or_else(|| {
+                    [
+                        format!("{ns}:item/{name}/item"),
+                        format!("{ns}:item/{name}"),
+                    ]
+                    .into_iter()
+                    .find(|id| model(id))
+                })
+                .or_else(|| {
+                    files
+                        .contains_key(&format!("assets/{ns}/textures/item/{name}.png"))
+                        .then(|| {
+                            extra.insert(
+                                format!("assets/{ns}/models/item/{name}.json"),
+                                serde_json::to_vec(&json!({"parent":"minecraft:item/generated",
+                                    "textures":{"layer0":format!("{ns}:item/{name}")}}))
+                                .expect("JSON value serializes"),
+                            );
+                            format!("{ns}:item/{name}")
+                        })
+                });
+            if let Some(id) = id {
+                log::info!("PoD: {ns}:{name}: item model type {kind} drawn as static {id}");
+                *node = json!({"type":"minecraft:model","model":id});
+                return true;
+            }
+        }
+    }
+    changed
+}
+
 fn geometry(files: &Files, id: &str) -> bool {
     let mut id = id.to_owned();
     let mut seen = BTreeSet::new();
@@ -414,15 +523,30 @@ fn blockstate_models<'a>(node: &'a Value, models: &mut Vec<&'a str>) {
 }
 
 fn adapt(files: &mut Files, snap: &Snapshot, ns: &str) {
-    for (path, bytes) in files.iter_mut() {
-        if path.starts_with(&format!("assets/{ns}/items/"))
-            && path.ends_with(".json")
-            && let Ok(mut item) = serde_json::from_slice::<Value>(bytes)
-            && adapt_selects(&mut item)
-        {
-            *bytes = serde_json::to_vec(&item).expect("JSON value serializes");
+    let prefix = format!("assets/{ns}/items/");
+    let items: Vec<String> = files
+        .keys()
+        .filter(|p| p.starts_with(&prefix) && p.ends_with(".json"))
+        .cloned()
+        .collect();
+    let mut extra = Files::new();
+    for path in items {
+        let Ok(mut item) = serde_json::from_slice::<Value>(&files[&path]) else {
+            continue;
+        };
+        let name = &path[prefix.len()..path.len() - ".json".len()];
+        // Foreign types first, so a select's copied fallback is already drawable.
+        let foreign = item
+            .get_mut("model")
+            .is_some_and(|model| adapt_foreign_models(model, files, ns, name, &mut extra));
+        if foreign | adapt_selects(&mut item) {
+            files.insert(
+                path.clone(),
+                serde_json::to_vec(&item).expect("JSON value serializes"),
+            );
         }
     }
+    files.extend(extra);
     for block in &snap.blocks {
         let Some(name) = block.name.strip_prefix(&format!("{ns}:")) else {
             continue;
@@ -604,15 +728,25 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
         adapt(&mut files, &snap, &ns);
         menus(&mut files, &meta, &ns)?;
         let mut blocks = 0;
+        let mut skipped = 0;
         let mut standalone = 0;
         for block in &snap.blocks {
             let (owner, name) = identifier(&block.name)?;
             if owner != ns {
                 continue;
             }
+            // One unrepresentable block must not cost the whole mod its content.
+            let value = match declaration(&snap, block, items.contains(&block.name)) {
+                Ok(value) => value,
+                Err(e) => {
+                    log::warn!("PoD: {}: block skipped: {e}", block.name);
+                    skipped += 1;
+                    continue;
+                }
+            };
             files.insert(
                 format!("data/{ns}/horizon/block/{name}.json"),
-                serde_json::to_vec(&declaration(&snap, block, items.contains(&block.name))?)?,
+                serde_json::to_vec(&value)?,
             );
             blocks += 1;
         }
@@ -650,7 +784,7 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
         enabled.enabled.insert(id.clone());
         enabled.disabled.remove(&id);
         let message = format!(
-            "PoD: generated {id}.hmod ({blocks} blocks, {standalone} items) — restart Horizon to see them"
+            "PoD: generated {id}.hmod ({blocks} blocks, {skipped} skipped, {standalone} items) — restart Horizon to see them"
         );
         log::info!("{message}");
         messages.push(message);
@@ -750,6 +884,53 @@ mod tests {
             assert_eq!(value["properties"].get("occludes"), expected.as_ref());
             assert_eq!(value["properties"]["light"], 7);
         }
+    }
+
+    #[test]
+    fn foreign_item_model_types_become_static_models() {
+        let files = Files::from([
+            ("assets/m/models/block/d/item.json".into(), b"{}".to_vec()),
+            ("assets/m/models/item/w/item.json".into(), b"{}".to_vec()),
+            ("assets/m/models/item/g.json".into(), b"{}".to_vec()),
+            ("assets/m/textures/item/t.png".into(), vec![]),
+        ]);
+        let mut extra = Files::new();
+        let mut run = |node: Value, name: &str| {
+            let mut node = node;
+            let changed = adapt_foreign_models(&mut node, &files, "m", name, &mut extra);
+            (changed, node)
+        };
+        let static_model = |id: &str| json!({"type":"minecraft:model","model":id});
+        let oversized = json!({"type":"m:model/oversized","model":"m:block/d/item","min":[0]});
+        assert_eq!(run(oversized, "d"), (true, static_model("m:block/d/item")));
+        assert_eq!(
+            run(json!({"type":"m:model/w"}), "w"),
+            (true, static_model("m:item/w/item"))
+        );
+        assert_eq!(
+            run(json!({"type":"m:model/g"}), "g"),
+            (true, static_model("m:item/g"))
+        );
+        let nested = json!({"type":"minecraft:condition","property":"m:p",
+            "on_true":{"type":"m:model/t"},"on_false":static_model("m:item/g")});
+        let (changed, node) = run(nested, "t");
+        assert!(changed);
+        assert_eq!(node["on_true"], static_model("m:item/t"));
+        assert_eq!(node["on_false"], static_model("m:item/g"));
+        let unknown = json!({"type":"m:model/none"});
+        assert_eq!(run(unknown.clone(), "none"), (false, unknown));
+        let vanilla = static_model("m:item/missing");
+        assert_eq!(run(vanilla.clone(), "missing"), (false, vanilla));
+        assert!(extra.contains_key("assets/m/models/item/t.json"));
+        assert_eq!(extra.len(), 1);
+    }
+
+    #[test]
+    fn declaration_keeps_default_light_when_per_state_light_is_unrepresentable() {
+        let mut snap = declaration_snapshot();
+        snap.states[1].luminance = 3;
+        let value = declaration(&snap, &snap.blocks[0], true).unwrap();
+        assert_eq!(value["properties"]["light"], 7);
     }
 
     fn adaptation_snapshot() -> Snapshot {
@@ -994,6 +1175,7 @@ mod tests {
             ),
             ("assets/test/textures/a.png".into(), vec![1, 2]),
             ("assets/test/sounds/a.ogg".into(), vec![3]),
+            ("assets/test/lang/lt_LT.json".into(), b"{}".to_vec()),
         ]);
         let bytes = package(&files).unwrap();
         let (allowed, _) = assets(&bytes).unwrap();
