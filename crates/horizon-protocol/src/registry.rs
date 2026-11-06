@@ -109,6 +109,8 @@ impl Builtin {
     }
 }
 
+pub mod fabric;
+
 /// Registries synchronized during configuration, in arrival order.
 #[derive(Clone, Debug, Default)]
 pub struct Dynamic {
@@ -117,6 +119,8 @@ pub struct Dynamic {
     pub dialog_tags: HashMap<String, Vec<i32>>,
     /// The peer confirmed the native component registry identity.
     pub custom_components: bool,
+    /// Experimental Fabric handshake data only; never used for ID translation yet.
+    pub fabric: Option<std::sync::Arc<fabric::RegistryMap>>,
 }
 impl Dynamic {
     /// The dialog tags of a `ClientboundUpdateTagsPacket`.

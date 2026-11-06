@@ -1005,6 +1005,9 @@ fn configure(
 ) -> Result<Dynamic, Reason> {
     let mut registries = Dynamic::default();
     let mut content_verified = false;
+    let mut fabric = horizon_protocol::registry::fabric::Handshake::new(
+        std::env::var_os("HORIZON_FABRIC_SYNC").is_some_and(|v| v == "1"),
+    );
     let reply = |p: cfg::Serverbound| -> Result<(), Reason> {
         match writer.lock().unwrap().as_mut() {
             Some(w) => w
@@ -1017,9 +1020,16 @@ fn configure(
         let (id, payload) = reader
             .recv()
             .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
-        match cfg::Clientbound::decode(id, &payload)
-            .map_err(|e| Reason::plain(connection_lost(e, lang)))?
+        let packet = cfg::Clientbound::decode(id, &payload)
+            .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+        if let Some(response) = fabric
+            .receive(&packet)
+            .map_err(|e| Reason::plain(e.to_string()))?
         {
+            reply(response)?;
+            continue;
+        }
+        match packet {
             cfg::Clientbound::KeepAlive(k) => reply(cfg::Serverbound::KeepAlive(k))?,
             cfg::Clientbound::CustomPayload(p) if p.channel == crate::content_identity::CHANNEL => {
                 let hash = crate::content_identity::identity(resources)
@@ -1114,6 +1124,7 @@ fn configure(
             cfg::Clientbound::Disconnect(d) => return Err(Reason::tag(&d.reason, lang)),
             cfg::Clientbound::FinishConfiguration(_) => {
                 registries.custom_components = content_verified;
+                registries.fabric = fabric.into_map();
                 let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
                 let w = w.as_mut().ok_or_else(|| Reason::plain("Disconnected"))?;
                 w.send(&cfg::Serverbound::FinishConfiguration(Empty).encode())
