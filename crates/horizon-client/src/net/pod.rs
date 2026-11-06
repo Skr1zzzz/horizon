@@ -19,9 +19,12 @@ fn identifier(id: &str) -> Result<(&str, &str)> {
     let (ns, name) = id.split_once(':').ok_or("PoD: invalid identifier")?;
     if ns.is_empty()
         || ns.len() > 64
+        || ns.contains("..")
+        || !safe(ns)
         || !ns
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
+        || name.contains("..")
         || !safe(name)
         || !name
             .bytes()
@@ -253,6 +256,37 @@ fn current(description: &str, fingerprint: &str, loaded: bool) -> bool {
     loaded && description == fingerprint
 }
 
+/// Consume a complete pair once, without waiting for a server finish packet.
+pub(super) fn ready(
+    snapshot: &mut Option<Vec<u8>>,
+    assets: &mut Option<Vec<u8>>,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    if snapshot.is_some() && assets.is_some() {
+        Some((snapshot.take().unwrap(), assets.take().unwrap()))
+    } else {
+        None
+    }
+}
+
+fn mod_id(ns: &str) -> String {
+    if ns.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        ns.into()
+    } else {
+        // A digest avoids conflating deco-blocks, deco.blocks and deco_blocks.
+        format!("pod_{:x}", Sha256::digest(ns.as_bytes()))[..64].into()
+    }
+}
+
+fn manifest(ns: &str, version: &str, fingerprint: &str) -> Result<String> {
+    let id = mod_id(ns);
+    let namespaces = if id == ns { vec![] } else { vec![ns] };
+    // JSON quoting keeps untrusted metadata from injecting TOML fields.
+    let version = serde_json::to_string(version)?;
+    Ok(format!(
+        "id = {id:?}\nname = {ns:?}\nversion = {version}\napi = \"0.2\"\nside = \"client\"\ncapabilities = [\"registries\"]\nnamespaces = {namespaces:?}\ndescription = {fingerprint:?}\n"
+    ))
+}
+
 pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<String>> {
     let snap = Snapshot::parse(rsnap)?;
     let (assets, meta) = assets(archive)?;
@@ -285,7 +319,9 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
     let mut messages = Vec::new();
     let mut enabled = crate::mod_list::ModList::load(dir);
     for ns in namespaces {
-        let path = folder.join(format!("{ns}.hmod"));
+        let id = mod_id(&ns);
+        let fingerprint = format!("{fingerprint} namespace={ns} mod={id}");
+        let path = folder.join(format!("{id}.hmod"));
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err("PoD: symlink package refused".into());
         }
@@ -294,7 +330,7 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
         } else {
             None
         };
-        let local = loaded.iter().find(|m| m.id == ns);
+        let local = loaded.iter().find(|m| m.id == id);
         if let Some(p) = &existing {
             let same_file = local.is_some_and(|m| {
                 m.sha256 == std::fs::read(&path).ok().map(|b| Sha256::digest(b).into())
@@ -359,16 +395,17 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
             })
             .and_then(|m| m["version"].as_str())
             .unwrap_or("0.0.0");
-        // JSON quoting keeps untrusted metadata from injecting TOML fields.
-        let version = serde_json::to_string(version)?;
-        files.insert("horizon-mod.toml".into(), format!("id = {0:?}\nname = {0:?}\nversion = {version}\napi = \"0.2\"\nside = \"client\"\ncapabilities = [\"registries\"]\ndescription = {fingerprint:?}\n", ns).into_bytes());
+        files.insert(
+            "horizon-mod.toml".into(),
+            manifest(&ns, version, &fingerprint)?.into_bytes(),
+        );
         let bytes = package(&files)?;
         std::fs::create_dir_all(&folder)?;
         std::fs::write(&path, bytes)?;
-        enabled.enabled.insert(ns.clone());
-        enabled.disabled.remove(&ns);
+        enabled.enabled.insert(id.clone());
+        enabled.disabled.remove(&id);
         let message = format!(
-            "PoD: generated {ns}.hmod ({blocks} blocks, {standalone} items) — restart Horizon to see them"
+            "PoD: generated {id}.hmod ({blocks} blocks, {standalone} items) — restart Horizon to see them"
         );
         log::info!("{message}");
         messages.push(message);
@@ -386,6 +423,62 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn vanilla_identifiers_and_foreign_namespace_package() {
+        assert!(identifier("deco-blocks:deco_end_portal_frame").is_ok());
+        assert!(identifier("laser-eyes:folder/a.b-c_d").is_ok());
+        for id in [
+            "a..b:c", "A:b", ":b", "a:b..c", "a:b:c", "a:", "a:/b", "a:b//c",
+        ] {
+            assert!(identifier(id).is_err(), "{id}");
+        }
+        let ns = "deco-blocks";
+        let text = manifest(ns, "1.0", "PoD v1 rsnap=test namespace=deco-blocks").unwrap();
+        let manifest = horizon_mods::Manifest::parse(&text).unwrap();
+        assert_eq!(manifest.namespaces, [ns]);
+        assert_ne!(mod_id(ns), mod_id("deco.blocks"));
+        assert_ne!(mod_id(ns), mod_id("deco_blocks"));
+        let files = BTreeMap::from([
+            ("horizon-mod.toml".into(), text.into_bytes()),
+            ("assets/deco-blocks/textures/block/a.png".into(), vec![1, 2]),
+            (
+                "data/deco-blocks/horizon/block/deco_bedrock.json".into(),
+                br#"{"template":"minecraft:stone"}"#.to_vec(),
+            ),
+        ]);
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/pod-namespace-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("deco.hmod");
+        std::fs::write(&path, package(&files).unwrap()).unwrap();
+        let content = horizon_mods::Content::read(&path, &manifest).unwrap();
+        assert_eq!(content.blocks[0].id, "deco-blocks:deco_bedrock");
+        assert!(
+            content
+                .files
+                .iter()
+                .any(|p| p == "assets/deco-blocks/textures/block/a.png")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn receipt_is_ready_before_pack_or_finish_and_only_once() {
+        for outcome in ["no pack", "accepted", "declined", "failed"] {
+            let (mut snapshot, mut assets) = (Some(vec![1]), None);
+            assert!(ready(&mut snapshot, &mut assets).is_none());
+            assets = Some(vec![2]);
+            // The configuration loop checks this before receiving the next
+            // packet, even if that packet opens an unanswered pack prompt.
+            assert_eq!(
+                ready(&mut snapshot, &mut assets),
+                Some((vec![1], vec![2])),
+                "{outcome}"
+            );
+            assert!(ready(&mut snapshot, &mut assets).is_none());
+        }
+    }
+
     #[test]
     fn template_table() {
         let state = |p: &str, light| State {

@@ -1017,7 +1017,8 @@ fn configure(
         && std::env::var_os("HORIZON_POD_RSNAP").is_none();
     let mut pod = horizon_protocol::registry::fabric::PodParts::default();
     let mut asset_parts = horizon_protocol::registry::fabric::PodParts::default();
-    let (mut snapshot, mut assets) = (None, None);
+    let (mut snapshot, mut assets): (Option<Vec<u8>>, Option<Vec<u8>>) = (None, None);
+    let mut pod_installed = false;
     let mut fabric =
         horizon_protocol::registry::fabric::Handshake::new(fabric_enabled).with_pod(pod_enabled);
     let reply = |p: cfg::Serverbound| -> Result<(), Reason> {
@@ -1029,6 +1030,22 @@ fn configure(
         }
     };
     loop {
+        // Content receipt is independent of a pack prompt/download and of the
+        // server choosing to wait for its resource-pack response before finishing.
+        if !pod_installed && let Some((snapshot, assets)) = pod::ready(&mut snapshot, &mut assets) {
+            pod_installed = true;
+            let dir = std::env::current_dir().map_err(|e| Reason::plain(e.to_string()))?;
+            let messages =
+                pod::install(&snapshot, &assets, &dir).map_err(|e| Reason::plain(e.to_string()))?;
+            if !messages.is_empty() {
+                let enabled = crate::mod_list::ModList::load(&dir)
+                    .enabled
+                    .into_iter()
+                    .collect();
+                let _ = send.send(Event::PodEnabled(enabled));
+                return Err(Reason::plain(messages.join("\n")));
+            }
+        }
         let (id, payload) = reader
             .recv()
             .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
@@ -1165,19 +1182,6 @@ fn configure(
             cfg::Clientbound::FinishConfiguration(_) => {
                 if asset_parts.pending() {
                     return Err(Reason::plain("PoD: incomplete assets"));
-                }
-                if let (Some(snapshot), Some(assets)) = (&snapshot, &assets) {
-                    let dir = std::env::current_dir().map_err(|e| Reason::plain(e.to_string()))?;
-                    let messages = pod::install(snapshot, assets, &dir)
-                        .map_err(|e| Reason::plain(e.to_string()))?;
-                    if !messages.is_empty() {
-                        let enabled = crate::mod_list::ModList::load(&dir)
-                            .enabled
-                            .into_iter()
-                            .collect();
-                        let _ = send.send(Event::PodEnabled(enabled));
-                        return Err(Reason::plain(messages.join("\n")));
-                    }
                 }
                 if pod.pending() {
                     return Err(Reason::plain(

@@ -723,12 +723,7 @@ impl Content {
                     "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces), to vanilla and convention (c) tags, or to vanilla's atlases"
                 ));
             }
-            if !own && top == "data" && rest.starts_with("horizon/") {
-                return Err(format!(
-                    "{name}: blocks, items, mob effects, entity types and menu types are declared in data/{id}/horizon/"
-                ));
-            }
-            let Some(decl) = (own && top == "data")
+            let Some(decl) = (owned && top == "data")
                 .then(|| rest.strip_prefix("horizon/"))
                 .flatten()
             else {
@@ -739,7 +734,7 @@ impl Content {
                     .strip_prefix(kind)?
                     .strip_prefix('/')?
                     .strip_suffix(".json")?;
-                Some(format!("{id}:{path}"))
+                Some(format!("{namespace}:{path}"))
             };
             if let Some(block) = parse("block") {
                 blocks.push((block, name.clone()));
@@ -2219,10 +2214,10 @@ capabilities = ["registries"]
         let content = hmod("listed", &manifest, files).unwrap();
         assert_eq!(content.files.len(), 3);
         assert_eq!(content.namespaces, ["ruby", "kaisyn"]);
-        // Declarations stay in the id's namespace.
+        // Declared namespaces preserve foreign registry names independently of the mod id.
         let decl: &[(&str, &[u8])] = &[("data/kaisyn/horizon/block/a.json", BLOCK)];
-        let e = hmod("listed-decl", &manifest, decl).unwrap_err();
-        assert!(e.contains("declared in data/ruby/horizon/"), "{e}");
+        let declared = hmod("listed-decl", &manifest, decl).unwrap();
+        assert_eq!(declared.blocks[0].id, "kaisyn:a");
         // A namespace it does not list is still outside.
         let other: &[(&str, &[u8])] = &[("data/other/structure/a.nbt", b"nbt")];
         assert!(hmod("listed-other", &manifest, other).is_err());
