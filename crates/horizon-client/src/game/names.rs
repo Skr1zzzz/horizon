@@ -270,6 +270,7 @@ impl Game<'_> {
                         m.position.z.floor() as i32,
                     );
                     tags.push(NameTag {
+                        id: m.id,
                         at: p,
                         lines: vec![(text, 0.0)],
                         light: l,
@@ -319,6 +320,7 @@ impl Game<'_> {
                 m.position.z.floor() as i32,
             );
             tags.push(NameTag {
+                id: m.id,
                 at,
                 lines,
                 light: l,
@@ -421,6 +423,7 @@ impl Game<'_> {
                 at.z.floor() as i32,
             );
             tags.push(NameTag {
+                id: a.id,
                 at: glam::DVec3::new(at.x, at.y + height + 0.5, at.z),
                 lines,
                 light: l,
@@ -472,6 +475,7 @@ impl Game<'_> {
                 // 0.3 toward its facing and -0.25 vertically.
                 let step = frame.step();
                 tags.push(NameTag {
+                    id: frame.id,
                     at: center
                         + glam::DVec3::new(
                             f64::from(step[0] as f32 * 0.3),
@@ -507,6 +511,7 @@ impl Game<'_> {
         // The text alpha that goes with getBackgroundOpacity(0.25):
         // max((0.25 + 0.75) / 2, 0.5), as ARGB.color (the floor of 255 times it).
         const FADED: u32 = 0x7F;
+        self.name_tag_cache.borrow_mut().begin_frame();
         let mut patches = Vec::new();
         for tag in self.collect_name_tags(
             camera,
@@ -530,6 +535,7 @@ impl Game<'_> {
                     NAME_TAG_UNIT,
                     out,
                     tag.marks,
+                    Some(tag.id),
                 ));
                 continue;
             }
@@ -547,6 +553,7 @@ impl Game<'_> {
                 NAME_TAG_UNIT,
                 out,
                 tag.marks,
+                Some(tag.id),
             ));
             // RenderPipelines.TEXT_SEE_THROUGH: no depth test, no lightmap.
             patches.extend(self.styled_name_tag_quads(
@@ -559,6 +566,7 @@ impl Game<'_> {
                 NAME_TAG_UNIT,
                 see_through,
                 tag.marks,
+                Some(tag.id),
             ));
         }
         self.map_patches.extend(patches);
@@ -589,6 +597,7 @@ impl Game<'_> {
             unit,
             out,
             Marks::default(),
+            None,
         )
     }
 
@@ -607,6 +616,7 @@ impl Game<'_> {
         unit: f32,
         out: &mut Vec<Vertex>,
         marks: Marks,
+        entity: Option<u32>,
     ) -> Vec<horizon_client::font::Patch> {
         // Options.getBackgroundOpacity(0.25) black, as ARGB.color.
         const BACKGROUND: u32 = 0x3F00_0000;
@@ -624,62 +634,82 @@ impl Game<'_> {
         let right = forward.cross(glam::DVec3::Y).normalize_or_zero();
         let up = right.cross(forward).normalize_or_zero();
         let away = forward.as_vec3() * 0.002;
+        let mut cache = self.name_tag_cache.borrow_mut();
+        let key = LayoutKey {
+            lines: lines.to_vec(),
+            alpha: text_alpha,
+            background,
+            epoch: self.gui.atlas.font.epoch(),
+            atlas: self.gui.atlas.revision,
+            marks: marks_key(marks),
+        };
+        let slot = entity.map(|id| (id, text_layer, background));
+        let cached = slot.and_then(|slot| cache.take(slot, &key));
         let mut batch = HudBatch::new([1, 1]);
+        let mut layout = cached.unwrap_or_else(|| CachedLayout {
+            key,
+            lines: Vec::new(),
+        });
+        let rebuild = layout.lines.is_empty();
         let last = lines.len().saturating_sub(1);
         for (n, (text, lift)) in lines.iter().enumerate() {
             let o = (o + glam::DVec3::new(0.0, *lift, 0.0)).as_vec3();
             let (r, u) = (right.as_vec3() * unit, up.as_vec3() * unit);
             // Text space: x right, y down (scale 0.025, -0.025).
             let at = |x: f32, y: f32| o + r * x - u * y;
-            let y0 = if text.plain() == "deadmau5" {
+            let y0 = if rebuild && text.plain() == "deadmau5" {
                 -10.0
             } else {
                 0.0
             };
-            batch.vertices.clear();
-            // Font.prepareText, as any text: bold, italic, fonts and each
-            // glyph's own box (accented.png's are 12 pixels tall).
-            let behind = batch.name_tag(
-                &self.gui.atlas,
-                text,
-                y0,
-                text_alpha << 24 | 0xFF_FFFF,
-                if background { BACKGROUND } else { 0 },
-            );
-            if n == last && marks.horizon {
-                let x = -self.gui.atlas.font.width_text(text) / 2.0 - 10.0;
-                // 8 text pixels square, a pixel left of the background.
-                for (mx, my, w, h, argb) in horizon_cosmetics::mark::MARK {
-                    let a = text_alpha * (argb >> 24) / 255;
+            if rebuild {
+                batch.vertices.clear();
+                // Font.prepareText, as any text: bold, italic, fonts and each
+                // glyph's own box (accented.png's are 12 pixels tall).
+                let behind = batch.name_tag(
+                    &self.gui.atlas,
+                    text,
+                    y0,
+                    text_alpha << 24 | 0xFF_FFFF,
+                    if background { BACKGROUND } else { 0 },
+                );
+                if n == last && marks.horizon {
+                    let x = -self.gui.atlas.font.width_text(text) / 2.0 - 10.0;
+                    // 8 text pixels square, a pixel left of the background.
+                    for (mx, my, w, h, argb) in horizon_cosmetics::mark::MARK {
+                        let a = text_alpha * (argb >> 24) / 255;
+                        batch.fill(
+                            &self.gui.atlas,
+                            x + f32::from(mx),
+                            y0 + f32::from(my),
+                            f32::from(w),
+                            f32::from(h),
+                            horizon_client::hud_layout::abgr(a << 24 | argb & 0xFF_FFFF),
+                        );
+                    }
+                }
+                if let Some(style) = marks.style.filter(|_| n == last) {
+                    let width = self.gui.atlas.font.width_text(text);
+                    let x = -width / 2.0;
+                    let alpha = text_alpha << 24;
+                    // The badge, 8 text pixels square, a pixel right of the background.
+                    batch.rect_uv(x + width + 2.0, y0, 8.0, 8.0, style.mark, alpha | 0xFF_FFFF);
+                    // The line, a pixel tall, under the background (which runs from -1 to 9).
                     batch.fill(
                         &self.gui.atlas,
-                        x + f32::from(mx),
-                        y0 + f32::from(my),
-                        f32::from(w),
-                        f32::from(h),
-                        horizon_client::hud_layout::abgr(a << 24 | argb & 0xFF_FFFF),
+                        x - 1.0,
+                        y0 + 9.0,
+                        width + 1.0,
+                        1.0,
+                        // The batch takes RGBA: the line as ARGB, swapped.
+                        horizon_client::hud_layout::abgr(alpha | style.line),
                     );
                 }
+                layout.lines.push((batch.vertices.clone(), behind));
             }
-            if let Some(style) = marks.style.filter(|_| n == last) {
-                let width = self.gui.atlas.font.width_text(text);
-                let x = -width / 2.0;
-                let alpha = text_alpha << 24;
-                // The badge, 8 text pixels square, a pixel right of the background.
-                batch.rect_uv(x + width + 2.0, y0, 8.0, 8.0, style.mark, alpha | 0xFF_FFFF);
-                // The line, a pixel tall, under the background (which runs from -1 to 9).
-                batch.fill(
-                    &self.gui.atlas,
-                    x - 1.0,
-                    y0 + 9.0,
-                    width + 1.0,
-                    1.0,
-                    // The batch takes RGBA: the line as ARGB, swapped.
-                    horizon_client::hud_layout::abgr(alpha | style.line),
-                );
-            }
-            for (i, quad) in batch.vertices.as_chunks::<6>().0.iter().enumerate() {
-                let shift = if i * 6 < behind {
+            let (vertices, behind) = &layout.lines[n];
+            for (i, quad) in vertices.as_chunks::<6>().0.iter().enumerate() {
+                let shift = if i * 6 < *behind {
                     away
                 } else {
                     glam::Vec3::ZERO
@@ -697,6 +727,9 @@ impl Game<'_> {
                     });
                 }
             }
+        }
+        if let Some(slot) = slot.filter(|_| layout.key.cacheable()) {
+            cache.current.insert(slot, layout);
         }
         // Glyphs rasterized on first use (Unifont's) upload with the frame.
         batch.patches
@@ -805,9 +838,64 @@ pub(super) fn cosmetic_lift(top: f32, scale: f32) -> f64 {
     (item + unit - bottom).max(0.0)
 }
 
+#[derive(Default)]
+pub(super) struct NameTagCache {
+    previous: std::collections::HashMap<(u32, u32, bool), CachedLayout>,
+    current: std::collections::HashMap<(u32, u32, bool), CachedLayout>,
+}
+impl NameTagCache {
+    fn take(&mut self, slot: (u32, u32, bool), key: &LayoutKey) -> Option<CachedLayout> {
+        let entry = self.previous.remove(&slot)?;
+        (entry.key == *key && key.cacheable()).then_some(entry)
+    }
+    fn begin_frame(&mut self) {
+        // Only the last frame's drawn IDs survive; no world-lifetime entity retention.
+        self.previous = std::mem::take(&mut self.current);
+    }
+}
+#[derive(PartialEq)]
+struct LayoutKey {
+    lines: Vec<(Text, f64)>,
+    alpha: u32,
+    background: bool,
+    epoch: u64,
+    atlas: u64,
+    marks: Vec<u32>,
+}
+impl LayoutKey {
+    fn cacheable(&self) -> bool {
+        !self.lines.iter().any(|(text, _)| {
+            text.spans
+                .iter()
+                .any(|span| span.style.obfuscated == Some(true))
+        })
+    }
+}
+struct CachedLayout {
+    key: LayoutKey,
+    lines: Vec<(Vec<horizon_client::hud::HudVertex>, usize)>,
+}
+fn marks_key(marks: Marks) -> Vec<u32> {
+    let mut key = vec![u32::from(marks.horizon)];
+    if let Some(style) = marks.style {
+        let r = style.mark;
+        key.extend([
+            r.u0.to_bits(),
+            r.v0.to_bits(),
+            r.u1.to_bits(),
+            r.v1.to_bits(),
+            r.w,
+            r.h,
+            style.line,
+        ]);
+    }
+    key
+}
+
 /// A name tag: where it hangs, its lines (text, lift), the packed light at
 /// the entity and whether it is discrete.
 struct NameTag {
+    id: u32,
     at: glam::DVec3,
     lines: Vec<(Text, f64)>,
     light: u8,
@@ -841,6 +929,85 @@ mod tests {
     use horizon_client::pose::Pose;
     use horizon_core::geometry::Vec3;
     use std::sync::Arc;
+
+    #[test]
+    fn name_tag_cached_quads_equal_fresh_quads() {
+        let atlas = horizon_client::hud::HudAtlas::fonts(std::path::Path::new(".")).unwrap();
+        let text = Text::colored("Lobby", 0x55ff55);
+        let fresh = || {
+            let mut batch = HudBatch::new([1, 1]);
+            let behind = batch.name_tag(&atlas, &text, 0.0, 0x7fffffff, 0x3f000000);
+            (batch.vertices, behind)
+        };
+        let mut cache = NameTagCache::default();
+        let key = || LayoutKey {
+            lines: vec![(text.clone(), 0.0)],
+            alpha: 127,
+            background: true,
+            epoch: atlas.font.epoch(),
+            atlas: atlas.revision,
+            marks: vec![0],
+        };
+        let entry = CachedLayout {
+            key: key(),
+            lines: vec![fresh()],
+        };
+        cache.current.insert((42, 2, true), entry);
+        cache.begin_frame();
+        let cached = cache.take((42, 2, true), &key()).unwrap();
+        let (expected, behind) = fresh();
+        assert_eq!(cached.lines[0].1, behind);
+        assert!(!expected.is_empty());
+        assert_eq!(cached.lines[0].0.len(), expected.len());
+        for (a, b) in cached.lines[0].0.iter().zip(expected) {
+            assert_eq!((a.pos, a.uv, a.color), (b.pos, b.uv, b.color));
+        }
+    }
+
+    #[test]
+    fn name_tag_cache_invalidates_and_evicts() {
+        let key = || LayoutKey {
+            lines: vec![(Text::colored("Lobby", 0xffffff), 0.0)],
+            alpha: 255,
+            background: false,
+            epoch: 1,
+            atlas: 1,
+            marks: marks_key(Marks::default()),
+        };
+        let slot = (42, 0, false);
+        let mut cache = NameTagCache::default();
+        for change in 0..7 {
+            cache.current.insert(
+                slot,
+                CachedLayout {
+                    key: key(),
+                    lines: Vec::new(),
+                },
+            );
+            cache.begin_frame();
+            let mut next = key();
+            match change {
+                0 => {}
+                1 => next.lines[0].0 = Text::literal("Changed"),
+                2 => next.lines[0].0 = Text::colored("Lobby", 0xff0000),
+                3 => next.alpha = 127,
+                4 => next.background = true,
+                5 => next.epoch += 1,
+                _ => next.lines[0].0.spans[0].style.obfuscated = Some(true),
+            }
+            assert_eq!(cache.take(slot, &next).is_some(), change == 0);
+        }
+        cache.current.insert(
+            slot,
+            CachedLayout {
+                key: key(),
+                lines: vec![],
+            },
+        );
+        cache.begin_frame();
+        cache.begin_frame();
+        assert!(cache.take(slot, &key()).is_none());
+    }
 
     #[test]
     fn name_tag_culling_keeps_intersecting_entity_boxes_within_distance() {

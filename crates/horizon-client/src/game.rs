@@ -3077,6 +3077,7 @@ struct Game<'a> {
     pending_uploads: Vec<((i32, i32, i32), horizon_client::mesher::SectionMesh)>,
     /// This frame's view frustum, for culling entities and block entities.
     view_frustum: Option<horizon_client::gfx::Frustum>,
+    name_tag_cache: std::cell::RefCell<names::NameTagCache>,
     /// Whether the renderer's section-occlusion graph is active for this view.
     entity_section_visibility_valid: bool,
     /// The camera section in the current world layout.
@@ -19958,6 +19959,7 @@ impl<'a> Game<'a> {
             tick_script: tick_script::TickScript::from_env(),
             agent: agent::Agent::default(),
             view_frustum: None,
+            name_tag_cache: Default::default(),
             entity_section_visibility_valid: false,
             entity_section_camera: None,
             sync_occlusion_culler: None,
