@@ -250,7 +250,8 @@ impl PodParts {
         self.receive_bounded(data, 64 << 20)
     }
     pub fn receive_assets(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.receive_bounded(data, 32 << 20)
+        // pod-bridge caps the archive at 64 MiB: models, textures, then whole mods' sounds.
+        self.receive_bounded(data, 64 << 20)
     }
     fn receive_bounded(&mut self, data: &[u8], limit: usize) -> Result<Option<Vec<u8>>> {
         let invalid = || Error::new("PoD: invalid, out-of-order or oversized part");
@@ -366,7 +367,7 @@ mod tests {
         assert!(state.receive_assets(&pod_part(1, 2, 32769, 1)).is_err());
         assert!(
             PodParts::default()
-                .receive_assets(&pod_part(0, 1025, (32 << 20) + 1, 32768))
+                .receive_assets(&pod_part(0, 2049, (64 << 20) + 1, 32768))
                 .is_err()
         );
         assert!(

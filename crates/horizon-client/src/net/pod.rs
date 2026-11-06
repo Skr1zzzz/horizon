@@ -216,12 +216,23 @@ fn assets(bytes: &[u8]) -> Result<(Files, Value)> {
             continue;
         }
         let parts: Vec<_> = name.split('/').collect();
-        let allowed = parts.len() >= 4
-            && parts[0] == "assets"
-            && ["blockstates", "models", "items", "textures", "lang"].contains(&parts[2])
-            && ["json", "png", "mcmeta", "lang"]
-                .iter()
-                .any(|ext| name.ends_with(&format!(".{ext}")));
+        // Models may be OBJ (Create's tracks, wheels); sounds and equipment layers load from content mods.
+        let allowed = parts[0] == "assets"
+            && (parts.len() == 3 && parts[2] == "sounds.json"
+                || parts.len() >= 4
+                    && [
+                        "blockstates",
+                        "models",
+                        "items",
+                        "textures",
+                        "lang",
+                        "equipment",
+                        "sounds",
+                    ]
+                    .contains(&parts[2])
+                    && ["json", "png", "mcmeta", "lang", "obj", "mtl", "ogg"]
+                        .iter()
+                        .any(|ext| name.ends_with(&format!(".{ext}"))));
         if name != "pod-assets.json" && !allowed {
             continue;
         }
@@ -274,7 +285,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 6;
+const GENERATOR_REVISION: u32 = 7;
 
 fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
     for menu in meta["menus"].as_array().into_iter().flatten() {
@@ -464,13 +475,19 @@ fn geometry(files: &Files, id: &str) -> bool {
             return false;
         }
         let Some(bytes) = files.get(&format!("assets/{ns}/models/{path}.json")) else {
-            // Vanilla's root supplies transforms, not any visible faces.
-            return ns == "minecraft" && path != "block/block";
+            // Vanilla's block parents have faces (its root only transforms); item/generated is a flat
+            // sprite that no block model can use (mod signs' item icons would draw as missing models).
+            return ns == "minecraft" && path.starts_with("block/") && path != "block/block";
         };
         let Ok(model) = serde_json::from_slice::<Value>(bytes) else {
             return false;
         };
-        if model.get("elements").is_some() {
+        // OBJ models (`"loader": "neoforge:obj"`) carry their faces in the .obj file.
+        if model.get("elements").is_some()
+            || model["loader"]
+                .as_str()
+                .is_some_and(|l| l.ends_with(":obj") && model["model"].is_string())
+        {
             return true;
         }
         let Some(parent) = model["parent"].as_str() else {
@@ -887,6 +904,28 @@ mod tests {
     }
 
     #[test]
+    fn block_geometry_excludes_flat_item_sprites_and_accepts_obj() {
+        let files = Files::from([
+            (
+                "assets/m/models/item/s.json".into(),
+                br#"{"parent":"minecraft:item/generated"}"#.to_vec(),
+            ),
+            (
+                "assets/m/models/block/o.json".into(),
+                br#"{"loader":"neoforge:obj","model":"m:models/block/o.obj"}"#.to_vec(),
+            ),
+            (
+                "assets/m/models/block/c.json".into(),
+                br#"{"parent":"minecraft:block/cube_all"}"#.to_vec(),
+            ),
+        ]);
+        assert!(!geometry(&files, "m:item/s"));
+        assert!(geometry(&files, "m:block/o"));
+        assert!(geometry(&files, "m:block/c"));
+        assert!(!geometry(&files, "minecraft:block/block"));
+    }
+
+    #[test]
     fn foreign_item_model_types_become_static_models() {
         let files = Files::from([
             ("assets/m/models/block/d/item.json".into(), b"{}".to_vec()),
@@ -1175,11 +1214,23 @@ mod tests {
             ),
             ("assets/test/textures/a.png".into(), vec![1, 2]),
             ("assets/test/sounds/a.ogg".into(), vec![3]),
+            ("assets/test/sounds.json".into(), b"{}".to_vec()),
+            ("assets/test/models/block/a.obj".into(), vec![4]),
             ("assets/test/lang/lt_LT.json".into(), b"{}".to_vec()),
+            ("assets/test/shaders/a.vsh".into(), vec![5]),
+            ("assets/test/ponder/a.nbt".into(), vec![6]),
         ]);
         let bytes = package(&files).unwrap();
         let (allowed, _) = assets(&bytes).unwrap();
-        assert_eq!(allowed.len(), 1);
+        assert_eq!(
+            allowed.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "assets/test/models/block/a.obj",
+                "assets/test/sounds.json",
+                "assets/test/sounds/a.ogg",
+                "assets/test/textures/a.png",
+            ]
+        );
         assert_eq!(allowed["assets/test/textures/a.png"], [1, 2]);
         assert!(package(&BTreeMap::from([("assets/test/../a.png".into(), vec![])])).is_err());
         assert!(identifier("../test:a").is_err());
