@@ -285,7 +285,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 7;
+const GENERATOR_REVISION: u32 = 8;
 
 fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
     for menu in meta["menus"].as_array().into_iter().flatten() {
@@ -434,6 +434,15 @@ fn adapt_foreign_models(
                 .as_str()
                 .filter(|id| model(id))
                 .map(str::to_owned)
+                .or_else(|| {
+                    // Mod renderers can name their static model in another field (backpacks use `base`).
+                    node.as_object()?.iter().find_map(|(key, value)| {
+                        if key == "type" || key == "model" {
+                            return None;
+                        }
+                        value.as_str().filter(|id| model(id)).map(str::to_owned)
+                    })
+                })
                 .or_else(|| {
                     [
                         format!("{ns}:item/{name}/item"),
@@ -932,6 +941,10 @@ mod tests {
             ("assets/m/models/item/w/item.json".into(), b"{}".to_vec()),
             ("assets/m/models/item/g.json".into(), b"{}".to_vec()),
             ("assets/m/textures/item/t.png".into(), vec![]),
+            (
+                "assets/travelersbackpack/models/block/standard.json".into(),
+                b"{}".to_vec(),
+            ),
         ]);
         let mut extra = Files::new();
         let mut run = |node: Value, name: &str| {
@@ -942,6 +955,17 @@ mod tests {
         let static_model = |id: &str| json!({"type":"minecraft:model","model":id});
         let oversized = json!({"type":"m:model/oversized","model":"m:block/d/item","min":[0]});
         assert_eq!(run(oversized, "d"), (true, static_model("m:block/d/item")));
+        let backpack = json!({"type":"travelersbackpack:backpack",
+            "base":"travelersbackpack:block/standard","tintSources":[]});
+        assert_eq!(
+            run(backpack, "w"),
+            (true, static_model("travelersbackpack:block/standard"))
+        );
+        // An unrelated string must not prevent the name-based fallback.
+        assert_eq!(
+            run(json!({"type":"m:model/w","base":"m:block/missing"}), "w"),
+            (true, static_model("m:item/w/item"))
+        );
         assert_eq!(
             run(json!({"type":"m:model/w"}), "w"),
             (true, static_model("m:item/w/item"))
