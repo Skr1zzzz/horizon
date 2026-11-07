@@ -603,6 +603,7 @@ pub struct MeshTables {
     /// full block (`Info::face` 1): a face looking at it never shows.
     full_faces: Vec<u8>,
     pub visibility: FaceVisibility,
+    fluid_textures: Vec<Option<[u16; 2]>>,
     water_still: u16,
     water_flow: u16,
     water_overlay: u16,
@@ -746,7 +747,16 @@ impl MeshTables {
                 emission: s.emission,
                 tier: hdr_tier(name, s.emission),
                 emissive,
-                fluid: FluidState::from_block(state)?,
+                fluid: if assets.fluid_textures.contains_key(s.name.as_ref())
+                    || (s.has_class("LiquidBlock") && !s.name.starts_with("minecraft:"))
+                {
+                    let mut liquid = state.clone();
+                    liquid.name = "minecraft:water".into();
+                    FluidState::from_block(&liquid)?
+                } else {
+                    FluidState::from_block(state)?
+                },
+
                 model: s.render_shape == RenderShape::Model,
                 block_entity: s.block_entity,
                 tints,
@@ -775,6 +785,17 @@ impl MeshTables {
                 .iter()
                 .map(|i| (0..6).fold(0, |bits, d| bits | u8::from(i.face[d] == 1) << d))
                 .collect(),
+            fluid_textures: facts
+                .states
+                .iter()
+                .map(|s| {
+                    assets
+                        .fluid_textures
+                        .get(s.name.as_ref())
+                        .map(|pair| Ok([layer(&pair[0])?, layer(&pair[1])?]))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
             info,
             visibility,
             water_still: layer("minecraft:block/water_still")?,

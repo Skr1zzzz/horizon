@@ -202,6 +202,23 @@ pub(super) fn splits_north_east(nw: f32, ne: f32, sw: f32, se: f32) -> bool {
     let (along_nw, along_ne) = ((nw - se).abs(), (ne - sw).abs());
     along_nw < along_ne || along_nw == 0.0
 }
+fn select_sprites(
+    declared: Option<[u16; 2]>,
+    fallback: (u16, u16, Option<u16>),
+) -> (u16, u16, Option<u16>) {
+    // Water's overlay would turn a mod fluid blue beside glass and leaves.
+    declared.map_or(fallback, |[still, flow]| (still, flow, None))
+}
+
+#[test]
+fn fluid_declared_sprites_replace_both_faces_and_overlay() {
+    assert_eq!(
+        select_sprites(Some([42, 43]), (1, 2, Some(3))),
+        (42, 43, None)
+    );
+    assert_eq!(select_sprites(None, (1, 2, Some(3))), (1, 2, Some(3)));
+}
+
 /// Emits one fluid cell at section-relative `[x, y, z]`.
 /// `(nether, shader_pack_lighting, separate_ao, shader_pack)`: the Nether's face shading, only the
 /// up-face value when a shader pack lights the faces (`Mesher::shader_pack_lighting`), whether to
@@ -248,7 +265,8 @@ pub(super) fn tesselate(
         return;
     }
     let water = matches!(kind, FluidKind::Water | FluidKind::FlowingWater);
-    let tint = if water {
+    let declared = tables.fluid_textures[pad.blocks[pi(x, y, z)] as usize];
+    let tint = if water && declared.is_none() {
         water_color & 0xFF_FFFF
     } else {
         0xFF_FFFF
@@ -326,15 +344,18 @@ pub(super) fn tesselate(
             lighting::coords(pad, at(above), above),
         ))
     };
-    let (still, flow, overlay) = if water {
-        (
-            tables.water_still,
-            tables.water_flow,
-            Some(tables.water_overlay),
-        )
-    } else {
-        (tables.lava_still, tables.lava_flow, None)
-    };
+    let (still, flow, overlay) = select_sprites(
+        declared,
+        if water {
+            (
+                tables.water_still,
+                tables.water_flow,
+                Some(tables.water_overlay),
+            )
+        } else {
+            (tables.lava_still, tables.lava_flow, None)
+        },
+    );
     let target = if water {
         &mut out.translucent
     } else {

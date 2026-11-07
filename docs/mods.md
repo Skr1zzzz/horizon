@@ -162,6 +162,11 @@ one with the item names its wall form:
 { "template": "minecraft:oak_wall_sign", "wood_type": "ruby:elm", "item": false }
 ```
 
+Liquid blocks can declare `"fluid_textures": ["ruby:fluid/syrup_still", "ruby:fluid/syrup_flow"]`.
+These resource locations name untinted still and flowing sprites (no `.png`); animation uses the
+sprites' `.png.mcmeta` files just like vanilla. Both sprites are added to the block atlas.
+Omitting the field keeps the template's water/lava appearance. This changes rendering, not fluid physics.
+
 The same goes for `minecraft:oak_hanging_sign` and `minecraft:oak_wall_hanging_sign`. `wall_block` is what the
 sign's item places on a wall, a block of the same mod, declared in its files when the sign is; without it the
 item places the template's wall sign. The wall form has no item of its own, and its sign's item is what picking

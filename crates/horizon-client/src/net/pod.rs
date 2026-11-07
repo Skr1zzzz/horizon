@@ -65,7 +65,15 @@ fn template(
                 .get(key)
                 .is_some_and(|d| d.iter().map(String::as_str).eq(values.iter().copied()))
     };
-    if domains.is_empty() && cube {
+    if domain(
+        "level",
+        &[
+            "0", "1", "10", "11", "12", "13", "14", "15", "2", "3", "4", "5", "6", "7", "8", "9",
+        ],
+    ) && rows.iter().all(|s| s.flags & (1 << 5) != 0)
+    {
+        "minecraft:water"
+    } else if domains.is_empty() && cube {
         "minecraft:iron_block"
     } else if domain("lit", &["false", "true"])
         && rows
@@ -285,7 +293,23 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 8;
+const GENERATOR_REVISION: u32 = 9;
+
+fn fluid_textures(files: &Files, id: &str) -> Option<[String; 2]> {
+    let (ns, name) = id.split_once(':')?;
+    ["fluid", "block"].into_iter().find_map(|folder| {
+        let pair = [
+            format!("{ns}:{folder}/{name}_still"),
+            format!("{ns}:{folder}/{name}_flow"),
+        ];
+        pair.iter()
+            .all(|id| {
+                let (ns, path) = id.split_once(':').unwrap();
+                files.contains_key(&format!("assets/{ns}/textures/{path}.png"))
+            })
+            .then_some(pair)
+    })
+}
 
 fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
     for menu in meta["menus"].as_array().into_iter().flatten() {
@@ -762,7 +786,7 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
                 continue;
             }
             // One unrepresentable block must not cost the whole mod its content.
-            let value = match declaration(&snap, block, items.contains(&block.name)) {
+            let mut value = match declaration(&snap, block, items.contains(&block.name)) {
                 Ok(value) => value,
                 Err(e) => {
                     log::warn!("PoD: {}: block skipped: {e}", block.name);
@@ -770,6 +794,17 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
                     continue;
                 }
             };
+            // FLUID also marks waterlogged solids; only liquid level blocks use these conventions.
+            if snap.states_of_block(block.raw_id).is_some_and(|r| {
+                snap.states[r].iter().all(|s| {
+                    s.flags & (1 << 5) != 0
+                        && props(&s.properties).is_ok_and(|p| p.contains_key("level"))
+                })
+            }) {
+                if let Some(pair) = fluid_textures(&files, &block.name) {
+                    value["fluid_textures"] = json!(pair);
+                }
+            }
             files.insert(
                 format!("data/{ns}/horizon/block/{name}.json"),
                 serde_json::to_vec(&value)?,
@@ -828,6 +863,30 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fluid_sprite_conventions_and_missing_pair() {
+        for folder in ["fluid", "block"] {
+            let mut files = Files::new();
+            files.insert(
+                format!("assets/create/textures/{folder}/honey_still.png"),
+                vec![],
+            );
+            assert_eq!(fluid_textures(&files, "create:honey"), None);
+            files.insert(
+                format!("assets/create/textures/{folder}/honey_flow.png"),
+                vec![],
+            );
+            assert_eq!(
+                fluid_textures(&files, "create:honey"),
+                Some([
+                    format!("create:{folder}/honey_still"),
+                    format!("create:{folder}/honey_flow")
+                ])
+            );
+            assert_eq!(fluid_textures(&files, "create:chocolate"), None);
+        }
+    }
+
     #[test]
     fn generated_menu_loads_and_unsupported_menus_are_skipped() {
         let printer = json!({"id":"computercraft:printer","slots":[[8,19],[30,19],[-1,10],[513,0]],
