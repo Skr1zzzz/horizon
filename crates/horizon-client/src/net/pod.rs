@@ -226,7 +226,12 @@ fn declaration(
         .states_of_block(reference.raw_id)
         .ok_or("PoD: missing template states")?;
     let refs = &snap.states[refs];
-    let inherited = chosen == "minecraft:oak_log" || chosen == "minecraft:redstone_lamp";
+    let inherited = [
+        "minecraft:oak_log",
+        "minecraft:redstone_lamp",
+        "minecraft:water",
+    ]
+    .contains(&chosen);
     if inherited
         && refs
             .iter()
@@ -253,7 +258,7 @@ fn declaration(
         );
         lights = BTreeSet::from([default]);
     }
-    let mut out = json!({"template": chosen, "item": item});
+    let mut out = json!({"template": chosen, "item": item && chosen != "minecraft:water"});
     if !domains.is_empty() {
         out["default_state"] = json!(props(
             &snap.states[block.default_state as usize].properties
@@ -379,7 +384,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 10;
+const GENERATOR_REVISION: u32 = 12;
 
 fn fluid_textures(files: &Files, id: &str) -> Option<[String; 2]> {
     let (ns, name) = id.split_once(':')?;
