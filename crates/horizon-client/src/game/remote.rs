@@ -591,6 +591,7 @@ pub(super) struct Remote {
     menu_extra: Option<horizon_protocol::menu_extra::Message>,
     pending_pod: Option<play::OpenScreen>,
     pod_menu: Option<horizon_client::net::pod::Menu>,
+    pub(super) pod_entities: HashMap<i32, String>,
     entities: HashMap<i32, Tracked>,
     lerps: HashMap<i32, Lerp>,
     /// The minecarts the server moves with `ClientboundMoveMinecartPacket`
@@ -1132,6 +1133,7 @@ impl Game<'_> {
             state_id: 0,
             use_target: None,
             menu_extra: None,
+            pod_entities: HashMap::new(),
             pending_pod: None,
             pod_menu: None,
             entities: HashMap::new(),
@@ -3263,6 +3265,16 @@ impl Game<'_> {
             }
             // A mod menu type's block and its mod's bytes, just before the
             // menu's `OpenScreen`.
+            C::CustomPayload(p) if p.channel == "pod:entity" => {
+                match horizon_client::net::pod::decode_entity(&p.data) {
+                    Ok((id, kind)) => {
+                        if let Some(r) = self.remote.as_mut() {
+                            r.pod_entities.insert(id, kind);
+                        }
+                    }
+                    Err(e) => log::warn!("Ignoring malformed pod:entity: {e}"),
+                }
+            }
             C::CustomPayload(p) if p.channel == "pod:menu" => {
                 match horizon_client::net::pod::Menu::decode(&p.data) {
                     Ok(layout) => self.remote_pod_menu(layout),
@@ -3605,6 +3617,7 @@ impl Game<'_> {
                         if let Some(uuid) = r.level_players.remove(&id) {
                             r.attachments.remove(&Holder::Player(uuid));
                         }
+                        r.pod_entities.remove(&id);
                         r.level_player_names.remove(&id);
                         r.level_player_textures.remove(&id);
                         r.attachments.remove(&Holder::Entity(id as u32));

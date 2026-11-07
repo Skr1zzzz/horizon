@@ -1306,7 +1306,7 @@ fn creeper_swelling(m: &Mob, alpha: f32) -> f32 {
 }
 /// LivingEntityRenderer.getOverlayCoords for the body: the hurt red, or a
 /// swelling creeper's white flash. Layers take the red only (progress 0).
-fn body_overlay(m: &Mob, alpha: f32) -> u32 {
+pub(super) fn body_overlay(m: &Mob, alpha: f32) -> u32 {
     let white = if m.species() == Species::Creeper {
         crate::overlay::creeper_progress(creeper_swelling(m, alpha))
     } else {
@@ -2979,6 +2979,7 @@ mod tests {
             blinks: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         };
         let atlas = |name: &str| {
             Some(if name.contains("_inner") {
@@ -3072,6 +3073,7 @@ mod tests {
             blinks: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         };
         let atlas = |name: &str| {
             Some(if name.contains("copper_golem_eyes") {
@@ -3129,6 +3131,7 @@ mod tests {
             blinks: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         };
         for left in [false, true] {
             let t = held_item_transform(&mob, 0.5, glam::DVec3::ZERO, &data, left).unwrap();
@@ -3242,6 +3245,7 @@ mod tests {
             blinks: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         };
         let atlas = |_: &str| Some([0.0, 0.0, 0.25, 0.25]);
         let part = &kind.model;
@@ -3551,6 +3555,7 @@ mod scroll_tests {
             blinks: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         };
         let atlas = |name: &str| {
             let h = name.len() as f32 / 64.0;
@@ -3706,6 +3711,7 @@ mod emissive_tests {
             blinks: RwLock::new(blinks),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         }
     }
 
@@ -3984,6 +3990,7 @@ mod random_texture_tests {
             entity_tags: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         }
     }
 

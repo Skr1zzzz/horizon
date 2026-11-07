@@ -20,6 +20,7 @@ pub mod body_anim;
 pub mod brain;
 pub mod breeze;
 pub mod camel;
+pub mod captured;
 pub mod caravan;
 pub mod cem;
 pub mod cem_anim;

@@ -135,6 +135,17 @@ impl Menu {
     }
 }
 
+pub fn decode_entity(bytes: &[u8]) -> crate::Result<(i32, String)> {
+    let mut r = horizon_protocol::buf::Reader::new(bytes);
+    let id = r.varint()?;
+    let kind = r.string(32767)?;
+    identifier(&kind)?;
+    if r.remaining() != 0 {
+        return Err("PoD: trailing entity bytes".into());
+    }
+    Ok((id, kind))
+}
+
 type Result<T> = crate::Result<T>;
 type Files = BTreeMap<String, Vec<u8>>;
 const FILE: usize = 8 << 20;
@@ -384,7 +395,7 @@ fn assets(bytes: &[u8]) -> Result<(Files, Value)> {
                     && ["json", "png", "mcmeta", "lang", "obj", "mtl", "ogg"]
                         .iter()
                         .any(|ext| name.ends_with(&format!(".{ext}"))));
-        if name != "pod-assets.json" && !allowed {
+        if name != "pod-assets.json" && name != "pod-entities.json" && !allowed {
             continue;
         }
         // Vanilla ignores files that are not resource locations (Create ships lang/lt_LT.json);
@@ -436,7 +447,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 15;
+const GENERATOR_REVISION: u32 = 16;
 
 fn entity_template(
     meta: &Value,
@@ -1009,6 +1020,10 @@ fn manifest(ns: &str, version: &str, fingerprint: &str) -> Result<String> {
 pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<String>> {
     let snap = Snapshot::parse(rsnap)?;
     let (assets, meta) = assets(archive)?;
+    let captures: Value = assets
+        .get("pod-entities.json")
+        .and_then(|b| serde_json::from_slice(b).ok())
+        .unwrap_or(Value::Null);
     let fingerprint = fingerprint(rsnap, archive);
     let items: BTreeSet<_> = snap
         .registries
@@ -1035,6 +1050,18 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
         let (ns, _) = identifier(id)?;
         if ns != "minecraft" {
             namespaces.insert(ns.to_owned());
+        }
+    }
+    for id in captures["entities"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, _)| id)
+    {
+        if let Ok((ns, _)) = identifier(id)
+            && ns != "minecraft"
+        {
+            namespaces.insert(ns.into());
         }
     }
     let loaded = horizon_protocol::mod_list::local();
@@ -1084,6 +1111,21 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
             .filter(|(p, _)| p.starts_with(&format!("assets/{ns}/")))
             .map(|(p, b)| (p.clone(), b.clone()))
             .collect();
+        if captures["format"] == 1 {
+            let entities: serde_json::Map<String, Value> = captures["entities"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(id, _)| id.starts_with(&format!("{ns}:")))
+                .map(|(id, v)| (id.clone(), v.clone()))
+                .collect();
+            if !entities.is_empty() {
+                files.insert(
+                    format!("assets/{ns}/pod/entities.json"),
+                    serde_json::to_vec(&json!({"format":1,"entities":entities}))?,
+                );
+            }
+        }
         adapt(&mut files, &snap, &ns);
         menus(&mut files, &meta, &ns)?;
         let mut blocks = 0;
@@ -1192,6 +1234,34 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pod_entity_decode() {
+        let mut w = horizon_protocol::buf::Writer::new();
+        w.varint(345);
+        w.string("friendsandfoes:penguin");
+        assert_eq!(
+            decode_entity(&w.data).unwrap(),
+            (345, "friendsandfoes:penguin".into())
+        );
+        for n in 0..w.data.len() {
+            assert!(decode_entity(&w.data[..n]).is_err());
+        }
+        w.u8(0);
+        assert!(decode_entity(&w.data).is_err());
+        let files = Files::from([
+            ("pod-assets.json".into(), b"{}".to_vec()),
+            (
+                "pod-entities.json".into(),
+                br#"{"format":1,"entities":{}}"#.to_vec(),
+            ),
+        ]);
+        assert!(
+            assets(&package(&files).unwrap())
+                .unwrap()
+                .0
+                .contains_key("pod-entities.json")
+        );
+    }
     #[test]
     fn sign_templates_and_packaged_textures() {
         for (properties, expected, folder) in [

@@ -7176,6 +7176,27 @@ impl Game<'_> {
                 let block = horizon_client::mobs::aquatic::glow_squid_block_light(mob, lit);
                 packed = (packed & 0xFF) | ((block * 16) << 8);
             }
+            if let Some(kind) = self
+                .remote
+                .as_ref()
+                .and_then(|r| r.pod_entities.get(&(mob.id as i32)))
+                && self.res.mob_data().captures.draw(
+                    kind,
+                    mob,
+                    alpha as f32,
+                    camera,
+                    &lookup,
+                    packed,
+                    out,
+                )
+            {
+                if let Some(rgb) = outline {
+                    self.mark_outline(&out[entity_start..], rgb);
+                } else {
+                    self.cull_entity_vertices(out, entity_start);
+                }
+                continue;
+            }
             // A native mod's own model in place of the vanilla one
             // (`native_mob_submit`), before any of the vanilla model's parts
             // (a sulfur cube's swallowed block) are drawn.

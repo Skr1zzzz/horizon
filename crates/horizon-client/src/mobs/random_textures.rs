@@ -268,6 +268,7 @@ mod tests {
             entity_tags: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         }
     }
 

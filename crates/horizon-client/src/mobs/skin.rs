@@ -564,6 +564,7 @@ mod tests {
             blinks: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         };
         // Every texture its own rect, so a swapped texture shows.
         let atlas = |name: &str| {

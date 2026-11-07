@@ -1649,6 +1649,7 @@ mod preview_tests {
             blinks: Default::default(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         };
         let draw = |body: bool| {
             let mut out = Vec::new();

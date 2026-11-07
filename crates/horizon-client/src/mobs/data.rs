@@ -41,6 +41,7 @@ pub enum Placement {
     NoRestrictions,
 }
 pub struct MobData {
+    pub captures: super::captured::Captures,
     pub states: Vec<StateData>,
     pub placements: HashMap<String, Placement>,
     /// Each entity type's `SpawnPlacements.getHeightmapType`.
@@ -99,6 +100,7 @@ impl MobData {
         data.emissive = std::sync::RwLock::new(std::sync::Arc::new(emissive));
         data.blinks = std::sync::RwLock::new(blinks);
         data.random_textures = std::sync::RwLock::new(random);
+        data.captures = super::captured::Captures::load(root);
         data
     }
     /// Only the keyframe animation definitions of `mob-data.json`.
@@ -168,6 +170,7 @@ impl MobData {
             entity_tags: HashMap::new(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         }
     }
     /// Without the export, approximate path types from the gameplay facts.
@@ -229,6 +232,7 @@ impl MobData {
             entity_tags: HashMap::new(),
             pois: Default::default(),
             species_placements: Default::default(),
+            captures: Default::default(),
         }
     }
     pub fn state(&self, id: horizon_world::registry::BlockStateId) -> StateData {
