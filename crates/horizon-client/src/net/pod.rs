@@ -173,10 +173,19 @@ fn template(
         "minecraft:stone"
     }
 }
+#[cfg(test)]
 fn declaration(
     snap: &Snapshot,
     block: &horizon_protocol::rsnap::Block,
     item: bool,
+) -> Result<Value> {
+    declaration_with_entity(snap, block, item, &Value::Null)
+}
+fn declaration_with_entity(
+    snap: &Snapshot,
+    block: &horizon_protocol::rsnap::Block,
+    item: bool,
+    entity: &Value,
 ) -> Result<Value> {
     let range = snap
         .states_of_block(block.raw_id)
@@ -214,7 +223,8 @@ fn declaration(
     if count != rows.len() || actual.iter().any(|p| !p.keys().eq(domains.keys())) {
         return Err("PoD: non-Cartesian states".into());
     }
-    let chosen = template(&domains, &rows, cube);
+    let chosen = entity_template(entity, &block.name, &domains)
+        .unwrap_or_else(|| template(&domains, &rows, cube));
     if chosen == "minecraft:stone" {
         log::warn!(
             "PoD: {}: stone fallback; only representable light is preserved",
@@ -231,7 +241,8 @@ fn declaration(
         "minecraft:redstone_lamp",
         "minecraft:water",
     ]
-    .contains(&chosen);
+    .contains(&chosen)
+        || entity_template(entity, &block.name, &domains).is_some();
     if inherited
         && refs
             .iter()
@@ -384,7 +395,45 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 12;
+const GENERATOR_REVISION: u32 = 13;
+
+fn entity_template(
+    meta: &Value,
+    id: &str,
+    domains: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<&'static str> {
+    let wall = domains.contains_key("facing") || id.contains("_wall_");
+    match meta["type"].as_str()? {
+        "minecraft:sign" | "minecraft:hanging_sign" => {
+            let hanging = domains.contains_key("attached")
+                || id.ends_with("hanging_sign")
+                || meta["type"] == "minecraft:hanging_sign";
+            Some(match (hanging, wall) {
+                (false, false) => "minecraft:oak_sign",
+                (false, true) => "minecraft:oak_wall_sign",
+                (true, false) => "minecraft:oak_hanging_sign",
+                (true, true) => "minecraft:oak_wall_hanging_sign",
+            })
+        }
+        _ => None,
+    }
+}
+
+fn entity_texture(files: &Files, meta: &Value, template: &str) -> Option<String> {
+    if !template.ends_with("_sign") {
+        return None;
+    }
+    let wood = meta["wood_type"].as_str()?;
+    let (ns, name) = identifier(wood).ok()?;
+    let folder = if template.ends_with("hanging_sign") {
+        "signs/hanging"
+    } else {
+        "signs"
+    };
+    files
+        .contains_key(&format!("assets/{ns}/textures/entity/{folder}/{name}.png"))
+        .then(|| format!("{ns}:entity/{folder}/{name}"))
+}
 
 fn fluid_textures(files: &Files, id: &str) -> Option<[String; 2]> {
     let (ns, name) = id.split_once(':')?;
@@ -992,7 +1041,12 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
                 continue;
             }
             // One unrepresentable block must not cost the whole mod its content.
-            let mut value = match declaration(&snap, block, items.contains(&block.name)) {
+            let mut value = match declaration_with_entity(
+                &snap,
+                block,
+                items.contains(&block.name),
+                &meta["block_entities"][&block.name],
+            ) {
                 Ok(value) => value,
                 Err(e) => {
                     log::warn!("PoD: {}: block skipped: {e}", block.name);
@@ -1000,6 +1054,20 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
                     continue;
                 }
             };
+            if let Some(chosen) = value["template"].as_str().filter(|t| t.ends_with("_sign")) {
+                if let Some(texture) =
+                    entity_texture(&files, &meta["block_entities"][&block.name], chosen)
+                {
+                    value["block_entity_texture"] = json!(texture);
+                }
+                if let Some(wood) = meta["block_entities"][&block.name]["wood_type"].as_str()
+                    && identifier(wood).is_ok()
+                {
+                    value["wood_type"] = json!(wood);
+                }
+                // Particle-only foreign models must not replace the template's sign body.
+                files.remove(&format!("assets/{ns}/blockstates/{name}.json"));
+            }
             biome_tint(&assets, &block.name, &mut value);
             // FLUID also marks waterlogged solids; only liquid level blocks use these conventions.
             if snap.states_of_block(block.raw_id).is_some_and(|r| {
@@ -1070,6 +1138,44 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sign_templates_and_packaged_textures() {
+        for (properties, expected, folder) in [
+            ("rotation=0,waterlogged=false", "oak_sign", "signs"),
+            ("facing=north,waterlogged=false", "oak_wall_sign", "signs"),
+            (
+                "attached=false,rotation=0,waterlogged=false",
+                "oak_hanging_sign",
+                "signs/hanging",
+            ),
+            (
+                "facing=north,waterlogged=false",
+                "oak_wall_hanging_sign",
+                "signs/hanging",
+            ),
+        ] {
+            let hanging = folder == "signs/hanging";
+            let meta = json!({"type":if hanging {"minecraft:hanging_sign"} else {"minecraft:sign"}, "wood_type":"bop:fir"});
+            let domains = props(properties)
+                .unwrap()
+                .into_iter()
+                .map(|(k, v)| (k, BTreeSet::from([v])))
+                .collect();
+            let chosen = entity_template(&meta, "bop:unusual", &domains).unwrap();
+            assert_eq!(chosen, format!("minecraft:{expected}"));
+            let mut files = Files::new();
+            assert_eq!(entity_texture(&files, &meta, chosen), None);
+            files.insert(
+                format!("assets/bop/textures/entity/{folder}/fir.png"),
+                vec![],
+            );
+            assert_eq!(
+                entity_texture(&files, &meta, chosen),
+                Some(format!("bop:entity/{folder}/fir"))
+            );
+        }
+    }
+
     #[test]
     fn tinted_faces_select_biome_provider_through_parents() {
         let mut files = Files::from([

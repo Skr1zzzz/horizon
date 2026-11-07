@@ -2455,6 +2455,62 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
     Ok(())
 }
 
+fn override_entity_models(
+    base: &Path,
+    overlay: &Overlay,
+    node: &mut serde_json::Value,
+    ns: &str,
+    block: &str,
+    texture: &str,
+) -> Result<()> {
+    match node {
+        serde_json::Value::Object(map) => {
+            if let Some(model) = map.get_mut("model") {
+                if let Some(original) = model.as_str() {
+                    let mut parent = original.to_owned();
+                    let mut textures = serde_json::Map::new();
+                    let mut seen = BTreeSet::new();
+                    while seen.insert(parent.clone()) {
+                        let (owner, path) =
+                            parent.split_once(':').unwrap_or(("minecraft", &parent));
+                        let source: serde_json::Value = serde_json::from_slice(&fs::read(
+                            base.join(format!("assets/{owner}/models/{path}.json")),
+                        )?)?;
+                        if let Some(keys) = source["textures"].as_object() {
+                            for key in keys.keys() {
+                                textures.insert(key.clone(), serde_json::json!(texture));
+                            }
+                        }
+                        let Some(next) = source["parent"].as_str() else {
+                            break;
+                        };
+                        parent = next.to_owned();
+                    }
+                    // Keep the template geometry and transforms, but isolate its material from other woods.
+                    let path = format!("block/{block}/{}", original.replace(':', "/"));
+                    overlay.write(
+                        &format!("assets/{ns}/models/{path}.json"),
+                        &serde_json::to_vec(
+                            &serde_json::json!({"parent":original,"textures":textures}),
+                        )?,
+                    )?;
+                    *model = serde_json::json!(format!("{ns}:{path}"));
+                }
+            }
+            for child in map.values_mut() {
+                override_entity_models(base, overlay, child, ns, block, texture)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                override_entity_models(base, overlay, child, ns, block, texture)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Builds the content root for `mods` over `base` in `out`. Returns the
 /// warnings for the log: the shared tags a mod replaced.
 pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>> {
@@ -2685,6 +2741,15 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
         for block in &m.content.blocks {
             let (ns, path) = block.id.split_once(':').unwrap_or((&m.id, &block.id));
             let own = format!("assets/{ns}/blockstates/{path}.json");
+            if let Some(texture) = &block.block_entity_texture {
+                let template = block.template.trim_start_matches("minecraft:");
+                let mut state: serde_json::Value = serde_json::from_slice(&fs::read(
+                    base.join(format!("assets/minecraft/blockstates/{template}.json")),
+                )?)?;
+                override_entity_models(base, &overlay, &mut state, ns, path, texture)?;
+                overlay.write(&own, &serde_json::to_vec(&state)?)?;
+                continue;
+            }
             if m.content.files.contains(&own) {
                 continue;
             }
