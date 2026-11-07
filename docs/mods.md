@@ -179,7 +179,13 @@ it gives. `wood_type` names the editor's background:
 (16x16), and a bare name is vanilla's, such as `cherry`; without it the template's wood is used. The board is
 the block's model: `minecraft:block/template_sign_rot_0` to `_rot_3` and `template_wall_sign`, and for hanging
 signs `template_hanging_sign_rot_0` to `_rot_3`, `template_attached_hanging_sign_rot_0` to `_rot_3` and
-`template_wall_hanging_sign`, with `all` and `particle` textures. List your blocks in vanilla's tags as well:
+`template_wall_hanging_sign`, with `all` and `particle` textures. Alternatively, declare
+`"block_entity_texture": "ruby:entity/signs/elm"` (hanging: `ruby:entity/signs/hanging/elm`),
+a sprite resource location without `.png`. This uses the vanilla template's blockstate and body models,
+with that sprite replacing their textures, including inherited texture slots. Omit it to keep the
+normal blockstate/model selection; PoD uses the template texture when the wood sprite is not packaged.
+This field currently applies to baked bodies, not dynamic chest/bed/banner renderer materials.
+List your blocks in vanilla's tags as well:
 `minecraft:standing_signs`, `minecraft:wall_signs`, `minecraft:ceiling_hanging_signs` and
 `minecraft:wall_hanging_signs`, which vanilla's other sign tags and `minecraft:mineable/axe` include. Give the
 wall form a loot table of its own, or name it `<x>_wall_sign` so that it drops what `<x>_sign`'s table does.

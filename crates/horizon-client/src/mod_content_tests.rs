@@ -2,6 +2,47 @@ use super::*;
 use crate::{assets::Assets, blocks::BlockFacts, items::Items};
 
 #[test]
+fn sign_body_texture_override_preserves_template_geometry() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/sign-texture-test");
+    let base = root.join("base");
+    let out = root.join("out");
+    fs::create_dir_all(base.join("assets/minecraft/models/block")).unwrap();
+    fs::write(
+        base.join("assets/minecraft/models/block/sign.json"),
+        r#"{"textures":{"wood":"minecraft:entity/signs/oak"},"elements":[]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(&out).unwrap();
+    let overlay = Overlay {
+        base: &base,
+        out: &out,
+    };
+    let mut state =
+        serde_json::json!({"variants":{"rotation=0":{"model":"minecraft:block/sign","y":90}}});
+    override_entity_models(
+        &base,
+        &overlay,
+        &mut state,
+        "bop",
+        "fir_sign",
+        "bop:entity/signs/fir",
+    )
+    .unwrap();
+    assert_eq!(state["variants"]["rotation=0"]["y"], 90);
+    let model = state["variants"]["rotation=0"]["model"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("bop:")
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(
+        &fs::read(out.join(format!("assets/bop/models/{model}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["parent"], "minecraft:block/sign");
+    assert_eq!(result["textures"]["wood"], "bop:entity/signs/fir");
+}
+
+#[test]
 fn renames_ids_keys_and_states() {
     let mut r = Rename::new("minecraft:iron_block", "ruby:ruby_block");
     r.states = 10..12;

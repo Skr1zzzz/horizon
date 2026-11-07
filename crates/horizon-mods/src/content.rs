@@ -252,6 +252,7 @@ fn state_name(s: &str) -> bool {
 struct BlockFile {
     template: String,
     fluid_textures: Option<[String; 2]>,
+    block_entity_texture: Option<String>,
     #[serde(default)]
     properties: BlockProperties,
     shapes: Option<BlockShapes>,
@@ -289,6 +290,8 @@ pub struct Block {
     pub template: String,
     /// Untinted fluid sprites, [still, flow]; absent keeps vanilla's fluid appearance.
     pub fluid_textures: Option<[String; 2]>,
+    /// Namespaced sprite for a sign's baked block-entity body; absent keeps the template texture.
+    pub block_entity_texture: Option<String>,
     pub properties: BlockProperties,
     pub shapes: Option<BlockShapes>,
     pub collision_shapes: Option<BlockShapes>,
@@ -847,6 +850,7 @@ impl Content {
                 wood_type: file.wood_type,
                 wall_block: file.wall_block,
                 fluid_textures: file.fluid_textures,
+                block_entity_texture: file.block_entity_texture,
             };
             check_block(&block).map_err(|e| format!("{name}: {e}"))?;
             if block.item {
@@ -1174,6 +1178,11 @@ fn check_block(file: &Block) -> Result<(), String> {
         _ => {}
     }
     // Every vanilla `SignBlock`'s id ends in `_sign`, and no other block's does.
+    if let Some(texture) = &file.block_entity_texture {
+        if !namespaced_id(texture) {
+            return Err("block_entity_texture needs a namespaced resource location".into());
+        }
+    }
     let sign = file.template.ends_with("_sign");
     if let Some(wood) = &file.wood_type {
         if !sign {
@@ -1472,6 +1481,7 @@ capabilities = ["registries"]
                 wood_type: None,
                 wall_block: None,
                 fluid_textures: None,
+                block_entity_texture: None,
             }]
         );
         assert_eq!(content.items[0].id, "ruby:ruby");
