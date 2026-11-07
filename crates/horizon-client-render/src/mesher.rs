@@ -623,6 +623,37 @@ fn redstone_color(power: u8) -> u32 {
     let b = (f * f * 0.6 - 0.7).clamp(0.0, 1.0);
     ((r * 255.0) as u32) << 16 | ((g * 255.0) as u32) << 8 | (b * 255.0) as u32
 }
+fn resolve_declared_fluid(
+    pair: &[String; 2],
+    layer: impl Fn(&str) -> crate::Result<u16>,
+) -> Option<[u16; 2]> {
+    match layer(&pair[0]).and_then(|still| Ok([still, layer(&pair[1])?])) {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            log::warn!("Horizon: {e}; using water textures for {pair:?}");
+            None
+        }
+    }
+}
+
+#[test]
+fn declared_fluid_missing_sprite_falls_back() {
+    let pair = ["test:fluid/still".into(), "test:fluid/flow".into()];
+    for missing in [0, 1] {
+        assert_eq!(
+            resolve_declared_fluid(&pair, |name| {
+                if name == pair[missing] {
+                    Err("missing sprite".into())
+                } else {
+                    Ok(42)
+                }
+            }),
+            None
+        );
+    }
+    assert_eq!(resolve_declared_fluid(&pair, |_| Ok(42)), Some([42, 42]));
+}
+
 impl MeshTables {
     pub fn new(
         assets: &Assets,
@@ -787,6 +818,12 @@ impl MeshTables {
                 cover,
             });
         }
+        // Resolve once per block, not once per level state, to warn only once.
+        let declared: std::collections::BTreeMap<_, _> = assets
+            .fluid_textures
+            .iter()
+            .map(|(name, pair)| (name.as_str(), resolve_declared_fluid(pair, &layer)))
+            .collect();
         Ok(Self {
             solid: info.iter().map(|i| i.solid).collect(),
             full_faces: info
@@ -796,14 +833,8 @@ impl MeshTables {
             fluid_textures: facts
                 .states
                 .iter()
-                .map(|s| {
-                    assets
-                        .fluid_textures
-                        .get(s.name.as_ref())
-                        .map(|pair| Ok([layer(&pair[0])?, layer(&pair[1])?]))
-                        .transpose()
-                })
-                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
+                .map(|s| declared.get(s.name.as_ref()).copied().flatten())
+                .collect(),
             info,
             visibility,
             water_still: layer("minecraft:block/water_still")?,

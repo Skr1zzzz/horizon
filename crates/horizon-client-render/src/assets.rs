@@ -351,6 +351,7 @@ impl RenderAssets {
         ] {
             sprites.insert(root, &format!("minecraft:block/{name}"))?;
         }
+        insert_declared_fluid_sprites(root, &assets.fluid_textures, &mut sprites);
         for stage in 0..10 {
             sprites.insert(root, &format!("minecraft:block/destroy_stage_{stage}"))?;
             sprites.insert(root, &format!("minecraft:block/destroy_oit_stage_{stage}"))?;
@@ -427,10 +428,70 @@ impl RenderAssets {
     }
 }
 
+fn insert_declared_fluid_sprites(
+    root: &Path,
+    declarations: &std::collections::BTreeMap<String, [String; 2]>,
+    sprites: &mut crate::sprites::Sprites,
+) {
+    // Prepared roots bake models directly, bypassing the content atlas sources.
+    for sprite in declarations.values().flatten() {
+        // Leave failures absent so the mesher can fall back for the whole pair.
+        let _ = sprites.try_insert(root, sprite);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::items::ConsumeEffect;
     use horizon_world::loot::PackOverlay;
+
+    #[test]
+    fn declared_fluid_sprites_enter_prepared_atlas() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".fluid-atlas-test-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let declarations: std::collections::BTreeMap<String, [String; 2]> =
+            std::collections::BTreeMap::from([
+                (
+                    "biomesoplenty:blood".into(),
+                    [
+                        "biomesoplenty:block/blood_still".into(),
+                        "biomesoplenty:block/blood_flow".into(),
+                    ],
+                ),
+                (
+                    "create:honey".into(),
+                    [
+                        "create:fluid/honey_still".into(),
+                        "create:fluid/honey_flow".into(),
+                    ],
+                ),
+            ]);
+        for sprite in declarations.values().flatten() {
+            let (ns, path) = sprite.split_once(':').unwrap();
+            let file = root.join(format!("assets/{ns}/textures/{path}.png"));
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            let mut encoder = png::Encoder::new(std::fs::File::create(file).unwrap(), 16, 16);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[120, 30, 10, 255].repeat(256))
+                .unwrap();
+        }
+        let mut sprites = crate::sprites::Sprites::default();
+        super::insert_declared_fluid_sprites(&root, &declarations, &mut sprites);
+        for name in [
+            "biomesoplenty:block/blood_still",
+            "biomesoplenty:block/blood_flow",
+            "create:fluid/honey_still",
+            "create:fluid/honey_flow",
+        ] {
+            assert!(sprites.layers.contains_key(name), "{name}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn always_edible_and_consume_effects_loaded() {
