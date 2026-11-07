@@ -1440,6 +1440,18 @@ impl<'a> Plan<'a> {
         match name {
             "facts.json" => {
                 states(doc, "states", false, false)?;
+                let textures = self
+                    .blocks
+                    .iter()
+                    .filter_map(|b| {
+                        let pair = b.decl.fluid_textures.as_ref()?;
+                        Some((
+                            b.decl.id.clone(),
+                            J::Arr(pair.iter().cloned().map(J::Str).collect()),
+                        ))
+                    })
+                    .collect();
+                doc.set("fluid_textures", J::Obj(textures));
                 let defaults = doc.at("defaults").ok_or("no defaults")?;
                 for b in &self.blocks {
                     let default = b.default;
@@ -2471,6 +2483,18 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     let mut modifiers = Vec::new();
     let mut atlases: BTreeMap<String, Vec<J>> = BTreeMap::new();
     for m in mods {
+        for block in &m.content.blocks {
+            if let Some(pair) = &block.fluid_textures {
+                for sprite in pair {
+                    atlases
+                        .entry("assets/minecraft/atlases/blocks.json".into())
+                        .or_default()
+                        .push(serde_json::from_value(
+                            serde_json::json!({"type":"minecraft:single", "resource":sprite} ),
+                        )?);
+                }
+            }
+        }
         let declarations = format!("data/{}/horizon/", m.id);
         let mut reader = m.content.reader()?;
         for file in &m.content.files {

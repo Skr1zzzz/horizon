@@ -72,6 +72,7 @@ pub struct Assets {
     pub material_states: [BlockStateId; 6],
     /// Block names in `#minecraft:blocks_fluid_flow` (fluid flow vectors).
     pub blocks_fluid_flow: BTreeSet<String>,
+    pub fluid_textures: std::collections::BTreeMap<String, [String; 2]>,
 }
 /// The block models and their baked sprites, read from the pack at `root` over
 /// an existing block registry: everything the mesher and renderer need.
@@ -262,6 +263,15 @@ impl Assets {
             properties,
             material_states,
             blocks_fluid_flow,
+            fluid_textures: {
+                let facts: Value = horizon_world::json_file::read(&root.join("facts.json"))?;
+                serde_json::from_value(
+                    facts
+                        .get("fluid_textures")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                )?
+            },
         })
     }
     /// The models and sprites of another resource root over these blocks

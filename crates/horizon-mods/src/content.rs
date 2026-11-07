@@ -251,6 +251,7 @@ fn state_name(s: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct BlockFile {
     template: String,
+    fluid_textures: Option<[String; 2]>,
     #[serde(default)]
     properties: BlockProperties,
     shapes: Option<BlockShapes>,
@@ -286,6 +287,8 @@ pub struct Block {
     pub id: String,
     /// The vanilla block it copies, `minecraft:<path>`.
     pub template: String,
+    /// Untinted fluid sprites, [still, flow]; absent keeps vanilla's fluid appearance.
+    pub fluid_textures: Option<[String; 2]>,
     pub properties: BlockProperties,
     pub shapes: Option<BlockShapes>,
     pub collision_shapes: Option<BlockShapes>,
@@ -843,6 +846,7 @@ impl Content {
                 thickness: file.thickness,
                 wood_type: file.wood_type,
                 wall_block: file.wall_block,
+                fluid_textures: file.fluid_textures,
             };
             check_block(&block).map_err(|e| format!("{name}: {e}"))?;
             if block.item {
@@ -1467,6 +1471,7 @@ capabilities = ["registries"]
                 thickness: None,
                 wood_type: None,
                 wall_block: None,
+                fluid_textures: None,
             }]
         );
         assert_eq!(content.items[0].id, "ruby:ruby");
