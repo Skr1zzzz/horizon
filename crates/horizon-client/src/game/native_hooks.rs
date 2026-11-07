@@ -1971,6 +1971,7 @@ pub(super) struct OpenNativeScreen {
     pub(super) window: i32,
     block: String,
     screen: NativeScreen,
+    background: Option<String>,
     data: Vec<i32>,
     extra: Option<horizon_protocol::menu_extra::Message>,
 }
@@ -10123,12 +10124,14 @@ impl Game<'_> {
             }
         }
         // Declared layouts belong to the server-named menu, even without a block.
-        if let Some(screen) = horizon_client::mod_api::menu_screen(menu, screen) {
+        if let Some(mut screen) = horizon_client::mod_api::menu_screen(menu, screen) {
+            let background = self.menu_background(menu, &mut screen);
             self.mod_screen = Some(OpenNativeScreen {
                 key,
                 window,
                 block,
                 screen,
+                background,
                 data: Vec::new(),
                 extra,
             });
@@ -10140,32 +10143,48 @@ impl Game<'_> {
             key,
             BlockEntity::Mod(Box::new(
                 horizon_client::containers::ModBlockEntityFields {
-                    items: vec![None; layout.slots.len()],
+                    items: std::iter::repeat_n(None, layout.slots.len()).collect(),
                     ..Default::default()
                 }
                 .into(),
             )),
         );
         self.container = Some(key);
+        let l = layout.layout();
+        let mut screen = NativeScreen {
+            width: l.width,
+            height: l.height,
+            slots: l.slots,
+            inventory_x: 8.0,
+            inventory_y: l.inventory_y,
+            own_labels: false,
+            own_background: false,
+        };
+        let background = self.menu_background(&layout.menu, &mut screen);
         self.mod_screen = Some(OpenNativeScreen {
             key,
             window: layout.sync_id,
             block: "pod:menu".into(),
-            screen: {
-                let l = layout.layout();
-                NativeScreen {
-                    width: l.width,
-                    height: l.height,
-                    slots: l.slots,
-                    inventory_x: 8.0,
-                    inventory_y: l.height,
-                    own_labels: false,
-                    own_background: false,
-                }
-            },
-            data: vec![0; layout.data_slots],
+            screen,
+            background,
+            data: std::iter::repeat_n(0, layout.data_slots).collect(),
             extra: None,
         });
+    }
+    fn menu_background(&self, menu: &str, screen: &mut NativeScreen) -> Option<String> {
+        if screen.own_background {
+            return None;
+        }
+        let background =
+            horizon_client::net::pod::menu_background(menu, |name| self.native_sprite_size(name));
+        // Declared screens also need the vanilla margin below their player grid.
+        screen.height = screen.height.max(screen.inventory_y + 82.0);
+        (screen.width, screen.height) = horizon_client::net::pod::menu_panel_size(
+            screen.width,
+            screen.height,
+            background.as_ref().map(|(_, size)| *size),
+        );
+        background.map(|(name, _)| name)
     }
     pub(super) fn pod_screen_shown(&self) -> bool {
         self.shown_native_screen()
@@ -10244,7 +10263,10 @@ impl Game<'_> {
             return false;
         };
         let atlas = &self.gui.atlas;
-        if !s.screen.own_background {
+        if let Some(name) = &s.background {
+            let (w, h) = (s.screen.width, s.screen.height);
+            self.native_sprite(batch, name, [0.0, 0.0, w, h], [ox, oy, w, h]);
+        } else if !s.screen.own_background {
             let (w, h) = (s.screen.width, s.screen.height);
             batch.fill(atlas, ox, oy, w, h, rgba(0, 0, 0, 255));
             batch.fill(
@@ -11144,6 +11166,7 @@ mod tests {
             window: 4,
             block: "gtmod:machine".into(),
             screen: super::NativeScreen::default(),
+            background: None,
             data: Vec::new(),
             extra: None,
         };

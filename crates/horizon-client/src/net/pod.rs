@@ -21,6 +21,35 @@ pub struct Layout {
     pub width: f32,
     pub height: f32,
     pub slots: Vec<Option<[f32; 2]>>,
+    pub inventory_y: f32,
+}
+
+/// Atlas names omit `textures/` and `.png`; the first shipped convention wins.
+pub fn menu_background(
+    menu: &str,
+    mut size: impl FnMut(&str) -> Option<[f32; 2]>,
+) -> Option<(String, [f32; 2])> {
+    let (ns, path) = identifier(menu).ok()?;
+    for name in [
+        format!("{ns}:gui/container/{path}"),
+        format!("{ns}:gui/{path}"),
+        format!("{ns}:gui/{path}_gui"),
+        format!("{ns}:gui/container/{path}_gui"),
+        format!("{ns}:gui/{path}/{path}"),
+    ] {
+        if let Some(size) = size(&name) {
+            return Some((name, size));
+        }
+    }
+    None
+}
+
+pub fn menu_panel_size(width: f32, height: f32, texture: Option<[f32; 2]>) -> (f32, f32) {
+    if texture.is_some_and(|[w, h]| w >= 176.0 && h >= 166.0) {
+        (width.max(176.0), height.max(166.0))
+    } else {
+        (width, height)
+    }
 }
 impl Menu {
     pub fn accepts(&self, pending: Option<i32>, open: Option<(i32, &str)>) -> bool {
@@ -86,10 +115,22 @@ impl Menu {
             width = width.max(p[0] + 17.0);
             height = height.max(p[1] + 17.0);
         }
+        // The first player slot is the main grid, not the hotbar. Vanilla leaves
+        // eight pixels below the hotbar's 16-pixel item area (84 + 82 = 166).
+        let inventory_y = self
+            .slots
+            .iter()
+            .zip(&slots)
+            .find_map(|(s, p)| (s.2 == 1).then_some(*p).flatten().map(|p| p[1]))
+            .unwrap_or(84.0);
+        if self.slots.iter().any(|s| s.2 == 1) {
+            height = height.max(inventory_y + 82.0);
+        }
         Layout {
             width,
             height,
             slots,
+            inventory_y,
         }
     }
 }
@@ -1152,6 +1193,70 @@ mod tests {
     }
 
     #[test]
+    fn pod_menu_background_lookup_order() {
+        let names = [
+            "mod:gui/container/pot",
+            "mod:gui/pot",
+            "mod:gui/pot_gui",
+            "mod:gui/container/pot_gui",
+            "mod:gui/pot/pot",
+        ];
+        for first in 0..names.len() {
+            let found = menu_background("mod:pot", |name| {
+                names[first..].contains(&name).then_some([256.0, 256.0])
+            })
+            .unwrap();
+            assert_eq!(found.0, names[first]);
+        }
+        assert!(
+            menu_background("other:pot", |name| names
+                .contains(&name)
+                .then_some([256.0, 256.0]))
+            .is_none()
+        );
+        assert!(menu_background("mod:../pot", |_| Some([256.0, 256.0])).is_none());
+        assert!(menu_background("mod:pot", |_| None).is_none());
+    }
+
+    #[test]
+    fn pod_menu_geometry() {
+        let mut menu = Menu {
+            sync_id: 1,
+            menu: "mod:pot".into(),
+            title: String::new(),
+            slots: vec![(8, 20, 0)],
+            data_slots: 0,
+        };
+        for row in 0..3 {
+            for col in 0..9 {
+                menu.slots.push((8 + col * 18, 84 + row * 18, 1));
+            }
+        }
+        for col in 0..9 {
+            menu.slots.push((8 + col * 18, 142, 1));
+        }
+        let l = menu.layout();
+        assert_eq!(
+            (l.width, l.height, l.inventory_y - 11.0),
+            (176.0, 166.0, 73.0)
+        );
+        assert_eq!(l.slots[28], Some([8.0, 142.0]));
+        assert_eq!(
+            menu_panel_size(176.0, 49.0, Some([256.0, 256.0])),
+            (176.0, 166.0)
+        );
+        assert_eq!(
+            menu_panel_size(230.0, 200.0, Some([256.0, 256.0])),
+            (230.0, 200.0)
+        );
+        assert_eq!(menu_panel_size(176.0, 49.0, None), (176.0, 49.0));
+        assert_eq!(
+            menu_panel_size(176.0, 49.0, Some([176.0, 165.0])),
+            (176.0, 49.0)
+        );
+    }
+
+    #[test]
     fn pod_menu_decode_and_window_model() {
         use horizon_protocol::buf::Writer;
         let mut w = Writer::new();
@@ -1175,7 +1280,7 @@ mod tests {
         assert_eq!(m.data_slots, 2);
         let l = m.layout();
         assert_eq!(l.slots.len(), 3);
-        assert_eq!((l.width, l.height), (257.0, 197.0));
+        assert_eq!((l.width, l.height), (257.0, 262.0));
         assert_eq!(l.slots[2], None);
         assert_eq!(m.internal(1), Some(9));
         assert_eq!(m.index(10002), Some(2));
