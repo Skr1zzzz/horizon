@@ -9,7 +9,11 @@ fn sign_body_texture_override_preserves_template_geometry() {
     fs::create_dir_all(base.join("assets/minecraft/models/block")).unwrap();
     fs::write(
         base.join("assets/minecraft/models/block/sign.json"),
-        r#"{"textures":{"wood":"minecraft:entity/signs/oak"},"elements":[]}"#,
+        r##"{"textures":{"wood":"minecraft:entity/signs/oak"},"elements":[
+            {"faces":{"north":{"texture":"#wood"}}},
+            {"faces":{"north":{"texture":"#post"}}},
+            {"faces":{"north":{"texture":"#chain"}}},
+            {"faces":{"north":{"texture":"#bar"}}}] }"##,
     )
     .unwrap();
     fs::create_dir_all(&out).unwrap();
@@ -39,7 +43,9 @@ fn sign_body_texture_override_preserves_template_geometry() {
     )
     .unwrap();
     assert_eq!(result["parent"], "minecraft:block/sign");
-    assert_eq!(result["textures"]["wood"], "bop:entity/signs/fir");
+    for slot in ["wood", "post", "chain", "bar"] {
+        assert_eq!(result["textures"][slot], "bop:entity/signs/fir");
+    }
 }
 
 #[test]

@@ -436,7 +436,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 13;
+const GENERATOR_REVISION: u32 = 14;
 
 fn entity_template(
     meta: &Value,
@@ -719,10 +719,23 @@ fn tinted_model(files: &Files, id: &str) -> bool {
         if !seen.insert(format!("{ns}:{path}")) {
             return false;
         }
-        let Some(model) = files
-            .get(&format!("assets/{ns}/models/{path}.json"))
-            .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
-        else {
+        let key = format!("assets/{ns}/models/{path}.json");
+        let Some(bytes) = files.get(&key) else {
+            // Installation has no vanilla resource root: these vanilla parents have tinted faces.
+            // Keep this explicit rather than treating every external vanilla model as tinted.
+            return ns == "minecraft"
+                && matches!(
+                    path,
+                    "block/leaves"
+                        | "block/tinted_cross"
+                        | "block/grass_block"
+                        | "block/vine"
+                        | "block/lily_pad"
+                        | "block/sugar_cane"
+                        | "block/tinted_flower_pot_cross"
+                );
+        };
+        let Ok(model) = serde_json::from_slice::<Value>(bytes) else {
             return false;
         };
         // A child's elements replace its parent's, including the parent's tint faces.
@@ -1215,6 +1228,28 @@ mod tests {
                 Some(format!("bop:entity/{folder}/fir"))
             );
         }
+    }
+
+    #[test]
+    fn vanilla_leaf_parent_selects_foliage_without_packaged_vanilla() {
+        let mut files = Files::from([
+            ("assets/test/blockstates/mahogany_leaves.json".into(),
+                br#"{"variants":{"":{"model":"test:block/leaves"}}}"#.to_vec()),
+            ("assets/test/models/block/leaves.json".into(),
+                br#"{"parent":"minecraft:block/leaves","textures":{"all":"test:block/mahogany_leaves"}}"#.to_vec()),
+        ]);
+        let mut value = json!({"properties":{}});
+        biome_tint(&files, "test:mahogany_leaves", &mut value);
+        assert_eq!(value["properties"]["biome_tint"], "foliage");
+        files.insert(
+            "assets/test/models/block/leaves.json".into(),
+            br#"{"parent":"minecraft:block/leaves","elements":[]}"#.to_vec(),
+        );
+        let mut value = json!({"properties":{}});
+        biome_tint(&files, "test:mahogany_leaves", &mut value);
+        assert!(value["properties"].get("biome_tint").is_none());
+        assert!(!tinted_model(&files, "minecraft:block/cube_all"));
+        assert!(!tinted_model(&files, "other:block/leaves"));
     }
 
     #[test]

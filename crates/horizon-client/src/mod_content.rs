@@ -2476,6 +2476,22 @@ fn override_entity_models(
                         let source: serde_json::Value = serde_json::from_slice(&fs::read(
                             base.join(format!("assets/{owner}/models/{path}.json")),
                         )?)?;
+                        // Templates can reference support-part slots without declaring them locally.
+                        // Bind face references too, so posts, bars and chains share the wood sprite.
+                        for element in source["elements"].as_array().into_iter().flatten() {
+                            for face in element["faces"]
+                                .as_object()
+                                .into_iter()
+                                .flat_map(|f| f.values())
+                            {
+                                if let Some(slot) = face["texture"].as_str() {
+                                    textures.insert(
+                                        slot.trim_start_matches('#').to_owned(),
+                                        serde_json::json!(texture),
+                                    );
+                                }
+                            }
+                        }
                         if let Some(keys) = source["textures"].as_object() {
                             for key in keys.keys() {
                                 textures.insert(key.clone(), serde_json::json!(texture));
