@@ -11,7 +11,8 @@ fn sign_body_texture_override_preserves_template_geometry() {
         base.join("assets/minecraft/models/block/sign.json"),
         r##"{"textures":{"wood":"minecraft:entity/signs/oak"},"elements":[
             {"faces":{"north":{"texture":"#wood"}}},
-            {"faces":{"north":{"texture":"#post"}}},
+            {"from":[7.33333,0,7.33333],"to":[8.66667,9.33333,8.66667],
+             "faces":{"north":{"texture":"#post","uv":[14,8,15,15]}}},
             {"faces":{"north":{"texture":"#chain"}}},
             {"faces":{"north":{"texture":"#bar"}}}] }"##,
     )
@@ -43,8 +44,62 @@ fn sign_body_texture_override_preserves_template_geometry() {
     )
     .unwrap();
     assert_eq!(result["parent"], "minecraft:block/sign");
+    assert_eq!(result["elements"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        result["elements"][1]["to"],
+        serde_json::json!([8.66667, 9.33333, 8.66667])
+    );
+    assert_eq!(
+        result["elements"][1]["faces"]["north"]["uv"],
+        serde_json::json!([0.5, 9., 1., 16.])
+    );
     for slot in ["wood", "post", "chain", "bar"] {
         assert_eq!(result["textures"][slot], "bop:entity/signs/fir");
+    }
+}
+
+#[test]
+fn sign_entity_skin_uvs_cover_boards_and_supports() {
+    for wall in [false, true] {
+        let mut body = serde_json::json!([
+            {"from":[7.33333,0,7.33333],"to":[8.66667,9.33333,8.66667],
+             "faces":{"north":{"uv":[14,8,15,15]}}},
+            {"from":[0,9.33333,7.33333],"to":[16,17.33333,8.66667],
+             "faces":{"north":{"uv":[0,8,12,14]}}}
+        ]);
+        if wall {
+            body.as_array_mut().unwrap().remove(0);
+        }
+        entity_sign_uvs(&mut body, false);
+        let board = if wall { 0 } else { 1 };
+        assert_eq!(
+            body[board]["faces"]["north"]["uv"],
+            serde_json::json!([0.5, 1., 6.5, 7.])
+        );
+        if !wall {
+            assert_eq!(
+                body[0]["faces"]["north"]["uv"],
+                serde_json::json!([0.5, 9., 1., 16.])
+            );
+        }
+        let mut hanging = serde_json::json!([
+            {"faces":{"north":{"uv":[9,8,16,13]}}},
+            {"faces":{"north":{"uv":if wall {[0.,3.5,8.,4.5]} else {[12.5,3.5,11.,6.5]}}}}
+        ]);
+        entity_sign_uvs(&mut hanging, true);
+        assert_eq!(
+            hanging[0]["faces"]["north"]["uv"],
+            serde_json::json!([4.5, 8, 8., 13])
+        );
+        let expected = if wall {
+            [0., 3.5, 4., 4.5]
+        } else {
+            [6.25, 3.5, 5.5, 6.5]
+        };
+        assert_eq!(
+            hanging[1]["faces"]["north"]["uv"],
+            serde_json::json!(expected)
+        );
     }
 }
 

@@ -2455,6 +2455,40 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
     Ok(())
 }
 
+// Prepared sign sprites pack the board and post into a square; entity skins use
+// the original cube unwrap. Geometry stays vanilla, but UVs must follow the skin.
+fn entity_sign_uvs(elements: &mut serde_json::Value, hanging: bool) {
+    for element in elements.as_array_mut().into_iter().flatten() {
+        let post = element["from"][1].as_f64() == Some(0.0)
+            && element["to"][1].as_f64().is_some_and(|y| y < 10.0);
+        for (side, face) in element["faces"].as_object_mut().into_iter().flatten() {
+            if hanging {
+                if let Some(uv) = face["uv"].as_array_mut() {
+                    for i in [0, 2] {
+                        uv[i] = serde_json::json!(uv[i].as_f64().unwrap() / 2.0);
+                    }
+                }
+                continue;
+            }
+            let uv = match (post, side.as_str()) {
+                (true, "west") => [0., 18., 2., 32.],
+                (true, "north") => [2., 18., 4., 32.],
+                (true, "east") => [4., 18., 6., 32.],
+                (true, "south") => [6., 18., 8., 32.],
+                (true, "up") => [2., 16., 4., 18.],
+                (true, _) => [4., 16., 6., 18.],
+                (false, "west") => [0., 2., 2., 14.],
+                (false, "north") => [2., 2., 26., 14.],
+                (false, "east") => [26., 2., 28., 14.],
+                (false, "south") => [28., 2., 52., 14.],
+                (false, "up") => [2., 0., 26., 2.],
+                (false, _) => [26., 0., 50., 2.],
+            };
+            face["uv"] = serde_json::json!([uv[0] / 4., uv[1] / 2., uv[2] / 4., uv[3] / 2.]);
+        }
+    }
+}
+
 fn override_entity_models(
     base: &Path,
     overlay: &Overlay,
@@ -2470,12 +2504,18 @@ fn override_entity_models(
                     let mut parent = original.to_owned();
                     let mut textures = serde_json::Map::new();
                     let mut seen = BTreeSet::new();
+                    let mut elements = None;
                     while seen.insert(parent.clone()) {
                         let (owner, path) =
                             parent.split_once(':').unwrap_or(("minecraft", &parent));
                         let source: serde_json::Value = serde_json::from_slice(&fs::read(
                             base.join(format!("assets/{owner}/models/{path}.json")),
                         )?)?;
+                        if elements.is_none() && source["elements"].is_array() {
+                            let mut body = source["elements"].clone();
+                            entity_sign_uvs(&mut body, original.contains("hanging_sign"));
+                            elements = Some(body);
+                        }
                         // Templates can reference support-part slots without declaring them locally.
                         // Bind face references too, so posts, bars and chains share the wood sprite.
                         for element in source["elements"].as_array().into_iter().flatten() {
@@ -2504,11 +2544,13 @@ fn override_entity_models(
                     }
                     // Keep the template geometry and transforms, but isolate its material from other woods.
                     let path = format!("block/{block}/{}", original.replace(':', "/"));
+                    let mut wrapper = serde_json::json!({"parent":original,"textures":textures});
+                    if let Some(elements) = elements {
+                        wrapper["elements"] = elements;
+                    }
                     overlay.write(
                         &format!("assets/{ns}/models/{path}.json"),
-                        &serde_json::to_vec(
-                            &serde_json::json!({"parent":original,"textures":textures}),
-                        )?,
+                        &serde_json::to_vec(&wrapper)?,
                     )?;
                     *model = serde_json::json!(format!("{ns}:{path}"));
                 }

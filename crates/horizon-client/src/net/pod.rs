@@ -436,7 +436,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 14;
+const GENERATOR_REVISION: u32 = 15;
 
 fn entity_template(
     meta: &Value,
