@@ -1321,6 +1321,9 @@ impl<'a> Plan<'a> {
         if let Some(ticks) = &p.random_ticks {
             row.set("random_ticks", J::Bool(ticks.applies(combo)));
         }
+        if let Some(tint) = p.biome_tint {
+            row.set("biome_tint", J::Str(tint.name().into()));
+        }
         if let Some(shape) = p.render_shape {
             row.set("render_shape", J::Str(shape.name().into()));
         }

@@ -124,6 +124,10 @@ doesn't leave a hole in the floor under it. It is no longer a solid render eithe
 leaves: dampened by 1, or not at all if its template lets skylight down. Unset or `true`, it occludes as its template
 does.
 
+`properties.biome_tint` selects `"foliage"`, `"grass"` or `"water"` for tinted model faces,
+using the renderer's normal biome colours and blending. Faces without a tint index stay unchanged.
+Unset keeps the normal block-name provider; this does not copy leaf or fluid behaviour.
+
 A block copies its template's states. It can also declare state properties of
 its own, which its template does not have — how a pipe says which sides it
 connects to, or a machine whether it is running. Its states then become its

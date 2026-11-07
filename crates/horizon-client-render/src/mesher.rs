@@ -687,6 +687,14 @@ impl MeshTables {
                 "lily_pad" => ([Tint::LilyPad; 2], 1),
                 _ => ([Tint::None; 2], 0),
             };
+            // Declared providers share vanilla's biome blending, without borrowing block behaviour.
+            // MAX denotes one provider for every nonnegative index, not 255 distinct sources.
+            let (tints, tint_count) = match s.biome_tint.as_deref() {
+                Some("foliage") => ([Tint::Foliage; 2], u8::MAX),
+                Some("grass") => ([Tint::Grass; 2], u8::MAX),
+                Some("water") => ([Tint::Water; 2], u8::MAX),
+                _ => (tints, tint_count),
+            };
             // getShadeBrightness overrides; the default is 0.2 for full collision shapes.
             let overrides = [
                 "TransparentBlock",
@@ -823,10 +831,10 @@ impl MeshTables {
     /// Untinted faces, blank sources and invalid tint indices return `None`.
     pub fn default_tint(&self, state: BlockStateId, index: i32, grass: u32) -> Option<u32> {
         let info = self.info.get(state.0 as usize)?;
-        if index < 0 || index >= i32::from(info.tint_count) {
+        if index < 0 || (info.tint_count != u8::MAX && index >= i32::from(info.tint_count)) {
             return None;
         }
-        Some(match info.tints[index as usize] {
+        Some(match info.tints[(index as usize).min(1)] {
             Tint::None | Tint::SugarCane | Tint::Water => return None,
             Tint::Grass | Tint::GrassBlock | Tint::TallGrassUpper => grass & 0xFF_FFFF,
             Tint::Foliage => 0x48_B518,
@@ -843,10 +851,10 @@ impl MeshTables {
     /// colour at the state's power and age.
     pub fn tint_source(&self, state: BlockStateId, index: i32) -> Option<TintSource> {
         let info = self.info.get(state.0 as usize)?;
-        if index < 0 || index >= i32::from(info.tint_count) {
+        if index < 0 || (info.tint_count != u8::MAX && index >= i32::from(info.tint_count)) {
             return None;
         }
-        Some(match info.tints[index as usize] {
+        Some(match info.tints[(index as usize).min(1)] {
             Tint::None => return None,
             Tint::Grass | Tint::GrassBlock | Tint::TallGrassUpper | Tint::SugarCane => {
                 TintSource::Grass
@@ -904,7 +912,7 @@ impl MeshTables {
         });
         move |index| {
             let (colors, count) = sources?;
-            if index < 0 || index >= count {
+            if index < 0 || (count != i32::from(u8::MAX) && index >= count) {
                 return None;
             }
             colors[(index as usize).min(1)]
@@ -1627,7 +1635,7 @@ impl Mesher<'_> {
     }
     /// `BlockColors` tint source `index`, or `None` for an untinted (-1) layer.
     fn tint(state: &Info, index: i32, tints: &mut Tints, [x, y, z]: [i32; 3]) -> Option<u32> {
-        if index < 0 || index >= i32::from(state.tint_count) {
+        if index < 0 || (state.tint_count != u8::MAX && index >= i32::from(state.tint_count)) {
             return None;
         }
         Some(match state.tints[(index as usize).min(1)] {

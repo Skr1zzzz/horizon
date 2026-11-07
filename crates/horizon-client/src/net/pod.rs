@@ -285,7 +285,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 8;
+const GENERATOR_REVISION: u32 = 9;
 
 fn menus(files: &mut Files, meta: &Value, ns: &str) -> Result<()> {
     for menu in meta["menus"].as_array().into_iter().flatten() {
@@ -506,6 +506,87 @@ fn geometry(files: &Files, id: &str) -> bool {
     }
 }
 
+fn tinted_model(files: &Files, id: &str) -> bool {
+    let mut id = id.to_owned();
+    let mut seen = BTreeSet::new();
+    loop {
+        let (ns, path) = id.split_once(':').unwrap_or(("minecraft", &id));
+        if !seen.insert(format!("{ns}:{path}")) {
+            return false;
+        }
+        let Some(model) = files
+            .get(&format!("assets/{ns}/models/{path}.json"))
+            .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+        else {
+            return false;
+        };
+        // A child's elements replace its parent's, including the parent's tint faces.
+        if let Some(elements) = model.get("elements") {
+            return elements.as_array().into_iter().flatten().any(|element| {
+                element["faces"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|faces| faces.values())
+                    .any(|face| face["tintindex"].as_i64().is_some_and(|index| index >= 0))
+            });
+        }
+        let Some(parent) = model["parent"].as_str() else {
+            return false;
+        };
+        id = parent.to_owned();
+    }
+}
+
+fn biome_tint(files: &Files, id: &str, declaration: &mut Value) {
+    let Some((ns, name)) = id.split_once(':') else {
+        return;
+    };
+    let Some(state) = files
+        .get(&format!("assets/{ns}/blockstates/{name}.json"))
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+    else {
+        return;
+    };
+    let mut models = Vec::new();
+    blockstate_models(&state, &mut models);
+    if !models.iter().any(|model| tinted_model(files, model)) {
+        return;
+    }
+    // Java colour providers are code, so infer only recognisable biome-coloured families.
+    let tint = if name.ends_with("leaves")
+        || declaration["template"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("leaves"))
+    {
+        "foliage"
+    } else if [
+        "grass",
+        "fern",
+        "bush",
+        "vine",
+        "sprout",
+        "clover",
+        "sedge",
+        "reed",
+        "sugar_cane",
+    ]
+    .iter()
+    .any(|word| name.contains(word))
+    {
+        "grass"
+    } else if name.contains("water") {
+        "water"
+    } else if ["distance", "persistent"]
+        .iter()
+        .all(|key| declaration["state_properties"].get(key).is_some())
+    {
+        "foliage"
+    } else {
+        return;
+    };
+    declaration["properties"]["biome_tint"] = json!(tint);
+}
+
 fn item_geometry<'a>(files: &Files, node: &'a Value) -> Option<&'a str> {
     match node["type"].as_str()? {
         "minecraft:model" => node["model"].as_str().filter(|id| geometry(files, id)),
@@ -548,6 +629,23 @@ fn blockstate_models<'a>(node: &'a Value, models: &mut Vec<&'a str>) {
     }
 }
 
+fn adapt_blockstate(node: &mut Value) -> bool {
+    match node {
+        Value::Array(entries) => entries
+            .iter_mut()
+            .fold(false, |changed, entry| adapt_blockstate(entry) | changed),
+        Value::Object(entry) if entry.get("model").is_some_and(Value::is_string) => {
+            let before = entry.len();
+            entry.retain(|key, _| {
+                !key.split_once(':')
+                    .is_some_and(|(ns, key)| ns != "minecraft" && !ns.is_empty() && key == "type")
+            });
+            before != entry.len()
+        }
+        _ => false,
+    }
+}
+
 fn adapt(files: &mut Files, snap: &Snapshot, ns: &str) {
     let prefix = format!("assets/{ns}/items/");
     let items: Vec<String> = files
@@ -578,12 +676,29 @@ fn adapt(files: &mut Files, snap: &Snapshot, ns: &str) {
             continue;
         };
         let path = format!("assets/{ns}/blockstates/{name}.json");
-        let Some(state) = files
+        let Some(mut state) = files
             .get(&path)
             .and_then(|b| serde_json::from_slice::<Value>(b).ok())
         else {
             continue;
         };
+        let mut changed = false;
+        if let Some(variants) = state["variants"].as_object_mut() {
+            for entry in variants.values_mut() {
+                changed |= adapt_blockstate(entry);
+            }
+        }
+        if let Some(parts) = state["multipart"].as_array_mut() {
+            for part in parts {
+                changed |= adapt_blockstate(&mut part["apply"]);
+            }
+        }
+        if changed {
+            files.insert(
+                path.clone(),
+                serde_json::to_vec(&state).expect("JSON value serializes"),
+            );
+        }
         let mut models = Vec::new();
         blockstate_models(&state, &mut models);
         if models.is_empty() || models.iter().any(|id| geometry(files, id)) {
@@ -762,7 +877,7 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
                 continue;
             }
             // One unrepresentable block must not cost the whole mod its content.
-            let value = match declaration(&snap, block, items.contains(&block.name)) {
+            let mut value = match declaration(&snap, block, items.contains(&block.name)) {
                 Ok(value) => value,
                 Err(e) => {
                     log::warn!("PoD: {}: block skipped: {e}", block.name);
@@ -770,6 +885,7 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
                     continue;
                 }
             };
+            biome_tint(&assets, &block.name, &mut value);
             files.insert(
                 format!("data/{ns}/horizon/block/{name}.json"),
                 serde_json::to_vec(&value)?,
@@ -828,6 +944,63 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tinted_faces_select_biome_provider_through_parents() {
+        let mut files = Files::from([
+            (
+                "assets/test/blockstates/mahogany_leaves.json".into(),
+                br#"{"variants":{"":{"model":"test:block/child"}}}"#.to_vec(),
+            ),
+            (
+                "assets/test/models/block/child.json".into(),
+                br#"{"parent":"test:block/base"}"#.to_vec(),
+            ),
+            (
+                "assets/test/models/block/base.json".into(),
+                br#"{"elements":[{"faces":{"north":{"tintindex":0}}}]}"#.to_vec(),
+            ),
+        ]);
+        let mut value = declaration(
+            &declaration_snapshot(),
+            &declaration_snapshot().blocks[0],
+            true,
+        )
+        .unwrap();
+        biome_tint(&files, "test:mahogany_leaves", &mut value);
+        assert_eq!(value["properties"]["biome_tint"], "foliage");
+        files.insert(
+            "assets/test/models/block/child.json".into(),
+            br#"{"parent":"test:block/base","elements":[{"faces":{"north":{"tintindex":-1}}}]}"#
+                .to_vec(),
+        );
+        let mut value = json!({"properties":{}});
+        biome_tint(&files, "test:mahogany_leaves", &mut value);
+        assert!(value["properties"].get("biome_tint").is_none());
+    }
+
+    #[test]
+    fn fabric_blockstate_loader_keeps_plain_model_and_rotation() {
+        let path = "assets/test/blockstates/a.json";
+        let entry = json!({"fabric:type":"test:loader","minecraft:type":"model",
+            "model":"minecraft:block/cube_all","y":270,"uvlock":true,"weight":2});
+        let mut files = Files::from([(
+            path.into(),
+            serde_json::to_vec(&json!({
+                "variants":{"":entry}, "multipart":[{"when":{"facing":"east"},"apply":[entry]}]
+            }))
+            .unwrap(),
+        )]);
+        adapt(&mut files, &adaptation_snapshot(), "test");
+        let state: Value = serde_json::from_slice(&files[path]).unwrap();
+        let mut expected = entry;
+        expected.as_object_mut().unwrap().remove("fabric:type");
+        assert_eq!(state["variants"][""], expected);
+        assert_eq!(state["multipart"][0]["apply"][0], expected);
+        assert_eq!(state["multipart"][0]["when"], json!({"facing":"east"}));
+        let mut no_model = json!({"fabric:type":"test:loader"});
+        assert!(!adapt_blockstate(&mut no_model));
+    }
+
     #[test]
     fn generated_menu_loads_and_unsupported_menus_are_skipped() {
         let printer = json!({"id":"computercraft:printer","slots":[[8,19],[30,19],[-1,10],[513,0]],

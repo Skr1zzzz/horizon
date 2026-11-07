@@ -93,6 +93,26 @@ pub struct BlockProperties {
     /// `false`: the block occludes nothing, so its neighbours' faces are drawn and light passes
     /// it (`BlockBehaviour.Properties.noOcclusion`); unset or `true`: as its template.
     pub occludes: Option<bool>,
+    /// Biome colour for model faces with a nonnegative tint index.
+    pub biome_tint: Option<BiomeTint>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BiomeTint {
+    Foliage,
+    Grass,
+    Water,
+}
+
+impl BiomeTint {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Foliage => "foliage",
+            Self::Grass => "grass",
+            Self::Water => "water",
+        }
+    }
 }
 
 /// Vanilla's `RenderShape`, by its constant's name: `MODEL` puts the block model in the chunk
@@ -1861,6 +1881,22 @@ capabilities = ["registries"]
             let e = hmod(case, MANIFEST_TEXT, files).unwrap_err();
             assert!(e.contains(why), "{case}: {e}");
         }
+    }
+
+    #[test]
+    fn biome_tint_is_a_checked_declaration_property() {
+        for (name, expected) in [
+            ("foliage", BiomeTint::Foliage),
+            ("grass", BiomeTint::Grass),
+            ("water", BiomeTint::Water),
+        ] {
+            let text = format!(
+                r#"{{"template":"minecraft:stone","properties":{{"biome_tint":"{name}"}}}}"#
+            );
+            let file: BlockFile = serde_json::from_str(&text).unwrap();
+            assert_eq!(file.properties.biome_tint, Some(expected));
+        }
+        assert!(serde_json::from_str::<BlockProperties>(r#"{"biome_tint":"lava"}"#).is_err());
     }
 
     #[test]
