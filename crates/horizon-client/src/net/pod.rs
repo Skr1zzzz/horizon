@@ -8,6 +8,92 @@ use std::{
     path::Path,
 };
 
+/// Live menu order is authoritative, including interleaved player slots.
+#[derive(Debug)]
+pub struct Menu {
+    pub sync_id: i32,
+    pub menu: String,
+    pub title: String,
+    pub slots: Vec<(i32, i32, u8)>,
+    pub data_slots: usize,
+}
+pub struct Layout {
+    pub width: f32,
+    pub height: f32,
+    pub slots: Vec<Option<[f32; 2]>>,
+}
+impl Menu {
+    pub fn accepts(&self, pending: Option<i32>, open: Option<(i32, &str)>) -> bool {
+        if let Some(id) = pending {
+            return id == self.sync_id;
+        }
+        open.is_none_or(|(id, name)| id == self.sync_id && !name.starts_with("minecraft:"))
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let mut r = horizon_protocol::buf::Reader::new(bytes);
+        let sync_id = r.varint()?;
+        if sync_id <= 0 {
+            return Err("PoD: invalid sync id".into());
+        }
+        let menu = r.string(32767)?;
+        let title = r.string(32767)?;
+        let count = r.count(512)?;
+        let mut slots = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (x, y, kind) = (r.i32()?, r.i32()?, r.u8()?);
+            if kind > 1 {
+                return Err("PoD: invalid slot kind".into());
+            }
+            slots.push((x, y, kind));
+        }
+        let data_slots = r.count(256)?;
+        if r.remaining() != 0 {
+            return Err("PoD: trailing menu bytes".into());
+        }
+        Ok(Self {
+            sync_id,
+            menu,
+            title,
+            slots,
+            data_slots,
+        })
+    }
+    pub fn internal(&self, slot: usize) -> Option<usize> {
+        let kind = self.slots.get(slot)?.2;
+        if kind == 0 {
+            return Some(10000 + slot);
+        }
+        let n = self.slots[..slot].iter().filter(|s| s.2 == 1).count();
+        match n {
+            0..=26 => Some(9 + n),
+            27..=35 => Some(n - 27),
+            _ => None,
+        }
+    }
+    pub fn index(&self, internal: usize) -> Option<usize> {
+        (0..self.slots.len()).find(|&s| self.internal(s) == Some(internal))
+    }
+    pub fn layout(&self) -> Layout {
+        let slots: Vec<_> = self
+            .slots
+            .iter()
+            .map(|&(x, y, _)| {
+                ((0..=495).contains(&x) && (0..=495).contains(&y)).then_some([x as f32, y as f32])
+            })
+            .collect();
+        let (mut width, mut height) = (176f32, 32f32);
+        for p in slots.iter().flatten() {
+            width = width.max(p[0] + 17.0);
+            height = height.max(p[1] + 17.0);
+        }
+        Layout {
+            width,
+            height,
+            slots,
+        }
+    }
+}
+
 type Result<T> = crate::Result<T>;
 type Files = BTreeMap<String, Vec<u8>>;
 const FILE: usize = 8 << 20;
@@ -1060,6 +1146,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pod_menu_decode_and_window_model() {
+        use horizon_protocol::buf::Writer;
+        let mut w = Writer::new();
+        w.varint(7);
+        w.string("mod:menu");
+        w.string("{\"text\":\"Title\"}");
+        w.varint(3);
+        for (x, y, k) in [(8, 20, 0), (240, 180, 1), (-2000, 0, 0)] {
+            w.i32(x);
+            w.i32(y);
+            w.u8(k);
+        }
+        w.varint(2);
+        let bytes = w.data;
+        let m = Menu::decode(&bytes).unwrap();
+        assert!(m.accepts(Some(7), None), "open_screen then payload");
+        assert!(m.accepts(None, None), "payload only");
+        assert!(!m.accepts(Some(8), None));
+        assert!(!m.accepts(None, Some((7, "minecraft:hopper"))));
+        assert_eq!(m.sync_id, 7);
+        assert_eq!(m.data_slots, 2);
+        let l = m.layout();
+        assert_eq!(l.slots.len(), 3);
+        assert_eq!((l.width, l.height), (257.0, 197.0));
+        assert_eq!(l.slots[2], None);
+        assert_eq!(m.internal(1), Some(9));
+        assert_eq!(m.index(10002), Some(2));
+        for n in 0..bytes.len() {
+            assert!(Menu::decode(&bytes[..n]).is_err());
+        }
+        let mut w = Writer::new();
+        w.varint(7);
+        w.string("m:a");
+        w.string("");
+        w.varint(513);
+        assert!(Menu::decode(&w.data).is_err());
+        let mut w = Writer::new();
+        w.varint(7);
+        w.string(&"a".repeat(32768));
+        assert!(Menu::decode(&w.data).is_err());
+    }
     #[test]
     fn generated_menu_loads_and_unsupported_menus_are_skipped() {
         let printer = json!({"id":"computercraft:printer","slots":[[8,19],[30,19],[-1,10],[513,0]],

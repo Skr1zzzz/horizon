@@ -15,7 +15,11 @@ impl Game<'_> {
     /// client doesn't lay out (a lectern). API @API:client_entity_refs@.
     pub(super) fn native_menu_stacks(&mut self) -> Option<Vec<Option<ItemStack>>> {
         let (_, menu) = self.remote.as_ref()?.menu.clone()?;
-        let slots: Vec<usize> = (0..).map_while(|s| Self::menu_slot(&menu, s)).collect();
+        let slots: Vec<usize> = if let Some(l) = self.pod_layout() {
+            (0..l.slots.len()).filter_map(|s| l.internal(s)).collect()
+        } else {
+            (0..).map_while(|s| Self::menu_slot(&menu, s)).collect()
+        };
         if slots.is_empty() {
             return None;
         }

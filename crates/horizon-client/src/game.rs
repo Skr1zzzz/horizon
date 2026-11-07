@@ -9325,6 +9325,16 @@ impl Game<'_> {
     }
     /// 300.. are the open container's slots.
     fn slots(&self) -> Vec<usize> {
+        if let Some(l) = self.pod_layout() {
+            let screen = l.layout();
+            return screen
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.is_some())
+                .filter_map(|(s, _)| l.internal(s))
+                .collect();
+        }
         if self.creative_inventory_open() {
             return Creative::inventory_slots().collect();
         }
@@ -9385,6 +9395,9 @@ impl Game<'_> {
     /// screen render hook asks once a frame and must not allocate. Same
     /// branches in the same order, so the two stay in step.
     fn slot_count(&self) -> usize {
+        if self.pod_layout().is_some() {
+            return self.slots().len();
+        }
         if self.creative_inventory_open() {
             return Creative::inventory_slots().count();
         }
@@ -9441,6 +9454,12 @@ impl Game<'_> {
     }
     /// InventoryMenu / CraftingMenu slot layouts.
     fn slot_position(&self, i: usize) -> (f32, f32) {
+        if let Some(l) = self.pod_layout() {
+            return l
+                .index(i)
+                .and_then(|s| l.layout().slots[s])
+                .map_or((-2000.0, -2000.0), |p| (p[0], p[1]));
+        }
         if self.creative_inventory_open()
             && let Some(position) = Creative::inventory_slot_position(i)
         {
@@ -9566,6 +9585,9 @@ impl Game<'_> {
         self.draw_slot_highlight(batch, front, ox + sx, oy + sy);
     }
     fn slot_mut(&mut self, i: usize) -> &mut Option<ItemStack> {
+        if i >= 10000 && self.pod_layout().is_some() {
+            return self.container_slot_mut(i - 10000);
+        }
         if i >= mount_menu::SADDLE {
             return self.mount_slot_mut(i);
         }

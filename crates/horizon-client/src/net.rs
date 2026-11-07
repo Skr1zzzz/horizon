@@ -6,7 +6,7 @@
 //! Online-mode servers need the Microsoft account the launcher signed in
 //! (crate::auth): the login joins the server through the session service and
 //! encrypts the connection (ClientHandshakePacketListenerImpl.handleHello).
-mod pod;
+pub mod pod;
 
 use crate::auth::AuthSession;
 use crate::studio::{Metadata, RecorderStatus, StudioRecorder};
