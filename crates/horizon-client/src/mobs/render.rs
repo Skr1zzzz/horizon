@@ -610,6 +610,15 @@ pub fn layers(m: &Mob, age: f32) -> Vec<Layer> {
     use Species as S;
     let mut v = Vec::new();
     if avatar(m) {
+        if let Some((argb, row)) = m.laser_glow {
+            v.push(Layer {
+                model: m.kind.model_name().to_owned().into(),
+                texture: format!("laser-eyes:entity/eye_glow_{row}").into(),
+                color: (argb & 0xff00ff00) | (argb & 255) << 16 | (argb >> 16 & 255),
+                full_bright: true,
+                scroll: 0.0,
+            });
+        }
         return v;
     }
     let white = 0xFFFF_FFFF;

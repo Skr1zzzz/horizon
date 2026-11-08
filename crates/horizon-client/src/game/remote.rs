@@ -498,6 +498,7 @@ enum OwnProfile {
 pub(super) struct Remote {
     pub session: Session,
     pub(super) voice: Option<horizon_client::voicechat::Connection>,
+    pub(super) laser: super::laser::State,
     voice_available: bool,
     voice_requested: bool,
     voice_streams: HashMap<u128, (Option<u64>, std::time::Instant)>,
@@ -672,7 +673,7 @@ pub(super) struct Remote {
     /// `ClientboundLoginPacket.onlineMode`: the player list shows heads.
     pub(super) online_mode: bool,
     /// Player entities in the level: entity id to profile UUID.
-    level_players: HashMap<i32, u128>,
+    pub(super) level_players: HashMap<i32, u128>,
     /// The profile name each player entity was created with (`RemotePlayer.getGameProfile`): it outlives the
     /// player-list entry, which servers remove to hide their NPCs from the list.
     level_player_names: HashMap<i32, String>,
@@ -1088,6 +1089,7 @@ impl Game<'_> {
         self.remote = Some(Remote {
             session,
             voice: None,
+            laser: Default::default(),
             voice_available: false,
             voice_requested: false,
             voice_streams: HashMap::new(),
@@ -1969,6 +1971,12 @@ impl Game<'_> {
                 }
             };
             match event {
+                Event::LaserAvailable(available) => {
+                    if let Some(r) = self.remote.as_mut() {
+                        r.laser = super::laser::State::default();
+                        r.laser.available = available;
+                    }
+                }
                 Event::VoiceAvailable(available) => {
                     if let Some(r) = self.remote.as_mut() {
                         r.voice_available = available;
@@ -3309,6 +3317,14 @@ impl Game<'_> {
                     Err(e) => log::warn!("Ignoring malformed pod:entity: {e}"),
                 }
             }
+            C::CustomPayload(p)
+                if matches!(
+                    p.channel.as_str(),
+                    "laser-eyes:sync" | "laser-eyes:config_sync"
+                ) =>
+            {
+                self.laser_payload(&p.channel, &p.data);
+            }
             C::CustomPayload(p) if p.channel == "pod:menu" => {
                 match horizon_client::net::pod::Menu::decode(&p.data) {
                     Ok(layout) => self.remote_pod_menu(layout),
@@ -3350,6 +3366,14 @@ impl Game<'_> {
                     "minecraft:register" | "minecraft:unregister"
                 ) =>
             {
+                if let Some(r) = self.remote.as_mut() {
+                    if p.data
+                        .split(|b| *b == 0)
+                        .any(|c| c.starts_with(b"laser-eyes:"))
+                    {
+                        r.laser.available = p.channel == "minecraft:register";
+                    }
+                }
                 if let Some(r) = self.remote.as_mut()
                     && std::env::var_os("HORIZON_FABRIC_SYNC").is_some_and(|v| v == "1")
                 {
@@ -6223,6 +6247,7 @@ impl Game<'_> {
     pub(super) fn tick_remote(&mut self) -> Result<()> {
         self.tick_remote_level()?;
         self.tick_voicechat();
+        self.tick_laser();
         // The rockets boosting this player tick after it, also while it waits
         // for chunks.
         self.tick_own_rockets();

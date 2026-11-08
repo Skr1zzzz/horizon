@@ -83,6 +83,7 @@ pub const HORIZON_MAPPINGS: &[(&str, &str, &str)] = &[
     ("key.voicePtt", "key.keyboard.caps.lock", "multiplayer"),
     ("key.voiceMute", "key.keyboard.m", "multiplayer"),
     ("key.voiceDisable", "key.keyboard.j", "multiplayer"),
+    ("key.laser-eyes.fire", "key.keyboard.v", "gameplay"),
 ];
 /// Every mapping the game binds: vanilla's in `Options.keyMappings` order, then Horizon's.
 pub fn all_mappings() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {

@@ -99,6 +99,7 @@ actions! {
     VoicePtt, "key.voicePtt", Some(KeyCode::CapsLock);
     VoiceMute, "key.voiceMute", Some(KeyCode::KeyM);
     VoiceDisable, "key.voiceDisable", Some(KeyCode::KeyJ);
+    LaserFire, "key.laser-eyes.fire", Some(KeyCode::KeyV);
     HotbarPrevious, "pad.hotbarPrevious", None;
     HotbarNext, "pad.hotbarNext", None;
 }

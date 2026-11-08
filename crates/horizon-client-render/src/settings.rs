@@ -639,12 +639,14 @@ impl Settings {
         if self.resource_packs != f.list("resourcePacks") {
             f.set("resourcePacks", V::List(self.resource_packs.clone()));
         }
-        for (name, key) in self.keys.saved().into_iter().chain(
+        for (name, key) in
             self.keys
-                .horizon_saved()
+                .saved()
                 .into_iter()
-                .filter(|(name, _)| name.starts_with("key.voice")),
-        ) {
+                .chain(self.keys.horizon_saved().into_iter().filter(|(name, _)| {
+                    name.starts_with("key.voice") || *name == "key.laser-eyes.fire"
+                }))
+        {
             put_s(&mut f, &format!("key_{name}"), &key);
         }
         f

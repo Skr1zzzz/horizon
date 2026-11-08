@@ -156,6 +156,18 @@ impl Handshake {
         self.pod = enabled;
         self
     }
+    pub fn laser_eyes(&self) -> bool {
+        self.server_channels
+            .iter()
+            .any(|c| c.starts_with("laser-eyes:"))
+            || self.map.as_ref().is_some_and(|map| {
+                map.values().any(|r| {
+                    r.entries
+                        .iter()
+                        .any(|(name, _)| name.starts_with("laser-eyes:"))
+                })
+            })
+    }
     pub fn voicechat(&self) -> bool {
         self.enabled
             && self

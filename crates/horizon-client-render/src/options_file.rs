@@ -255,7 +255,7 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
     t.push(i("voicechatThreshold", -100, 0, -50));
     for (name, key, _) in crate::keybinds::HORIZON_MAPPINGS
         .iter()
-        .filter(|(name, _, _)| name.starts_with("key.voice"))
+        .filter(|(name, _, _)| name.starts_with("key.voice") || *name == "key.laser-eyes.fire")
     {
         t.push(def(
             &format!("key_{name}"),

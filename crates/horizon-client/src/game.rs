@@ -185,6 +185,7 @@ mod lan_stations;
 mod lan_trading;
 mod lan_vehicles;
 mod lan_waypoints;
+mod laser;
 mod launch_api;
 mod leads;
 mod legacy_rules;
@@ -8492,6 +8493,9 @@ impl Game<'_> {
         if self.lan_acting.is_some() {
             return;
         }
+        if !capture {
+            self.release_laser();
+        }
         // MouseHandler.grabMouse never captures an inactive window, and vanilla
         // grabs only on `setScreen(null)`: the pack prompt and server dialogs
         // are screens over the world that keep the pointer.
@@ -11909,6 +11913,7 @@ impl Game<'_> {
         // Beams: `gbuffers_beaconbeam`, not a block entity's program (5.4 has no stage for them).
         self.mark_stage(out.len(), "NONE");
         self.beacon_geometry(camera, alpha, &mut out);
+        self.laser_geometry(camera, alpha, &mut out);
         self.mark_entity(out.len(), "minecraft:fishing_bobber");
         self.fishing_geometry(camera, alpha, &mut out);
         self.mark_entity(out.len(), "minecraft:leash_knot");
@@ -18232,6 +18237,7 @@ impl Game<'_> {
     /// screen's own raw keys, text and mods' key hooks stay raw on purpose.
     fn handle_window_event_inner(&mut self, event_loop: &dyn EventLoopCtl, mut event: WindowEvent) {
         if let WindowEvent::Focused(false) = &event {
+            self.release_laser();
             self.physical_keys.clear();
             self.physical_buttons.clear();
             self.drag_button = None;
