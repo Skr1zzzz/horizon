@@ -426,7 +426,7 @@ impl Game<'_> {
                 },
                 if recording.is_some() { "Done" } else { "Send" },
             ),
-            (190.0, "gui.cancel", "Cancel"),
+            (190.0, "horizon.voicemessage.cancel", "Cancel"),
         ] {
             let label = Text::translate_with_fallback(key, fallback, &[]);
             ui::button(

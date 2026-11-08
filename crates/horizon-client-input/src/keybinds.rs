@@ -83,6 +83,7 @@ pub const HORIZON_MAPPINGS: &[(&str, &str, &str)] = &[
     ("key.voicePtt", "key.keyboard.caps.lock", "multiplayer"),
     ("key.voiceMute", "key.keyboard.m", "multiplayer"),
     ("key.voiceDisable", "key.keyboard.j", "multiplayer"),
+    ("key.voiceMenu", "key.keyboard.u", "multiplayer"),
     ("key.laser-eyes.fire", "key.keyboard.v", "gameplay"),
     ("key.laser-eyes.config", "key.keyboard.k", "gameplay"),
 ];

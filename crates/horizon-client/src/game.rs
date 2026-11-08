@@ -378,6 +378,7 @@ mod ui_control;
 mod vault;
 mod vehicle_teleport;
 mod villagers;
+mod voice_ui;
 mod wandering_trader;
 mod win;
 mod wind;
@@ -16744,20 +16745,30 @@ impl Game<'_> {
             use std::sync::atomic::Ordering::Relaxed;
             let disabled = v.controls.disabled.load(Relaxed);
             let muted = v.controls.muted.load(Relaxed);
-            if disabled || muted || v.controls.transmitting.load(Relaxed) {
-                let color = if disabled {
-                    0xff777777
-                } else if muted {
-                    0xffff5555
-                } else {
-                    0xff55ff55
+            use horizon_client::voicechat::hud::{Icon, state};
+            if let Some(icon) = state(
+                v.controls.connected.load(Relaxed),
+                muted,
+                disabled,
+                v.controls.transmitting.load(Relaxed),
+            ) {
+                let color = match icon {
+                    Icon::Disconnected => 0xffffaa00,
+                    Icon::Disabled => 0xff777777,
+                    Icon::Muted => 0xffff5555,
+                    Icon::Talking => 0xff55ff55,
                 };
                 let atlas = &self.gui.atlas;
-                hud.fill(atlas, 8.0, 8.0, 4.0, 7.0, color);
-                hud.fill(atlas, 6.0, 14.0, 8.0, 2.0, color);
-                hud.fill(atlas, 9.0, 16.0, 2.0, 3.0, color);
-                if disabled || muted {
-                    hud.fill(atlas, 5.0, 10.0, 10.0, 2.0, color);
+                let y = hud.height - 54.0;
+                hud.fill(atlas, 8.0, y, 4.0, 7.0, color);
+                hud.fill(atlas, 6.0, y + 6.0, 8.0, 2.0, color);
+                hud.fill(atlas, 9.0, y + 8.0, 2.0, 3.0, color);
+                if matches!(icon, Icon::Disabled | Icon::Muted) {
+                    hud.fill(atlas, 5.0, y + 2.0, 10.0, 2.0, color);
+                }
+                if icon == Icon::Disconnected {
+                    hud.fill(atlas, 17.0, y, 2.0, 6.0, color);
+                    hud.fill(atlas, 17.0, y + 8.0, 2.0, 2.0, color);
                 }
             }
         }
@@ -17220,13 +17231,45 @@ impl Game<'_> {
         // `CreativeModeInventoryScreen.keyPressed` clears `ignoreTextInput` on
         // every key, before it decides anything.
         self.creative_ignore_text = false;
-        if self.screen == Screen::Playing && matches!(key, KeyCode::KeyM | KeyCode::KeyJ) {
+        // Rebindable; laser-eyes' config menu owns K (its Java default) and is checked later.
+        if self.screen == Screen::Playing
+            && horizon_client::keybinds::key_name(raw)
+                .is_some_and(|name| self.settings.keys.get("key.voiceMenu") == name)
+        {
+            self.open_voice();
+            return Ok(());
+        }
+        if matches!(self.screen, Screen::Playing | Screen::Paused)
+            && matches!(key, KeyCode::KeyM | KeyCode::KeyJ)
+        {
             if let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref()) {
                 use std::sync::atomic::Ordering::Relaxed;
                 if key == KeyCode::KeyM {
-                    v.controls.muted.fetch_xor(true, Relaxed);
+                    let muted = !v.controls.muted.fetch_xor(true, Relaxed);
+                    let bit = if muted { 1 } else { 2 };
+                    if v.controls.notices.fetch_or(bit, Relaxed) & bit == 0 {
+                        self.send_overlay_message(horizon_client::text::Text::translate(
+                            if muted {
+                                "horizon.voice.muted"
+                            } else {
+                                "horizon.voice.unmuted"
+                            },
+                            &[],
+                        ));
+                    }
                 } else {
                     let disabled = !v.controls.disabled.fetch_xor(true, Relaxed);
+                    let bit = if disabled { 4 } else { 8 };
+                    if v.controls.notices.fetch_or(bit, Relaxed) & bit == 0 {
+                        self.send_overlay_message(horizon_client::text::Text::translate(
+                            if disabled {
+                                "horizon.voice.disabled"
+                            } else {
+                                "horizon.voice.enabled"
+                            },
+                            &[],
+                        ));
+                    }
                     self.send(horizon_protocol::packets::play::Serverbound::CustomPayload(
                         horizon_protocol::packets::configuration::CustomPayload {
                             channel: "voicechat:update_state".into(),
@@ -18718,6 +18761,9 @@ impl Game<'_> {
                         if self.screen_mouse_dragged(previous) {
                             return Ok(());
                         }
+                        if self.voice_open() {
+                            self.voice_drag();
+                        }
                         if self.dialog_open() {
                             self.dialog_drag();
                         }
@@ -19001,6 +19047,13 @@ impl Game<'_> {
                     }
                 }
                 WindowEvent::MouseInput { .. } if self.title.is_some() => {}
+                WindowEvent::MouseInput {
+                    state,
+                    button: MouseButton::Left,
+                    ..
+                } if self.voice_open() => {
+                    self.voice_pointer(state == ElementState::Pressed);
+                }
                 WindowEvent::MouseInput { state, button, .. }
                     if self.armorstand_inventory_hovered() =>
                 {
@@ -19368,6 +19421,13 @@ impl Game<'_> {
                     }
                     if let PhysicalKey::Code(key) = event.physical_key {
                         self.options_key(key, event.text.as_deref())?;
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. }
+                    if self.voice_open() && event.state == ElementState::Pressed =>
+                {
+                    if let PhysicalKey::Code(key) = event.physical_key {
+                        self.voice_key(key, event.text.as_deref());
                     }
                 }
                 WindowEvent::KeyboardInput { event, .. }

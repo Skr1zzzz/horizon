@@ -1,5 +1,8 @@
 //! Clean-room protocol implemented from a written interoperability description.
+pub mod groups;
+pub mod hud;
 pub mod messages;
+pub mod players;
 pub mod registration;
 pub mod sender;
 pub mod wire;
@@ -37,9 +40,11 @@ impl Connection {
         std::thread::Builder::new()
             .name("voicechat UDP".into())
             .spawn(move || {
-                if let Err(e) = run(secret, &server, halt, tx, shared, config) {
+                if let Err(e) = run(secret, &server, halt, tx, shared.clone(), config) {
                     log::warn!("voicechat: {e}");
                 }
+                shared.connected.store(false, Ordering::Relaxed);
+                shared.transmitting.store(false, Ordering::Relaxed);
             })
             .expect("voicechat thread");
         Self {
@@ -183,6 +188,7 @@ fn run(
                 }
                 Some(Packet::ConnectionCheckAck) if authenticated && !connected => {
                     connected = true;
+                    controls.connected.store(true, Ordering::Relaxed);
                     alive = Instant::now();
                     diagnostic("connected");
                     match sender::Sender::new(

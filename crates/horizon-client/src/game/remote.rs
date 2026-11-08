@@ -499,6 +499,7 @@ pub(super) struct Remote {
     pub(super) skinshuffle: super::skinshuffle::State,
     pub session: Session,
     pub(super) voice: Option<horizon_client::voicechat::Connection>,
+    pub(super) voice_ui: super::voice_ui::State,
     pub(super) laser: super::laser::State,
     pub(super) headpats: super::headpats::State,
     pub(super) armorstand: horizon_client::armorstand::Session,
@@ -1094,6 +1095,9 @@ impl Game<'_> {
         self.remote = Some(Remote {
             session,
             voice: None,
+            voice_ui: super::voice_ui::State::new(
+                &Self::options_path().with_file_name("voice-player-volumes.txt"),
+            ),
             laser: Default::default(),
             headpats: Default::default(),
             skinshuffle: Default::default(),
@@ -2013,6 +2017,7 @@ impl Game<'_> {
                     if let Some(r) = self.remote.as_mut()
                         && r.voice_requested
                     {
+                        r.voice_ui.groups.enabled = secret.groups;
                         r.voice = None;
                         r.voice = Some(horizon_client::voicechat::Connection::start(
                             secret,
@@ -3403,11 +3408,22 @@ impl Game<'_> {
             C::CustomPayload(p)
                 if matches!(
                     p.channel.as_str(),
-                    "voicechat:state" | "voicechat:states" | "voicechat:remove_state"
+                    "voicechat:state"
+                        | "voicechat:states"
+                        | "voicechat:remove_state"
+                        | "voicechat:add_group"
+                        | "voicechat:remove_group"
+                        | "voicechat:joined_group"
                 ) =>
             {
-                if let Err(e) = horizon_client::voicechat::wire::state(&p.channel, &p.data) {
-                    log::warn!("voicechat: {e}");
+                if let Some(r) = self.remote.as_mut() {
+                    if let Err(e) = r.voice_ui.groups.receive(&p.channel, &p.data) {
+                        log::warn!("voicechat: {e}");
+                    } else if p.channel == "voicechat:joined_group"
+                        && !r.voice_ui.groups.wrong_password
+                    {
+                        r.voice_ui.close_prompt();
+                    }
                 }
             }
             C::CustomPayload(p) if p.channel.starts_with("voicemessages:") => {
@@ -6297,6 +6313,22 @@ impl Game<'_> {
         self.capture_loaded_world();
     }
 
+    pub(super) fn voice_speakers(&self) -> Vec<[f64; 3]> {
+        let Some(r) = self.remote.as_ref() else {
+            return Vec::new();
+        };
+        r.level_players
+            .iter()
+            .filter(|(_, uuid)| {
+                r.voice_ui
+                    .local
+                    .heard
+                    .get(uuid)
+                    .is_some_and(|last| horizon_client::voicechat::players::talking(last.elapsed()))
+            })
+            .filter_map(|(id, _)| r.entities.get(id).map(|e| e.position))
+            .collect()
+    }
     /// One client tick while connected (Minecraft.tick with a ClientLevel).
     fn tick_voicechat(&mut self) {
         use horizon_client::voicechat::{Event as V, wire::Placement};
@@ -6308,7 +6340,7 @@ impl Game<'_> {
             if let Some(r) = self.remote.as_mut() {
                 r.voice_requested = true;
             }
-            self.send(S::CustomPayload(horizon_protocol::packets::configuration::CustomPayload { channel: "minecraft:register".into(), data: b"voicechat:secret\0voicechat:state\0voicechat:states\0voicechat:remove_state".to_vec() }));
+            self.send(S::CustomPayload(horizon_protocol::packets::configuration::CustomPayload { channel: "minecraft:register".into(), data: b"voicechat:secret\0voicechat:state\0voicechat:states\0voicechat:remove_state\0voicechat:add_group\0voicechat:remove_group\0voicechat:joined_group".to_vec() }));
             self.send(S::CustomPayload(
                 horizon_protocol::packets::configuration::CustomPayload {
                     channel: "voicechat:request_secret".into(),
@@ -6347,7 +6379,20 @@ impl Game<'_> {
                     },
                 )),
                 V::Pcm(_, _) if disabled => {}
-                V::Pcm(sound, pcm) => {
+                V::Pcm(sound, mut pcm) => {
+                    if let Some(r) = self.remote.as_mut() {
+                        if !sound.opus.is_empty() {
+                            r.voice_ui
+                                .local
+                                .heard
+                                .insert(sound.sender, std::time::Instant::now());
+                        }
+                        let gain = r.voice_ui.local.gain(sound.sender)
+                            * self.settings.file.double("soundCategory_voice") as f32;
+                        for sample in &mut pcm {
+                            *sample *= gain;
+                        }
+                    }
                     let at = match sound.placement {
                         Placement::Group => None,
                         Placement::Location(at) => Some(at),

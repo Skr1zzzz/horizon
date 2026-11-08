@@ -238,6 +238,10 @@ impl Game<'_> {
         self.remote.is_some() && self.integrated.is_none()
     }
     pub(super) fn draw_pause_menu(&mut self, batch: &mut HudBatch) {
+        if self.voice_open() {
+            self.draw_voice(batch);
+            return;
+        }
         if self.skin_open() {
             self.draw_skin(batch);
             return;
@@ -259,6 +263,19 @@ impl Game<'_> {
         );
         let links = !self.server_links().is_empty();
         let additions = self.pause_screen_additions();
+        if self.voice_ready() {
+            ui::button(
+                batch,
+                atlas,
+                8.0,
+                8.0,
+                110.0,
+                20.0,
+                &Text::translate("horizon.voice.title", &[]),
+                true,
+                ui::hovered(self.cursor, 8.0, 8.0, 110.0, 20.0),
+            );
+        }
         if self.skin_ready() {
             ui::button(
                 batch,
@@ -420,6 +437,14 @@ impl Game<'_> {
         Ok(())
     }
     pub(super) fn pause_click(&mut self) -> Result<()> {
+        if self.voice_open() {
+            self.voice_click();
+            return Ok(());
+        }
+        if self.voice_ready() && ui::hovered(self.cursor, 8.0, 8.0, 110.0, 20.0) {
+            self.open_voice();
+            return Ok(());
+        }
         if self.skin_open() {
             self.skin_click();
             return Ok(());

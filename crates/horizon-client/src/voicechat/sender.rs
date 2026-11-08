@@ -8,6 +8,12 @@ use std::sync::{
 
 #[derive(Default)]
 pub struct Controls {
+    pub activation: AtomicBool,
+    pub threshold: std::sync::atomic::AtomicI32,
+    pub level: std::sync::atomic::AtomicU32,
+    pub device: std::sync::Mutex<Option<String>>,
+    pub connected: AtomicBool,
+    pub notices: std::sync::atomic::AtomicU8,
     pub held: AtomicBool,
     pub muted: AtomicBool,
     pub disabled: AtomicBool,
@@ -105,6 +111,12 @@ impl Sender {
         controls: Arc<Controls>,
         config: Config,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        controls
+            .activation
+            .store(config.activation, Ordering::Relaxed);
+        controls
+            .threshold
+            .store(config.threshold as i32, Ordering::Relaxed);
         let application = match codec {
             0 => Application::Voip,
             1 => Application::Audio,
@@ -146,6 +158,24 @@ impl Sender {
         })
     }
     pub fn poll(&mut self, mut send: impl FnMut(Packet) -> bool) -> usize {
+        self.config.activation = self.controls.activation.load(Ordering::Relaxed);
+        self.config.threshold = self.controls.threshold.load(Ordering::Relaxed) as f32;
+        let device = self.controls.device.lock().ok().and_then(|mut d| d.take());
+        if let Some(device) = device {
+            self.config.device = device;
+            #[cfg(feature = "audio")]
+            {
+                self._stream = None;
+                let (tx, rx) = mpsc::sync_channel(5);
+                self.frames = rx;
+                self._stream = capture(&self.config.device, tx)
+                    .map_err(|e| log::warn!("voicechat: microphone: {e}"))
+                    .ok();
+            }
+        }
+        self.controls
+            .level
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
         let blocked = self.controls.recording_message.load(Ordering::Relaxed)
             || self.controls.muted.load(Ordering::Relaxed)
             || self.controls.disabled.load(Ordering::Relaxed);
@@ -172,6 +202,11 @@ impl Sender {
             self.end(&mut send);
         }
         for frame in frames {
+            let level =
+                (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
+            self.controls
+                .level
+                .store(level.to_bits(), Ordering::Relaxed);
             let active = !blocked
                 && (self.wav.is_some()
                     || if self.config.activation {
@@ -211,6 +246,16 @@ impl Sender {
             self.burst = false;
         }
     }
+}
+pub fn input_devices() -> Vec<String> {
+    #[cfg(feature = "audio")]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        if let Ok(devices) = cpal::default_host().input_devices() {
+            return devices.filter_map(|d| d.name().ok()).collect();
+        }
+    }
+    Vec::new()
 }
 #[cfg(feature = "audio")]
 pub type CaptureStream = cpal::Stream;

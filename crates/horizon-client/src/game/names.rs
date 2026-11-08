@@ -621,6 +621,39 @@ impl Game<'_> {
                 Some(&mut layouts),
             ));
         }
+        // Voice marks do not depend on name-tag visibility or scoreboard team rules.
+        if !self.ui.hide_gui {
+            let (yaw, pitch) = self.posed_rotation.unwrap_or((self.yaw, self.pitch));
+            let forward = glam::DVec3::from_array(view_vector(yaw, pitch));
+            let right = forward.cross(glam::DVec3::Y).normalize_or_zero().as_vec3() * NAME_TAG_UNIT;
+            let up = right.cross(forward.as_vec3()).normalize_or_zero() * NAME_TAG_UNIT;
+            for position in self.voice_speakers() {
+                let o =
+                    (glam::DVec3::from_array(position) + glam::DVec3::Y * 2.4 - camera).as_vec3();
+                let mut icon = HudBatch::new([1, 1]);
+                for (x, y, w, h) in [
+                    (-5., -3., 3., 6.),
+                    (-2., -5., 2., 10.),
+                    (2., -3., 1., 6.),
+                    (5., -5., 1., 10.),
+                ] {
+                    icon.fill(&self.gui.atlas, x, y, w, h, 0xff55ff55);
+                }
+                for quad in icon.vertices.as_chunks::<6>().0 {
+                    for v in [quad[5], quad[2], quad[1], quad[0]] {
+                        out.push(Vertex {
+                            normal: [0; 4],
+                            pos: (o + right * v.pos[0] - up * v.pos[1]).to_array(),
+                            uv: v.uv,
+                            layer: 0,
+                            color: v.color,
+                            light: vertex_light(0xff),
+                            glint_uv: [0.; 2],
+                        });
+                    }
+                }
+            }
+        }
         layouts.end_frame();
         self.name_tag_layouts = layouts;
         self.map_patches.extend(patches);
