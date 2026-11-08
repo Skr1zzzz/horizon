@@ -236,6 +236,10 @@ impl Game<'_> {
         self.remote.is_some() && self.integrated.is_none()
     }
     pub(super) fn draw_pause_menu(&mut self, batch: &mut HudBatch) {
+        if self.skin_open() {
+            self.draw_skin(batch);
+            return;
+        }
         let friends = self.friends_view().shown;
         let atlas = &self.gui.atlas;
         let (w, h) = (batch.width, batch.height);
@@ -253,6 +257,19 @@ impl Game<'_> {
         );
         let links = !self.server_links().is_empty();
         let additions = self.pause_screen_additions();
+        if self.skin_ready() {
+            ui::button(
+                batch,
+                atlas,
+                w - 84.0,
+                8.0,
+                76.0,
+                20.0,
+                &Text::translate("horizon.skin.button", &[]),
+                true,
+                ui::hovered(self.cursor, w - 84.0, 8.0, 76.0, 20.0),
+            );
+        }
         let mut tooltip = None;
         for (x, y, bw, key, id, active) in pause_buttons(
             w,
@@ -401,6 +418,10 @@ impl Game<'_> {
         Ok(())
     }
     pub(super) fn pause_click(&mut self) -> Result<()> {
+        if self.skin_open() {
+            self.skin_click();
+            return Ok(());
+        }
         let (w, h) = {
             let size = self
                 .renderer
@@ -419,6 +440,10 @@ impl Game<'_> {
             self.options.split_guest || self.split_hud.menu,
         );
         let friends = icons[FRIENDS_ICON];
+        if self.skin_ready() && ui::hovered(self.cursor, w - 84.0, 8.0, 76.0, 20.0) {
+            self.open_skin();
+            return Ok(());
+        }
         let hit = pause_buttons(
             w,
             h,

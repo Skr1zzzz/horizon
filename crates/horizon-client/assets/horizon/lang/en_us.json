@@ -1,4 +1,11 @@
 {
+  "horizon.skin.button": "Skin",
+  "horizon.skin.title": "Skin: PNG path or https URL",
+  "horizon.skin.classic": "Classic",
+  "horizon.skin.slim": "Slim",
+  "horizon.skin.apply": "Apply",
+  "horizon.skin.working": "Working…",
+  "horizon.skin.done": "Done — skin refresh sent",
   "horizon.armorstands.base_plate": "Base plate",
   "horizon.armorstands.arms": "Arms",
   "horizon.armorstands.small": "Small",

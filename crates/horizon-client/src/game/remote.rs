@@ -496,6 +496,7 @@ enum OwnProfile {
 }
 
 pub(super) struct Remote {
+    pub(super) skinshuffle: super::skinshuffle::State,
     pub session: Session,
     pub(super) voice: Option<horizon_client::voicechat::Connection>,
     pub(super) laser: super::laser::State,
@@ -684,7 +685,7 @@ pub(super) struct Remote {
     /// The `textures` each player entity found in the player list first
     /// (`AbstractClientPlayer.getPlayerInfo` keeps that `PlayerInfo`): its skin
     /// outlives the entry, which NPC plugins remove a moment after spawning.
-    level_player_textures: HashMap<i32, horizon_client::skins::Textures>,
+    pub(super) level_player_textures: HashMap<i32, horizon_client::skins::Textures>,
     /// Entities with shared flag 6 (`Entity.isCurrentlyGlowing` on a client); mobs keep
     /// theirs in `Mob::glowing`.
     glowing: std::collections::HashSet<i32>,
@@ -1095,6 +1096,7 @@ impl Game<'_> {
             voice: None,
             laser: Default::default(),
             headpats: Default::default(),
+            skinshuffle: Default::default(),
             armorstand: Default::default(),
             armorstand_registered: false,
             voice_available: false,
@@ -3323,6 +3325,9 @@ impl Game<'_> {
             // thread, after all preceding packets (especially teleports).
             C::Ping(p) => self.send(S::Pong(p)),
             // A native mod's server half to its client half.
+            C::CustomPayload(p) if p.channel.starts_with("skinshuffle:") => {
+                self.receive_skinshuffle(&p.channel, &p.data);
+            }
             C::CustomPayload(p) if p.channel == horizon_protocol::mod_net::CHANNEL => {
                 self.remote_native_net(&p.data);
             }
@@ -3546,6 +3551,7 @@ impl Game<'_> {
                 // and ClientPacketListener.broadcastClientInformation sends it
                 // again only when an option changes it.
                 self.remote_chat_login();
+                self.register_skinshuffle();
             }
             C::Respawn(p) => {
                 if let Some(r) = self.remote.as_ref() {
@@ -5250,7 +5256,7 @@ impl Game<'_> {
                                     };
                                     let textures =
                                         skins::unpack(&t.value, signature, &skins::TEXTURE_URIS);
-                                    r.skin_textures.entry(e.uuid).or_insert(textures);
+                                    r.skin_textures.insert(e.uuid, textures);
                                 }
                             }
                         }
@@ -6382,6 +6388,7 @@ impl Game<'_> {
     }
     pub(super) fn tick_remote(&mut self) -> Result<()> {
         self.tick_remote_level()?;
+        self.tick_skinshuffle();
         self.tick_voice_messages();
         self.tick_voicechat();
         self.tick_laser();
@@ -11402,23 +11409,7 @@ fn skin_entries(
     listed: &HashMap<u128, horizon_client::skins::Textures>,
     kept: &mut HashMap<i32, horizon_client::skins::Textures>,
 ) -> Vec<(u128, horizon_client::skins::Textures)> {
-    for (id, uuid) in level_players {
-        if !kept.contains_key(id)
-            && let Some(textures) = listed.get(uuid)
-        {
-            kept.insert(*id, textures.clone());
-        }
-    }
-    let mut entries: Vec<_> = listed.iter().map(|(u, t)| (*u, t.clone())).collect();
-    for (id, textures) in kept.iter() {
-        if let Some(uuid) = level_players.get(id)
-            && !listed.contains_key(uuid)
-            && !entries.iter().any(|(u, _)| u == uuid)
-        {
-            entries.push((*uuid, textures.clone()));
-        }
-    }
-    entries
+    horizon_client::skinshuffle::skin_entries(level_players, listed, kept)
 }
 
 /// `AttributeInstance.calculateValue` before the attribute's range: the base,

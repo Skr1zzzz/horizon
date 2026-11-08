@@ -1,5 +1,13 @@
 # Third-party notices
 
+## SkinShuffle compatibility
+
+`crates/horizon-client/src/skinshuffle.rs` and `game/skinshuffle.rs` implement
+SkinShuffle 2.10.2 compatibility, adapted from SkinShuffle (MIT),
+<https://github.com/IMB11/SkinShuffle>, from the supplied protocol specification.
+The MIT permission and warranty notice reproduced below applies to adapted portions.
+No Java source was copied.
+
 ## Armor Stands protocol compatibility
 
 `crates/horizon-client/src/armorstand.rs` and `game/armorstand_editor.rs`

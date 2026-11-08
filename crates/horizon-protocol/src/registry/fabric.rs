@@ -6,7 +6,10 @@ use crate::{Error, Result, buf::Reader, packets::configuration as cfg};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SYNC: &str = "fabric:registry/sync";
-const RECEIVERS: &[u8] = b"fabric:registry/sync\0c:version\0voicechat:secret\0voicechat:state\0voicechat:states\0voicechat:remove_state";
+// `c:register` must be listed: Fabric's CommonRegisterConfigurationTask only sends the
+// play-phase registration to clients that can receive it, and play channels declared in
+// that reply are the only ones ServerPlayNetworking.canSend sees at JOIN.
+const RECEIVERS: &[u8] = b"fabric:registry/sync\0c:version\0c:register\0voicechat:secret\0voicechat:state\0voicechat:states\0voicechat:remove_state";
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 262_144;
 
@@ -270,10 +273,22 @@ impl Handshake {
                 let mut w = crate::buf::Writer::new();
                 w.varint(1);
                 w.string("play");
-                let available = self.server_channels.contains("headpats:petting");
-                w.varint(i32::from(available));
-                if available {
-                    w.string("cardinal-components:entity_sync");
+                // Fabric's ServerPlayNetworking.canSend at JOIN only sees play channels
+                // declared here; SkinShuffle sends its handshake at JOIN, so a later
+                // minecraft:register in PLAY would be too late.
+                let mut play = Vec::new();
+                if self.server_channels.contains("headpats:petting") {
+                    play.push("cardinal-components:entity_sync");
+                }
+                if self.server_channels.contains("skinshuffle:skin_refresh") {
+                    play.extend([
+                        "skinshuffle:handshake",
+                        "skinshuffle:refresh_player_list_entry",
+                    ]);
+                }
+                w.varint(play.len() as i32);
+                for channel in play {
+                    w.string(channel);
                 }
                 ("c:register", w.data)
             }
@@ -388,6 +403,24 @@ mod tests {
             panic!("missing reply")
         };
         p
+    }
+    #[test]
+    fn play_register_declares_skinshuffle_receivers() {
+        let mut state = Handshake::new(true);
+        let mut w = Writer::new();
+        w.varint(1);
+        w.string("play");
+        w.varint(1);
+        w.string("skinshuffle:skin_refresh");
+        let reply = response(&mut state, "c:register", &w.data);
+        let mut want = Writer::new();
+        want.varint(1);
+        want.string("play");
+        want.varint(2);
+        want.string("skinshuffle:handshake");
+        want.string("skinshuffle:refresh_player_list_entry");
+        assert_eq!(reply.channel, "c:register");
+        assert_eq!(reply.data, want.data);
     }
     fn fixture() -> Vec<u8> {
         b"\x01\x00\x01\x05block\x00\x02\x00\x01\x00\x01\x03air\x07podtest\x01\x04\x02\x04lamp\x08lamp_alt".to_vec()

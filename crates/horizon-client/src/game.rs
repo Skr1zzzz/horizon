@@ -332,6 +332,7 @@ mod shield;
 mod shoulders;
 mod sign_edit;
 mod skin_models;
+mod skinshuffle;
 mod sniffers;
 mod social;
 mod spawner;
@@ -19337,6 +19338,17 @@ impl Game<'_> {
                     }
                     if let PhysicalKey::Code(key) = event.physical_key {
                         self.options_key(key, event.text.as_deref())?;
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. }
+                    if self.screen == Screen::Paused
+                        && self.skin_open()
+                        && event.state == ElementState::Pressed =>
+                {
+                    if let Some(shortcut) = self.edit_shortcut(&event) {
+                        self.skin_shortcut(shortcut);
+                    } else if let PhysicalKey::Code(key) = event.physical_key {
+                        self.skin_key(key, event.text.as_deref());
                     }
                 }
                 WindowEvent::KeyboardInput { event, .. }
