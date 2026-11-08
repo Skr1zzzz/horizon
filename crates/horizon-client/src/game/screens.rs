@@ -27,7 +27,9 @@ impl Screen {
             | Self::ServerLinks
             | Self::ConfirmLink
             | Self::DialogWarning
-            | Self::DebugOptions => true,
+            | Self::DebugOptions
+            // laser-eyes' LaserConfigScreen is an ordinary Screen, so Java blurs behind it.
+            | Self::LaserConfig => true,
             Self::Playing
             | Self::GameModeSwitcher
             | Self::EmoteWheel

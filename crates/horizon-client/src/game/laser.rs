@@ -151,7 +151,7 @@ impl Game<'_> {
                     let alpha = ((*age as f32 / 60.0).min(1.0) * 255.0) as u32;
                     (
                         alpha << 24 | (r.laser.config.color & 0xffffff),
-                        (14i32.saturating_sub(r.laser.config.eye_offset)).clamp(10, 15),
+                        laser::glow_row(r.laser.config.eye_offset),
                     )
                 })
         };

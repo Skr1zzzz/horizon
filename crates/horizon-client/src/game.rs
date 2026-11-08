@@ -188,6 +188,7 @@ mod lan_trading;
 mod lan_vehicles;
 mod lan_waypoints;
 mod laser;
+mod laser_menu;
 mod launch_api;
 mod leads;
 mod legacy_rules;
@@ -855,6 +856,7 @@ impl Options {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Playing,
+    LaserConfig,
     GameModeSwitcher,
     /// Horizon's emote wheel (`game/emote_wheel.rs`): over the world, not pausing.
     EmoteWheel,
@@ -902,6 +904,7 @@ impl Screen {
     fn id(self) -> &'static str {
         match self {
             Screen::Playing => "playing",
+            Screen::LaserConfig => "laser_config",
             Screen::GameModeSwitcher => "game_mode_switcher",
             Screen::EmoteWheel => "emote_wheel",
             Screen::Paused => "paused",
@@ -9239,6 +9242,7 @@ impl Game<'_> {
             Screen::Friends => self.draw_friends_screen(&mut batch),
             Screen::Social => self.draw_social_screen(&mut batch),
             Screen::ServerLinks => self.draw_server_links(&mut batch),
+            Screen::LaserConfig => self.draw_laser_menu(&mut batch),
             Screen::ConfirmLink => self.draw_confirm_link(&mut batch),
             Screen::DialogWarning => self.draw_dialog_warning(&mut batch),
             Screen::CommandBlock => self.draw_command_block(&mut batch),
@@ -17251,6 +17255,9 @@ impl Game<'_> {
         {
             return Ok(());
         }
+        if self.laser_menu_key(raw) {
+            return Ok(());
+        }
         if self.remote.is_some() && self.remote_key(key)? {
             return Ok(());
         }
@@ -17286,6 +17293,7 @@ impl Game<'_> {
                 Screen::Stats | Screen::Friends => self.screen = Screen::Paused,
                 Screen::Social => self.close_social(),
                 Screen::ServerLinks => self.screen = Screen::Paused,
+                Screen::LaserConfig => self.close_laser_menu(),
                 // ConfirmScreen.keyPressed: Escape answers no; both return to
                 // the Server Links screen they came from.
                 Screen::ConfirmLink => self.screen = self.confirm_link_back(),
@@ -19135,6 +19143,9 @@ impl Game<'_> {
                         }
                         Screen::WorldOptions if pressed && button == MouseButton::Left => {
                             self.world_options_click()
+                        }
+                        Screen::LaserConfig if pressed && button == MouseButton::Left => {
+                            self.laser_menu_click()
                         }
                         Screen::ServerLinks if pressed && button == MouseButton::Left => {
                             self.server_links_click()?

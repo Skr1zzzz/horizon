@@ -644,7 +644,7 @@ impl Settings {
                 .saved()
                 .into_iter()
                 .chain(self.keys.horizon_saved().into_iter().filter(|(name, _)| {
-                    name.starts_with("key.voice") || *name == "key.laser-eyes.fire"
+                    name.starts_with("key.voice") || name.starts_with("key.laser-eyes.")
                 }))
         {
             put_s(&mut f, &format!("key_{name}"), &key);

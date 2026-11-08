@@ -66,6 +66,11 @@ impl Config {
         Ok(value)
     }
 }
+/// Texture rows available in the Java feature renderer, including clamped offsets.
+pub fn glow_row(offset: i32) -> i32 {
+    14i32.saturating_sub(offset).clamp(10, 15)
+}
+
 pub fn eye(
     feet: DVec3,
     eye_height: f64,
@@ -133,6 +138,36 @@ mod tests {
         }
         bytes.push(0);
         assert!(Config::decode(&bytes).is_err());
+    }
+    #[test]
+    fn java_config_codec_all_fields_vector() {
+        // writeDouble x2, boolean, VarInt, boolean x2, VarInt, int x2, boolean x2.
+        let bytes = [
+            0x40, 0x50, 0x20, 0, 0, 0, 0, 0, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0, 0, 0x81, 1, 1, 0, 0xac,
+            2, 0, 0x12, 0x34, 0x56, 0, 0, 0, 4, 0, 1,
+        ];
+        let c = Config::decode(&bytes).unwrap();
+        assert_eq!((c.range, c.damage), (64.5, 1.5));
+        assert!(!c.ignite_entities && c.ignite_blocks && !c.break_blocks);
+        assert_eq!((c.ignite_seconds, c.burn_threshold), (129, 300));
+        assert_eq!((c.color, c.eye_offset), (0x123456, 4));
+        assert!(!c.stable && c.custom);
+    }
+    #[test]
+    fn java_eye_offset_glow_rows() {
+        for (offset, row) in [
+            (-4, 15),
+            (-3, 15),
+            (-2, 15),
+            (-1, 15),
+            (0, 14),
+            (1, 13),
+            (2, 12),
+            (3, 11),
+            (4, 10),
+        ] {
+            assert_eq!(glow_row(offset), row);
+        }
     }
     #[test]
     fn laser_parallel_endpoints_and_eye_clamp() {
