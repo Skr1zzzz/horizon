@@ -308,7 +308,14 @@ mod armorstand_tests {
             let internal = if i < 36 { i } else { 10000 + i };
             assert_eq!(menu.internal(i), Some(internal));
             assert_eq!(menu.index(internal), Some(i));
+            let [x, y] = menu.position(internal).unwrap();
+            assert_eq!([x, y], [menu.slots[i].0 as f32, menu.slots[i].1 as f32]);
+            for (dx, dy) in [(0., 0.), (8., 8.), (15.9, 15.9), (-0.9, -0.9)] {
+                let hit = menu.hit_test(x + dx, y + dy).unwrap();
+                assert_eq!(menu.index(hit), Some(i), "wire slot {i}");
+            }
         }
+        assert_eq!(menu.hit_test(0., 0.), None);
         assert_eq!(menu.slots[0], (8, 142, 1));
         assert_eq!(menu.slots[9], (8, 84, 1));
         assert_eq!(menu.slots[41], (44, 62, 0));

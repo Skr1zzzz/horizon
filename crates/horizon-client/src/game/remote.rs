@@ -9901,6 +9901,16 @@ impl Game<'_> {
                     None => return false,
                 },
             };
+            if self
+                .remote
+                .as_ref()
+                .and_then(|r| r.armorstand.active)
+                .is_some_and(|s| s.0 == container && s.2 == 5)
+            {
+                horizon_client::armorstand::diagnostic(format_args!(
+                    "slot={slot} button={button} mode={input:?}"
+                ));
+            }
             clicks.push((slot, button, input));
         }
         // Unpredicted: nothing changed, the carried stack as it is.
@@ -10156,6 +10166,16 @@ impl Game<'_> {
         (self.pod_screen_shown() && r.menu.as_ref()?.0 == layout.sync_id).then_some(layout)
     }
     fn remote_pod_menu(&mut self, layout: horizon_client::net::pod::Menu) {
+        // The bridge also describes this handler, but its generic player-slot
+        // classification assumes main-before-hotbar. Keep the mod-specific layout.
+        if self
+            .remote
+            .as_ref()
+            .and_then(|r| r.armorstand.active)
+            .is_some_and(|s| s.0 == layout.sync_id && s.2 == 5)
+        {
+            return;
+        }
         if self.armorstand_takeover(layout.sync_id, "pod layout") {
             return;
         }

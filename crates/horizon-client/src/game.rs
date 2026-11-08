@@ -9464,10 +9464,7 @@ impl Game<'_> {
     /// InventoryMenu / CraftingMenu slot layouts.
     fn slot_position(&self, i: usize) -> (f32, f32) {
         if let Some(l) = self.pod_layout() {
-            return l
-                .index(i)
-                .and_then(|s| l.layout().slots[s])
-                .map_or((-2000.0, -2000.0), |p| (p[0], p[1]));
+            return l.position(i).map_or((-2000.0, -2000.0), |p| (p[0], p[1]));
         }
         if self.creative_inventory_open()
             && let Some(position) = Creative::inventory_slot_position(i)
@@ -9552,6 +9549,9 @@ impl Game<'_> {
             return None;
         }
         let (ox, oy) = self.inventory_origin(batch);
+        if let Some(layout) = self.pod_layout() {
+            return layout.hit_test(x - ox, y - oy);
+        }
         self.slots().into_iter().find(|&i| {
             let (sx, sy) = self.slot_position(i);
             // AbstractContainerScreen.isHovering: the 16x16 slot grows by one
@@ -18994,7 +18994,7 @@ impl Game<'_> {
                     if self
                         .remote
                         .as_ref()
-                        .is_some_and(|r| r.armorstand.active.is_some()) =>
+                        .is_some_and(|r| r.armorstand.active.is_some_and(|s| s.2 != 5)) =>
                 {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.armorstand_click();

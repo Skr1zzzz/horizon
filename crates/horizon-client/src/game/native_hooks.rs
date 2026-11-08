@@ -10318,7 +10318,7 @@ impl Game<'_> {
         if armorstand {
             batch.text(
                 atlas,
-                &horizon_client::lang::get("horizon.armorstands.inventory"),
+                &horizon_client::lang::get("item.minecraft.armor_stand"),
                 ox + 8.0,
                 oy - 12.0,
                 u32::MAX,

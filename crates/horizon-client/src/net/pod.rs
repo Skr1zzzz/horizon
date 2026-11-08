@@ -105,6 +105,25 @@ impl Menu {
     pub fn index(&self, internal: usize) -> Option<usize> {
         (0..self.slots.len()).find(|&s| self.internal(s) == Some(internal))
     }
+    pub fn position(&self, internal: usize) -> Option<[f32; 2]> {
+        self.layout()
+            .slots
+            .get(self.index(internal)?)?
+            .as_ref()
+            .copied()
+    }
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
+        self.layout()
+            .slots
+            .iter()
+            .enumerate()
+            .find_map(|(slot, p)| {
+                let [sx, sy] = (*p)?;
+                (x >= sx - 1. && x < sx + 17. && y >= sy - 1. && y < sy + 17.)
+                    .then(|| self.internal(slot))
+                    .flatten()
+            })
+    }
     pub fn layout(&self) -> Layout {
         let slots: Vec<_> = self
             .slots
