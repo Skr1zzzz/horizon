@@ -16516,6 +16516,9 @@ impl Game<'_> {
                 std::array::from_fn(|i| sky.sky_color[i] + (flash[i] - sky.sky_color[i]) * 0.22);
             sky.sky_light_factor = 1.0;
         }
+        // Fog samples the world's sky colour, not the mixin's rendered sky state.
+        let frame_fog = self.frame_fog(camera, &sky, biome, water_fog);
+        horizon_client::liminal::sky(&mut sky, self.liminal_factors(camera).0);
         pr.lap("pr_environment");
         // FishingHookRenderer's line, then DebugRenderer: chunk borders and
         // hitboxes (F3+G, F3+B).
@@ -16893,7 +16896,7 @@ impl Game<'_> {
             environment_fog: (self.dim == Dim::Nether).then_some((sky.fog_start, sky.fog_end)),
             cave_culling,
             water_fog,
-            fog: Some(self.frame_fog(camera, &sky, biome, water_fog)),
+            fog: Some(frame_fog),
             dark_disc: self.dark_disc(camera),
             outline,
             outline_after_terrain,

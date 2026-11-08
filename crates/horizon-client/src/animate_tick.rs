@@ -463,6 +463,8 @@ pub struct AnimateContext<'a> {
     pub thundering: bool,
     /// The dimension has `water_evaporates` and drips lava from dripstone (the Nether).
     pub ultrawarm: bool,
+    /// Only a server-advertised Liminal Worlds session replaces portal effects.
+    pub liminal_level: Option<&'a str>,
 }
 
 /// `ClientLevel.getMarkerParticleTarget`: only the selected main-hand item counts.
@@ -990,6 +992,13 @@ fn block_animate_tick(
             }
         }
         Animate::NetherPortal => {
+            if ctx
+                .liminal_level
+                .is_some_and(|level| crate::liminal::portal(level, pos[0], pos[2]))
+            {
+                crate::liminal::portal_ash(engine, pos);
+                return;
+            }
             let r = engine.random();
             if next_int(r, 100) == 0 {
                 let pitch = r.next_float() * 0.4 + 0.8;

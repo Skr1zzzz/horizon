@@ -75,6 +75,19 @@ fn rains_at(world: &World, biomes: &Biomes, x: i32, y: i32, z: i32) -> bool {
 }
 
 impl Game<'_> {
+    pub(super) fn liminal_level(&self) -> Option<&str> {
+        self.remote
+            .as_ref()
+            .filter(|r| self.title.is_none() && horizon_client::liminal::detected(&r.registries))
+            .map(|r| r.level.as_str())
+    }
+    pub(super) fn liminal_factors(&self, camera: glam::DVec3) -> (f32, f32) {
+        if self.liminal_level() == Some("minecraft:overworld") {
+            horizon_client::liminal::factors(camera.x.floor() as i32, camera.z.floor() as i32)
+        } else {
+            (0.0, 0.0)
+        }
+    }
     pub(super) fn forward(&self) -> [f64; 3] {
         let (yaw, pitch) = (
             f64::from(self.yaw).to_radians(),
@@ -156,6 +169,7 @@ impl Game<'_> {
                 self.native_fog_color_now(self.clock.fraction() as f32, at, fog_type, fog.color);
             fog = self.native_fog_now(self.clock.fraction() as f32, at, fog_type, fog);
         }
+        horizon_client::liminal::fog(&mut fog.color, self.liminal_factors(camera).1);
         fog
     }
     fn native_fog_color_now(
@@ -244,6 +258,10 @@ impl Game<'_> {
         } else {
             63.0
         };
+        let darkness = self.liminal_factors(camera).0;
+        if darkness > 0.0 {
+            return darkness >= 0.6;
+        }
         self.dim == Dim::Overworld
             && camera.y < horizon
             && fog_type(
@@ -431,6 +449,33 @@ impl Game<'_> {
         if let Some(e) = eye {
             self.particles.camera = e;
         }
+        let liminal_level = self.liminal_level().map(str::to_owned);
+        if let (Some(level), Some(player)) = (liminal_level.as_deref(), self.player.as_ref()) {
+            let p = player.position;
+            let origin = [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32];
+            let in_void = level == horizon_client::liminal::VOID;
+            let near_bedrock = !in_void
+                && player.health.tick_count & 1 == 0
+                && (-6..=2).any(|dy| {
+                    [-3, 0, 3].into_iter().any(|dx| {
+                        [-3, 0, 3].into_iter().any(|dz| {
+                            &*self
+                                .res
+                                .facts()
+                                .get(self.world.block(
+                                    origin[0] + dx,
+                                    origin[1] + dy,
+                                    origin[2] + dz,
+                                ))
+                                .name
+                                == "minecraft:bedrock"
+                        })
+                    })
+                });
+            if in_void || near_bedrock {
+                horizon_client::liminal::ambient_ash(&mut self.particles, origin, in_void);
+            }
+        }
         let (rain, _) = self.weather_levels(1.0);
         let marker = marker_particle_target(self.mode, self.stack_in(self.selected));
         let marker_options = |state| {
@@ -486,6 +531,7 @@ impl Game<'_> {
             gateway_particles: &gateway_particles,
             thundering,
             ultrawarm: self.dim == Dim::Nether,
+            liminal_level: liminal_level.as_deref(),
         };
         if let Some(e) = eye {
             let block = [
