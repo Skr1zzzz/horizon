@@ -44,6 +44,8 @@ pub type Cookies = Arc<Mutex<HashMap<String, Vec<u8>>>>;
 pub enum Event {
     /// Progress text for the connecting screen.
     Status(String),
+    VoiceAvailable(bool),
+    VoiceSecret(crate::voicechat::wire::Secret, String),
     /// Generated startup content must survive the game thread's later settings saves.
     PodEnabled(Vec<String>),
     /// The server's `minecraft:brand` custom payload.
@@ -938,6 +940,14 @@ fn receive_play(
             play::Clientbound::CustomPayload(p) if p.channel == "minecraft:brand" => {
                 receive_brand(&p, send);
             }
+            play::Clientbound::CustomPayload(p) if p.channel == "voicechat:secret" => {
+                if let (Ok(secret), Some(peer)) = (
+                    crate::voicechat::wire::Secret::decode(&p.data),
+                    reader.peer_ip(),
+                ) {
+                    let _ = send.send(Event::VoiceSecret(secret, peer));
+                }
+            }
             // A far tile, straight to the sampler waiting for it.
             play::Clientbound::CustomPayload(p) if p.channel == crate::lod_net::CHANNEL => {
                 far.deliver(p.data);
@@ -1189,6 +1199,7 @@ fn configure(
                     ));
                 }
                 registries.custom_components = content_verified;
+                let _ = send.send(Event::VoiceAvailable(fabric.voicechat()));
                 registries.fabric = fabric.into_map();
                 let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
                 let w = w.as_mut().ok_or_else(|| Reason::plain("Disconnected"))?;

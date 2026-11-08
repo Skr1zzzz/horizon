@@ -34,6 +34,8 @@ horizon-protocol = { path = "../horizon-protocol" }
 horizon-server-files = { path = "../horizon-server-files" }
 # The control endpoint's token (control.rs), as horizon-server's and the relay's.
 getrandom = "0.3"
+ring = "0.17"
+rusty-opus = "=1.0.2"
 # The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
 horizon-anticheat = { path = "../horizon-anticheat" }
 # The dedicated server's chat filter: [chat_filter], the slur list, mutes (docs/chat-filter.md).

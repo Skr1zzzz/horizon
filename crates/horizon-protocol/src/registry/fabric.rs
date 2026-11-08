@@ -6,7 +6,7 @@ use crate::{Error, Result, buf::Reader, packets::configuration as cfg};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SYNC: &str = "fabric:registry/sync";
-const RECEIVERS: &[u8] = b"fabric:registry/sync\0c:version";
+const RECEIVERS: &[u8] = b"fabric:registry/sync\0c:version\0voicechat:secret\0voicechat:state\0voicechat:states\0voicechat:remove_state";
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 262_144;
 
@@ -155,6 +155,13 @@ impl Handshake {
     pub fn with_pod(mut self, enabled: bool) -> Self {
         self.pod = enabled;
         self
+    }
+    pub fn voicechat(&self) -> bool {
+        self.enabled
+            && self
+                .server_channels
+                .iter()
+                .any(|c| c.starts_with("voicechat:"))
     }
     pub fn into_map(self) -> Option<std::sync::Arc<RegistryMap>> {
         self.map
@@ -407,7 +414,7 @@ mod tests {
             b"c:version\0BAD:id\0fabric:registry/sync/complete",
         );
         assert_eq!(p.channel, "minecraft:register");
-        assert_eq!(p.data, b"fabric:registry/sync\0c:version");
+        assert_eq!(p.data, RECEIVERS);
         assert_eq!(state.server_channels.len(), 2);
         assert!(registration(&p.data).unwrap().contains(SYNC));
         let ping = cfg::Clientbound::Ping(Ping { id: 0x00FAB71C });

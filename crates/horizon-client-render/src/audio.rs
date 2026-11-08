@@ -941,6 +941,60 @@ pub fn output_devices() -> Vec<String> {
 }
 
 impl Audio {
+    /// Append live mono PCM without involving resource decoding or sound categories.
+    /// Consumed samples are discarded and backlog is capped to avoid stale speech.
+    pub fn stream_pcm(
+        &mut self,
+        id: &mut Option<u64>,
+        pcm: &[f32],
+        at: Option<[f64; 3]>,
+        distance: f32,
+    ) {
+        if !self.backend.live {
+            return;
+        }
+        if let Some(old) = *id
+            && self
+                .backend
+                .mixer
+                .lock()
+                .is_ok_and(|m| !m.channels.contains_key(&old))
+        {
+            *id = None;
+        }
+        let channel = match *id {
+            Some(id) => id,
+            None => {
+                let Some(new) = self.backend.create(true) else {
+                    return;
+                };
+                *id = Some(new);
+                new
+            }
+        };
+        if let Ok(mut m) = self.backend.mixer.lock()
+            && let Some(c) = m.channels.get_mut(&channel)
+        {
+            let mut pending = c.samples.as_ref().map_or_else(Vec::new, |(s, _, _)| {
+                s[c.position.floor().min(s.len() as f64) as usize..].to_vec()
+            });
+            if pending.len() > 9600 {
+                pending.clear();
+            }
+            pending.extend_from_slice(pcm);
+            c.position = c.position.fract();
+            c.samples = Some((Arc::new(pending), 48000, 1));
+            c.state = State::Playing;
+            c.gain = self.master;
+            c.started = Some(("voicechat:pcm".into(), std::time::Instant::now()));
+            c.relative = at.is_none();
+            c.at = at.unwrap_or([0.0; 3]).map(|x| x as f32);
+            c.linear = at.map(|_| distance);
+        }
+    }
+    pub fn release_stream(&mut self, id: u64) {
+        self.backend.destroy(id);
+    }
     pub fn new(root: &Path) -> Self {
         Self::with_device(root, "")
     }
@@ -1307,6 +1361,15 @@ impl Audio {
     /// `SoundManager.stop()`: every sound.
     pub fn stop_all(&mut self) {
         self.engine.stop_all(&mut self.backend);
+        if let Ok(mut m) = self.backend.mixer.lock() {
+            m.channels.retain(|_, c| {
+                c.owner != self.backend.owner
+                    || !c
+                        .started
+                        .as_ref()
+                        .is_some_and(|(name, _)| name == "voicechat:pcm")
+            });
+        }
     }
     /// `SoundManager.reload` (resource packs changed): stop every sound, then
     /// read sound events and sound files from the new resource root.

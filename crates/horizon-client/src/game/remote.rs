@@ -497,6 +497,10 @@ enum OwnProfile {
 
 pub(super) struct Remote {
     pub session: Session,
+    voice: Option<horizon_client::voicechat::Connection>,
+    voice_available: bool,
+    voice_requested: bool,
+    voice_streams: HashMap<u128, (Option<u64>, std::time::Instant)>,
     pub brand: String,
     /// This connection's configured feature flags, carried through reconfiguration.
     pub(super) features: Vec<String>,
@@ -1083,6 +1087,10 @@ impl Game<'_> {
             });
         self.remote = Some(Remote {
             session,
+            voice: None,
+            voice_available: false,
+            voice_requested: false,
+            voice_streams: HashMap::new(),
             brand: "unknown".into(),
             features: vec!["minecraft:vanilla".into()],
             quiet_commands: false,
@@ -1961,6 +1969,19 @@ impl Game<'_> {
                 }
             };
             match event {
+                Event::VoiceAvailable(available) => {
+                    if let Some(r) = self.remote.as_mut() {
+                        r.voice_available = available;
+                    }
+                }
+                Event::VoiceSecret(secret, peer) => {
+                    if let Some(r) = self.remote.as_mut()
+                        && r.voice_requested
+                    {
+                        r.voice = None;
+                        r.voice = Some(horizon_client::voicechat::Connection::start(secret, peer));
+                    }
+                }
                 Event::PodEnabled(ids) => {
                     for id in ids {
                         self.settings.mods.disabled.remove(&id);
@@ -2019,6 +2040,11 @@ impl Game<'_> {
                     }
                 }
                 Event::Reconfiguring => {
+                    if let Some(r) = self.remote.as_mut() {
+                        r.voice = None;
+                        r.voice_available = false;
+                        r.voice_requested = false;
+                    }
                     // handleConfigurationStart: the held-back chat shows, then
                     // clearClientLevel opens ServerReconfigScreen over no level.
                     self.flush_chat_queue();
@@ -3299,6 +3325,33 @@ impl Game<'_> {
             C::PongResponse(p) => {
                 let delay = self.debug_millis() - p.time;
                 self.debug_charts.ping.log(delay);
+            }
+            C::CustomPayload(p)
+                if matches!(
+                    p.channel.as_str(),
+                    "voicechat:state" | "voicechat:states" | "voicechat:remove_state"
+                ) =>
+            {
+                if let Err(e) = horizon_client::voicechat::wire::state(&p.channel, &p.data) {
+                    log::warn!("voicechat: {e}");
+                }
+            }
+            C::CustomPayload(p)
+                if matches!(
+                    p.channel.as_str(),
+                    "minecraft:register" | "minecraft:unregister"
+                ) =>
+            {
+                if let Some(r) = self.remote.as_mut()
+                    && std::env::var_os("HORIZON_FABRIC_SYNC").is_some_and(|v| v == "1")
+                {
+                    if p.data
+                        .split(|b| *b == 0)
+                        .any(|c| c.starts_with(b"voicechat:"))
+                    {
+                        r.voice_available = p.channel == "minecraft:register";
+                    }
+                }
             }
             C::Login(p) => {
                 self.test_highlights.clear();
@@ -6070,8 +6123,78 @@ impl Game<'_> {
     }
 
     /// One client tick while connected (Minecraft.tick with a ClientLevel).
+    fn tick_voicechat(&mut self) {
+        use horizon_client::voicechat::{Event as V, wire::Placement};
+        let request = self
+            .remote
+            .as_ref()
+            .is_some_and(|r| r.voice_available && r.logged_in && !r.voice_requested);
+        if request {
+            if let Some(r) = self.remote.as_mut() {
+                r.voice_requested = true;
+            }
+            self.send(S::CustomPayload(horizon_protocol::packets::configuration::CustomPayload { channel: "minecraft:register".into(), data: b"voicechat:secret\0voicechat:state\0voicechat:states\0voicechat:remove_state".to_vec() }));
+            self.send(S::CustomPayload(
+                horizon_protocol::packets::configuration::CustomPayload {
+                    channel: "voicechat:request_secret".into(),
+                    data: 20i32.to_be_bytes().to_vec(),
+                },
+            ));
+        }
+        let events: Vec<_> = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.voice.as_ref())
+            .map(|v| v.events.try_iter().collect())
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                V::Connected => self.send(S::CustomPayload(
+                    horizon_protocol::packets::configuration::CustomPayload {
+                        channel: "voicechat:update_state".into(),
+                        data: vec![0],
+                    },
+                )),
+                V::Pcm(sound, pcm) => {
+                    let at = match sound.placement {
+                        Placement::Group => None,
+                        Placement::Location(at) => Some(at),
+                        Placement::Player => self.remote.as_ref().and_then(|r| {
+                            r.level_players
+                                .iter()
+                                .find(|(_, uuid)| **uuid == sound.sender)
+                                .and_then(|(id, _)| r.entities.get(id))
+                                .map(|t| t.position)
+                        }),
+                    };
+                    if let Some(r) = self.remote.as_mut() {
+                        let entry = r
+                            .voice_streams
+                            .entry(sound.channel)
+                            .or_insert((None, std::time::Instant::now()));
+                        entry.1 = std::time::Instant::now();
+                        self.audio
+                            .stream_pcm(&mut entry.0, &pcm, at, sound.distance);
+                    }
+                }
+            }
+        }
+        if let Some(r) = self.remote.as_mut() {
+            r.voice_streams.retain(|_, (id, last)| {
+                if r.voice.is_none() || last.elapsed() > std::time::Duration::from_secs(1) {
+                    if let Some(id) = *id {
+                        self.audio.release_stream(id);
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
     pub(super) fn tick_remote(&mut self) -> Result<()> {
         self.tick_remote_level()?;
+        self.tick_voicechat();
         // The rockets boosting this player tick after it, also while it waits
         // for chunks.
         self.tick_own_rockets();

@@ -470,6 +470,13 @@ enum Next {
     Partial(usize),
 }
 impl ConnReader {
+    /// The actual TCP peer, after SRV lookup or address fallback.
+    pub fn peer_ip(&self) -> Option<String> {
+        match &self.stream {
+            Stream::Tcp(s) => s.peer_addr().ok().map(|a| a.ip().to_string()),
+            _ => None,
+        }
+    }
     /// Install before acknowledging the configuration task, so queued play packets use it.
     pub fn install_pod_snapshot(&self, bytes: &[u8], resources: &std::path::Path) -> Result<()> {
         let session = self
