@@ -1,7 +1,9 @@
 //! Clean-room protocol implemented from a written interoperability description.
+pub mod sender;
 pub mod wire;
 use horizon_protocol::buf::{Reader, Writer};
 use rusty_opus::OpusDecoder;
+use std::sync::{Arc, atomic::Ordering};
 use std::{
     collections::{BTreeMap, HashMap},
     net::{ToSocketAddrs, UdpSocket},
@@ -17,7 +19,7 @@ pub enum Event {
 pub struct Connection {
     stop: SyncSender<()>,
     pub events: Receiver<Event>,
-    pub mic: SyncSender<Packet>,
+    pub controls: Arc<sender::Controls>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -25,19 +27,24 @@ impl Drop for Connection {
     }
 }
 impl Connection {
-    pub fn start(secret: Secret, server: String) -> Self {
+    pub fn start(secret: Secret, server: String, config: sender::Config) -> Self {
         let (stop, halt) = mpsc::sync_channel(1);
         let (tx, events) = mpsc::sync_channel(100);
-        let (mic, rx) = mpsc::sync_channel(10);
+        let controls = Arc::new(sender::Controls::default());
+        let shared = controls.clone();
         std::thread::Builder::new()
             .name("voicechat UDP".into())
             .spawn(move || {
-                if let Err(e) = run(secret, &server, halt, tx, rx) {
+                if let Err(e) = run(secret, &server, halt, tx, shared, config) {
                     log::warn!("voicechat: {e}");
                 }
             })
             .expect("voicechat thread");
-        Self { stop, events, mic }
+        Self {
+            stop,
+            events,
+            controls,
+        }
     }
 }
 fn diagnostic(message: &str) {
@@ -92,7 +99,8 @@ fn run(
     server: &str,
     halt: Receiver<()>,
     tx: SyncSender<Event>,
-    mic: Receiver<Packet>,
+    controls: Arc<sender::Controls>,
+    config: sender::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (host, port) = secret.address(server)?;
     diagnostic(&format!("secret port={port} host={host}"));
@@ -128,6 +136,9 @@ fn run(
     let mut stats: HashMap<u128, (usize, f32)> = HashMap::new();
     let mut report = Instant::now();
     let mut dump = Dump::new();
+    let mut config = Some(config);
+    let mut sender = None;
+    let mut sent = 0;
     loop {
         match halt.try_recv() {
             Err(mpsc::TryRecvError::Empty) => {}
@@ -147,12 +158,8 @@ fn run(
         if alive.elapsed() > Duration::from_millis(secret.keep_alive.saturating_mul(10)) {
             break;
         }
-        while let Ok(packet) = mic.try_recv() {
-            if connected
-                && matches!(&packet,Packet::Mic{opus,..} if opus.len()<=secret.mtu as usize)
-            {
-                send(packet);
-            }
+        if let Some(s) = sender.as_mut() {
+            sent += sender::Sender::poll(s, |p| send(p).is_some());
         }
         if let Ok(n) = socket.recv(&mut buffer) {
             let mut r = Reader::new(&buffer[..n]);
@@ -176,6 +183,15 @@ fn run(
                     connected = true;
                     alive = Instant::now();
                     diagnostic("connected");
+                    match sender::Sender::new(
+                        secret.codec,
+                        secret.mtu as usize,
+                        controls.clone(),
+                        config.take().unwrap(),
+                    ) {
+                        Ok(s) => sender = Some(s),
+                        Err(e) => log::warn!("voicechat: sender: {e}"),
+                    }
                     let _ = tx.try_send(Event::Connected);
                 }
                 Some(Packet::KeepAlive) => {
@@ -185,7 +201,9 @@ fn run(
                 Some(p @ Packet::Ping { .. }) => {
                     send(p);
                 }
-                Some(Packet::Sound(s)) if connected => {
+                Some(Packet::Sound(s))
+                    if connected && !controls.disabled.load(Ordering::Relaxed) =>
+                {
                     if channels.len() < 128 || channels.contains_key(&s.channel) {
                         let c = channels.entry(s.channel).or_insert_with(|| Channel {
                             reorder: Reorder::default(),
@@ -200,6 +218,9 @@ fn run(
                 }
                 _ => {}
             }
+        }
+        if controls.disabled.load(Ordering::Relaxed) {
+            channels.clear();
         }
         for c in channels.values_mut() {
             if c.arrival.elapsed() > Duration::from_millis(60) {
@@ -216,6 +237,8 @@ fn run(
                     uuid(id)
                 ));
             }
+            diagnostic(&format!("sent {sent} frames"));
+            sent = 0;
             report = Instant::now();
         }
     }

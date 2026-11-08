@@ -96,6 +96,9 @@ actions! {
     DebugLightmapTexture, "key.debug.lightmapTexture", None;
     DebugImprovedTransparency, "key.debug.improvedTransparency", None;
     Emote, "key.emote", Some(KeyCode::KeyB);
+    VoicePtt, "key.voicePtt", Some(KeyCode::CapsLock);
+    VoiceMute, "key.voiceMute", Some(KeyCode::KeyM);
+    VoiceDisable, "key.voiceDisable", Some(KeyCode::KeyJ);
     HotbarPrevious, "pad.hotbarPrevious", None;
     HotbarNext, "pad.hotbarNext", None;
 }

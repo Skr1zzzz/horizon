@@ -430,7 +430,9 @@ impl Settings {
     /// Typed view of an options file.
     pub fn from_file(f: OptionsFile) -> Self {
         let mut keys = KeyBinds::default();
-        for (name, _, _) in crate::keybinds::MAPPINGS {
+        for (name, _, _) in
+            crate::keybinds::all_mappings().filter(|(name, _, _)| *name != "key.emote")
+        {
             keys.set(name, &f.key_binding(name));
         }
         let mut volumes = [1.0; 11];
@@ -637,7 +639,12 @@ impl Settings {
         if self.resource_packs != f.list("resourcePacks") {
             f.set("resourcePacks", V::List(self.resource_packs.clone()));
         }
-        for (name, key) in self.keys.saved() {
+        for (name, key) in self.keys.saved().into_iter().chain(
+            self.keys
+                .horizon_saved()
+                .into_iter()
+                .filter(|(name, _)| name.starts_with("key.voice")),
+        ) {
             put_s(&mut f, &format!("key_{name}"), &key);
         }
         f

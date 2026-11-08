@@ -16685,6 +16685,29 @@ impl Game<'_> {
         pr.lap("pr_projection");
         // GUI hooks project against this frame's camera, including its bob/spin and FOV.
         let mut hud = horizon_client::spans::time("hud", || self.hud(size));
+        if !self.ui.hide_gui
+            && let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref())
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let disabled = v.controls.disabled.load(Relaxed);
+            let muted = v.controls.muted.load(Relaxed);
+            if disabled || muted || v.controls.transmitting.load(Relaxed) {
+                let color = if disabled {
+                    0xff777777
+                } else if muted {
+                    0xffff5555
+                } else {
+                    0xff55ff55
+                };
+                let atlas = &self.gui.atlas;
+                hud.fill(atlas, 8.0, 8.0, 4.0, 7.0, color);
+                hud.fill(atlas, 6.0, 14.0, 8.0, 2.0, color);
+                hud.fill(atlas, 9.0, 16.0, 2.0, 3.0, color);
+                if disabled || muted {
+                    hud.fill(atlas, 5.0, 10.0, 10.0, 2.0, color);
+                }
+            }
+        }
         self.flush_ime(&mut hud);
         self.native_gui_render_post(&mut hud, self.ui.hide_gui, self.focused);
         self.resolve_inline_profiles(&hud.inline_profiles);
@@ -17131,6 +17154,22 @@ impl Game<'_> {
         // `CreativeModeInventoryScreen.keyPressed` clears `ignoreTextInput` on
         // every key, before it decides anything.
         self.creative_ignore_text = false;
+        if self.screen == Screen::Playing && matches!(key, KeyCode::KeyM | KeyCode::KeyJ) {
+            if let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref()) {
+                use std::sync::atomic::Ordering::Relaxed;
+                if key == KeyCode::KeyM {
+                    v.controls.muted.fetch_xor(true, Relaxed);
+                } else {
+                    let disabled = !v.controls.disabled.fetch_xor(true, Relaxed);
+                    self.send(horizon_protocol::packets::play::Serverbound::CustomPayload(
+                        horizon_protocol::packets::configuration::CustomPayload {
+                            channel: "voicechat:update_state".into(),
+                            data: vec![u8::from(disabled)],
+                        },
+                    ));
+                }
+            }
+        }
         if self.sleeping.is_some()
             && self.screen == Screen::Playing
             && !matches!(

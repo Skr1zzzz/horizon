@@ -250,6 +250,19 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         n("musicToast", MUSIC_TOAST, 0),
         n("musicFrequency", MUSIC_FREQUENCY, 0),
     ];
+    t.push(def("voicechatInputDevice", PS, V::Str(String::new())));
+    t.push(b("voicechatActivation", false));
+    t.push(i("voicechatThreshold", -100, 0, -50));
+    for (name, key, _) in crate::keybinds::HORIZON_MAPPINGS
+        .iter()
+        .filter(|(name, _, _)| name.starts_with("key.voice"))
+    {
+        t.push(def(
+            &format!("key_{name}"),
+            Kind::Key,
+            V::Str((*key).into()),
+        ));
+    }
     for (name, key, _) in crate::keybinds::MAPPINGS {
         t.push(def(
             &format!("key_{name}"),

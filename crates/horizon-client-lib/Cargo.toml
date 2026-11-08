@@ -36,6 +36,7 @@ horizon-server-files = { path = "../horizon-server-files" }
 getrandom = "0.3"
 ring = "0.17"
 rusty-opus = "=1.0.2"
+cpal = { version = "0.16", optional = true }
 # The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
 horizon-anticheat = { path = "../horizon-anticheat" }
 # The dedicated server's chat filter: [chat_filter], the slur list, mutes (docs/chat-filter.md).
@@ -117,7 +118,7 @@ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 default = ["audio", "controllers"]
 # Sound output. Without it (and `controllers`) the program links neither libasound nor libudev on
 # Linux: the server build (`--no-default-features`, released as horizon-engine; docs/server.md).
-audio = ["horizon-client-render/audio"]
+audio = ["horizon-client-render/audio", "dep:cpal"]
 # Controllers: gilrs, and the DualSense's own output. Without it only `horizon-ctl pad`'s virtual pad.
 controllers = ["dep:gilrs", "dep:horizon-dualsense", "horizon-client-input/controllers"]
 # Records the call sites of mob random draws (`mob_ai_probe` traces).

@@ -497,7 +497,7 @@ enum OwnProfile {
 
 pub(super) struct Remote {
     pub session: Session,
-    voice: Option<horizon_client::voicechat::Connection>,
+    pub(super) voice: Option<horizon_client::voicechat::Connection>,
     voice_available: bool,
     voice_requested: bool,
     voice_streams: HashMap<u128, (Option<u64>, std::time::Instant)>,
@@ -1979,7 +1979,15 @@ impl Game<'_> {
                         && r.voice_requested
                     {
                         r.voice = None;
-                        r.voice = Some(horizon_client::voicechat::Connection::start(secret, peer));
+                        r.voice = Some(horizon_client::voicechat::Connection::start(
+                            secret,
+                            peer,
+                            horizon_client::voicechat::sender::Config {
+                                device: self.settings.file.string("voicechatInputDevice"),
+                                activation: self.settings.file.bool("voicechatActivation"),
+                                threshold: self.settings.file.int("voicechatThreshold") as f32,
+                            },
+                        ));
                     }
                 }
                 Event::PodEnabled(ids) => {
@@ -6141,6 +6149,22 @@ impl Game<'_> {
                 },
             ));
         }
+        if let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref()) {
+            v.controls.held.store(
+                self.screen == Screen::Playing
+                    && self.keys.held(horizon_client::actions::Action::VoicePtt),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let disabled = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.voice.as_ref())
+            .is_some_and(|v| {
+                v.controls
+                    .disabled
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            });
         let events: Vec<_> = self
             .remote
             .as_ref()
@@ -6152,9 +6176,10 @@ impl Game<'_> {
                 V::Connected => self.send(S::CustomPayload(
                     horizon_protocol::packets::configuration::CustomPayload {
                         channel: "voicechat:update_state".into(),
-                        data: vec![0],
+                        data: vec![u8::from(disabled)],
                     },
                 )),
+                V::Pcm(_, _) if disabled => {}
                 V::Pcm(sound, pcm) => {
                     let at = match sound.placement {
                         Placement::Group => None,
@@ -6181,7 +6206,10 @@ impl Game<'_> {
         }
         if let Some(r) = self.remote.as_mut() {
             r.voice_streams.retain(|_, (id, last)| {
-                if r.voice.is_none() || last.elapsed() > std::time::Duration::from_secs(1) {
+                if disabled
+                    || r.voice.is_none()
+                    || last.elapsed() > std::time::Duration::from_secs(1)
+                {
                     if let Some(id) = *id {
                         self.audio.release_stream(id);
                     }
