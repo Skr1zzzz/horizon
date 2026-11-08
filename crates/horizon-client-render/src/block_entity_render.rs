@@ -377,6 +377,12 @@ fn sign(hanging: bool, wall: bool, prop: &dyn Fn(&str) -> Option<String>) -> Kin
     }
 }
 fn classify(name: &str, prop: &dyn Fn(&str) -> Option<String>) -> Kind {
+    // Only the end portal has a block entity in the Java deco mod. In particular,
+    // borrowing the spawner model must not manufacture its mob preview/ticker.
+    let name = match horizon_items::content_namespaces::pod_visual(name) {
+        Some(("minecraft:end_portal", _)) => "minecraft:end_portal",
+        _ => name,
+    };
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
     let facing = || intern(&prop("facing").unwrap_or_default());
     let chest = |texture: &'static str, left: &'static str, right: &'static str| {
@@ -3498,6 +3504,23 @@ mod tests {
     use super::*;
     use crate::assets::Assets;
     use horizon_world::nbt::Tag;
+
+    #[test]
+    fn deco_end_portal_state_has_end_portal_render_kind() {
+        assert!(matches!(
+            classify("deco-blocks:deco_end_portal", &|_| None),
+            Kind::EndPortal
+        ));
+        assert!(matches!(
+            classify("other:deco_end_portal", &|_| None),
+            Kind::None
+        ));
+        assert!(matches!(
+            classify("deco-blocks:deco_spawner", &|_| None),
+            Kind::None
+        ));
+    }
+
     #[test]
     #[ignore = "requires prepared models/textures in HORIZON_TEST_RESOURCES"]
     fn entity_block_particles_and_breaking_use_exported_models() -> Result<()> {

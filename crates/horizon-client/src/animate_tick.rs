@@ -115,6 +115,11 @@ fn step(facing: &str) -> [i32; 3] {
     }
 }
 fn classify(name: &str, prop: &dyn Fn(&str) -> Option<String>) -> Animate {
+    let name = match horizon_items::content_namespaces::pod_visual(name) {
+        Some((vanilla, true)) => vanilla,
+        Some((_, false)) => return Animate::None,
+        None => name,
+    };
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
     let lit = prop("lit").as_deref() == Some("true");
     let powered = prop("powered").as_deref() == Some("true");
@@ -2020,6 +2025,22 @@ mod tests {
     #[test]
     fn classifies_animated_blocks() {
         let none = |_: &str| None;
+        assert_eq!(
+            classify("deco-blocks:deco_end_portal", &none),
+            Animate::EndPortal
+        );
+        assert_eq!(
+            classify("deco-blocks:deco_nether_portal", &none),
+            Animate::NetherPortal
+        );
+        for id in [
+            "deco_bedrock",
+            "deco_dragon_egg",
+            "deco_end_portal_frame",
+            "deco_spawner",
+        ] {
+            assert_eq!(classify(&format!("deco-blocks:{id}"), &none), Animate::None);
+        }
         assert_eq!(classify("minecraft:torch", &none), Animate::Torch(T::Flame));
         let lit = |k: &str| (k == "lit").then(|| "true".to_owned());
         assert_eq!(

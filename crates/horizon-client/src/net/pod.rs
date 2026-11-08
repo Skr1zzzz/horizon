@@ -1045,6 +1045,11 @@ fn manifest(ns: &str, version: &str, fingerprint: &str) -> Result<String> {
 pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<String>> {
     let snap = Snapshot::parse(rsnap)?;
     let (assets, meta) = assets(archive)?;
+    for block in &snap.blocks {
+        if let Some((vanilla, _)) = horizon_items::content_namespaces::pod_visual(&block.name) {
+            log::info!("pod: {} borrows {vanilla}", block.name);
+        }
+    }
     let captures: Value = assets
         .get("pod-entities.json")
         .and_then(|b| serde_json::from_slice(b).ok())
@@ -1259,6 +1264,21 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deco_nether_portal_declaration_keeps_axis() {
+        let mut snap = declaration_snapshot();
+        snap.blocks[0].name = "deco-blocks:deco_nether_portal".into();
+        snap.states[0].properties = "axis=x".into();
+        snap.states[1].properties = "axis=z".into();
+        let value = declaration(&snap, &snap.blocks[0], true).unwrap();
+        assert_eq!(value["default_state"], json!({"axis":"x"}));
+        assert_eq!(
+            value["state_properties"]["axis"]["values"],
+            json!(["x", "z"])
+        );
+        assert_eq!(value["collision_shapes"]["properties"], json!(["axis"]));
+    }
+
     #[test]
     fn pod_entity_decode() {
         let mut w = horizon_protocol::buf::Writer::new();

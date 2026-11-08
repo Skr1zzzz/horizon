@@ -15,6 +15,51 @@ pub fn namespaces(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// PoD's explicit visual aliases. Registry snapshots carry no Java inheritance;
+/// these aliases affect client presentation only, never server block behaviour.
+/// The flag distinguishes copied display ticks from plain decorative Blocks.
+pub fn pod_visual(id: &str) -> Option<(&'static str, bool)> {
+    const VISUALS: [(&str, &str, bool); 6] = [
+        ("deco-blocks:deco_bedrock", "minecraft:bedrock", false),
+        ("deco-blocks:deco_dragon_egg", "minecraft:dragon_egg", false),
+        ("deco-blocks:deco_end_portal", "minecraft:end_portal", true),
+        (
+            "deco-blocks:deco_end_portal_frame",
+            "minecraft:end_portal_frame",
+            false,
+        ),
+        (
+            "deco-blocks:deco_nether_portal",
+            "minecraft:nether_portal",
+            true,
+        ),
+        ("deco-blocks:deco_spawner", "minecraft:spawner", false),
+    ];
+    VISUALS
+        .iter()
+        .find_map(|&(foreign, vanilla, animate)| (id == foreign).then_some((vanilla, animate)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pod_visual_lookup_is_explicit() {
+        for (id, vanilla, animate) in [
+            ("deco_bedrock", "bedrock", false),
+            ("deco_dragon_egg", "dragon_egg", false),
+            ("deco_end_portal", "end_portal", true),
+            ("deco_end_portal_frame", "end_portal_frame", false),
+            ("deco_nether_portal", "nether_portal", true),
+            ("deco_spawner", "spawner", false),
+        ] {
+            let (target, tick) = super::pod_visual(&format!("deco-blocks:{id}")).unwrap();
+            assert_eq!(target, format!("minecraft:{vanilla}"));
+            assert_eq!(tick, animate);
+        }
+        assert_eq!(super::pod_visual("other:deco_end_portal"), None);
+    }
+}
+
 /// The namespaces whose tags loaders read in `root`: `minecraft`, and in a
 /// root built by `mod_content::build` the convention tags (`c`, shared between mods as
 /// on NeoForge and Fabric) and the content mods' own.
