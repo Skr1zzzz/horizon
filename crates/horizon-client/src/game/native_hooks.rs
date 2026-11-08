@@ -10310,7 +10310,21 @@ impl Game<'_> {
             return true;
         }
         let grey = rgba(64, 64, 64, 255);
-        if let Some(title) = self.remote_menu_title() {
+        let armorstand = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.pod_menu.as_ref())
+            .is_some_and(|m| m.menu == "armorstands:inventory");
+        if armorstand {
+            batch.text(
+                atlas,
+                &horizon_client::lang::get("horizon.armorstands.inventory"),
+                ox + 8.0,
+                oy - 12.0,
+                u32::MAX,
+                true,
+            );
+        } else if let Some(title) = self.remote_menu_title() {
             batch.text_styled(atlas, &title, ox + 8.0, oy + 6.0, grey, false);
         }
         let inventory = self.translate("container.inventory", "Inventory");

@@ -88,6 +88,9 @@ impl Menu {
         })
     }
     pub fn internal(&self, slot: usize) -> Option<usize> {
+        if self.menu == "armorstands:inventory" {
+            return (slot < 42).then_some(if slot < 36 { slot } else { 10000 + slot });
+        }
         let kind = self.slots.get(slot)?.2;
         if kind == 0 {
             return Some(10000 + slot);
@@ -117,12 +120,15 @@ impl Menu {
         }
         // The first player slot is the main grid, not the hotbar. Vanilla leaves
         // eight pixels below the hotbar's 16-pixel item area (84 + 82 = 166).
-        let inventory_y = self
-            .slots
-            .iter()
-            .zip(&slots)
-            .find_map(|(s, p)| (s.2 == 1).then_some(*p).flatten().map(|p| p[1]))
-            .unwrap_or(84.0);
+        let inventory_y = if self.menu == "armorstands:inventory" {
+            84.0
+        } else {
+            self.slots
+                .iter()
+                .zip(&slots)
+                .find_map(|(s, p)| (s.2 == 1).then_some(*p).flatten().map(|p| p[1]))
+                .unwrap_or(84.0)
+        };
         if self.slots.iter().any(|s| s.2 == 1) {
             height = height.max(inventory_y + 82.0);
         }

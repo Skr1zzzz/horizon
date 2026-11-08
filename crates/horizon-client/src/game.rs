@@ -18765,6 +18765,9 @@ impl Game<'_> {
                         }) * wheel_sensitivity
                     };
                     let d = scaled(raw_y) as f32;
+                    if d != 0. && self.armorstand_wheel(d) {
+                        return Ok(());
+                    }
                     // ScreenEvent.MouseScrolled.Pre: the open screen hears of
                     // the wheel before anything scrolls, and a cancelled turn
                     // scrolls nothing — no bundle, no list, slider or
@@ -18995,6 +18998,12 @@ impl Game<'_> {
                 {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.armorstand_click();
+                    } else if state == ElementState::Released && button == MouseButton::Left {
+                        if self.remote.as_ref().is_some_and(|r| {
+                            r.armorstand.preview.as_ref().is_some_and(|p| p.dragging)
+                        }) {
+                            self.armorstand_commit();
+                        }
                     }
                 }
                 WindowEvent::MouseInput { state, button, .. } if self.book.is_some() => {

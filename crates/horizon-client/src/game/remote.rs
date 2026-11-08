@@ -599,8 +599,8 @@ pub(super) struct Remote {
     /// A mod menu's extra data, kept for the `OpenScreen` of its window that
     /// follows (`horizon:menu_extra`).
     menu_extra: Option<horizon_protocol::menu_extra::Message>,
-    pending_pod: Option<play::OpenScreen>,
-    pod_menu: Option<horizon_client::net::pod::Menu>,
+    pub(super) pending_pod: Option<play::OpenScreen>,
+    pub(super) pod_menu: Option<horizon_client::net::pod::Menu>,
     pub(super) pod_entities: HashMap<i32, String>,
     entities: HashMap<i32, Tracked>,
     lerps: HashMap<i32, Lerp>,
@@ -4887,7 +4887,7 @@ impl Game<'_> {
                     .remote
                     .as_ref()
                     .and_then(|r| r.armorstand.active)
-                    .is_some_and(|s| s.0 == p.container) =>
+                    .is_some_and(|s| s.0 == p.container && s.2 != 5) =>
             {
                 // Slotless editor pages have no inventory mapping, only a carried stack.
                 self.carried = self.to_stack(&p.carried);
@@ -4897,7 +4897,7 @@ impl Game<'_> {
                     .remote
                     .as_ref()
                     .and_then(|r| r.armorstand.active)
-                    .is_some_and(|s| s.0 == p.container) => {}
+                    .is_some_and(|s| s.0 == p.container && s.2 != 5) => {}
             C::ContainerSetContent(p) => {
                 let pending = self.remote.as_mut().and_then(|r| r.pending_pod.take());
                 if let Some(pending) = pending {
@@ -5011,7 +5011,7 @@ impl Game<'_> {
                     .remote
                     .as_ref()
                     .and_then(|r| r.armorstand.active)
-                    .is_some_and(|s| s.0 == p.container)
+                    .is_some_and(|s| s.0 == p.container && s.2 != 5)
                 {
                     self.armorstand_close(false);
                 }
