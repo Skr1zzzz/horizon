@@ -300,7 +300,15 @@ fn declaration_with_entity(
     if count != rows.len() || actual.iter().any(|p| !p.keys().eq(domains.keys())) {
         return Err("PoD: non-Cartesian states".into());
     }
+    // deco-blocks' end portal draws vanilla's starfield, a block-entity renderer: only a
+    // template with a block entity makes the mesher hand its position to that renderer.
+    let portal = matches!(
+        horizon_items::content_namespaces::pod_visual(&block.name),
+        Some(("minecraft:end_portal", _))
+    )
+    .then_some("minecraft:end_portal");
     let chosen = entity_template(entity, &block.name, &domains)
+        .or(portal)
         .unwrap_or_else(|| template(&domains, &rows, cube));
     if chosen == "minecraft:stone" {
         log::warn!(
@@ -346,7 +354,7 @@ fn declaration_with_entity(
         );
         lights = BTreeSet::from([default]);
     }
-    let mut out = json!({"template": chosen, "item": item && chosen != "minecraft:water"});
+    let mut out = json!({"template": chosen, "item": item && !["minecraft:water", "minecraft:end_portal"].contains(&chosen)});
     if !domains.is_empty() {
         out["default_state"] = json!(props(
             &snap.states[block.default_state as usize].properties
@@ -472,7 +480,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 16;
+const GENERATOR_REVISION: u32 = 18;
 
 fn entity_template(
     meta: &Value,

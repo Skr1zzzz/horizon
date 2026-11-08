@@ -268,7 +268,9 @@ impl Game<'_> {
             change => change.command(),
         };
         if let Some(command) = command {
-            self.click_command(&command);
+            // LaserConfigScreen sends it as typed (sendChatCommand), not as an unattended
+            // click: no admin-command confirmation pops over the menu.
+            self.send_command(command.strip_prefix('/').unwrap_or(&command));
         }
     }
 }
