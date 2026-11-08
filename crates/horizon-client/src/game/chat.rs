@@ -661,7 +661,7 @@ impl Game<'_> {
                     return true;
                 }
                 if self.screen != Screen::Chat {
-                    self.open_chat("");
+                    self.open_chat("", false);
                 }
                 self.ui.voice_recording = None;
                 self.ui.voice_review = None;

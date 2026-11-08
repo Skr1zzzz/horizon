@@ -1535,6 +1535,22 @@ impl Game<'_> {
             server_links: Vec::new(),
             debug_query: Default::default(),
             transfer: None,
+            voice: None,
+            voice_ui: super::voice_ui::State::new(
+                &Self::options_path().with_file_name("voice-player-volumes.txt"),
+            ),
+            laser: Default::default(),
+            headpats: Default::default(),
+            skinshuffle: Default::default(),
+            armorstand: Default::default(),
+            armorstand_registered: false,
+            voice_available: false,
+            voice_requested: false,
+            messages: Default::default(),
+            voice_streams: HashMap::new(),
+            pod_entities: HashMap::new(),
+            pending_pod: None,
+            pod_menu: None,
         });
         self.clock = horizon_client::clock::FixedStep::client();
         self.adv = Default::default();
