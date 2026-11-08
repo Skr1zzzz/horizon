@@ -168,6 +168,16 @@ impl Preview {
         }
     }
 }
+pub fn page_requests(entity: i32) -> [(&'static str, Command); 6] {
+    std::array::from_fn(|page| {
+        (["utilities", "move", "rotate", "pose", "presets", "inventory"][page],
+         Command::Request(entity, page as i32))
+    })
+}
+// Equipment ends at y=79, leaving no font-height row before the grid at y=83.
+// Keep the mod's exact slot coordinates and put both labels above the panel.
+pub const INVENTORY_TITLE_Y: f32 = -24.;
+pub const INVENTORY_LABEL_Y: f32 = -12.;
 pub fn inventory_slots() -> Vec<(i32, i32, u8)> {
     (0..42)
         .map(|i| match i {
@@ -295,6 +305,36 @@ mod armorstand_tests {
         p.waiting = false;
         assert_eq!(p.reflected(-10.), -10.);
     }
+    #[test]
+    fn inventory_page_switch_payloads_match_editor_pages() {
+        for source in 0..6 {
+            let mut session = Session::default();
+            session.open(17, 300, source);
+            for (page, (_, command)) in page_requests(session.active.unwrap().1).into_iter().enumerate() {
+                assert_eq!(command.encode(), (
+                    "armorstands:request_screen_c2s".into(),
+                    vec![0, 0, 1, 44, page as u8],
+                ));
+                session.open(18, 300, page as i32);
+                assert_eq!(session.active, Some((18, 300, page as i32)));
+            }
+        }
+    }
+
+    #[test]
+    fn inventory_slots_do_not_intersect_labels_at_gui_scales() {
+        for scale in 1..=4 {
+            let scale = scale as f32;
+            for (_, y, _) in inventory_slots() {
+                let slot_top = (y as f32 - 1.) * scale;
+                for label_y in [INVENTORY_TITLE_Y, INVENTORY_LABEL_Y] {
+                    assert!((label_y + 9.) * scale <= slot_top);
+                }
+            }
+            assert!(INVENTORY_TITLE_Y + 9. <= INVENTORY_LABEL_Y);
+        }
+    }
+
     #[test]
     fn inventory_wire_indices() {
         let menu = crate::net::pod::Menu {

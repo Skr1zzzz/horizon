@@ -11,6 +11,31 @@ use horizon_protocol::packets::{
     play::{self, Serverbound},
 };
 
+fn armorstand_exit_screen(screen: Screen) -> Screen {
+    match screen {
+        Screen::Mod | Screen::Inventory => Screen::Playing,
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_escape_exits_editor_in_one_step() {
+        let mut session = armorstand::Session::default();
+        session.open(17, 300, 5);
+        let mut screen = Screen::Inventory;
+        assert_eq!(session.close(), Some(17));
+        screen = armorstand_exit_screen(screen);
+        assert!(screen == Screen::Playing);
+        assert!(session.active.is_none());
+        assert_eq!(session.close(), None);
+        assert!(armorstand_exit_screen(Screen::Mod) == Screen::Playing);
+    }
+}
+
 impl Game<'_> {
     pub(super) fn armorstand_send(&self, command: Command) {
         let Some(r) = self.remote.as_ref() else {
@@ -29,8 +54,19 @@ impl Game<'_> {
                     container: id,
                 }));
             }
-            if self.screen == Screen::Mod {
-                self.screen = Screen::Playing;
+            // Inventory owns a real container as well as the editor session.
+            // Tear down both on the same key press, without sending a second close.
+            if self.screen == Screen::Inventory {
+                self.reset_inventory_clicks();
+                self.remote_close_local();
+                if let Some(r) = self.remote.as_mut() {
+                    r.pod_menu = None;
+                    r.pending_pod = None;
+                }
+            }
+            if armorstand_exit_screen(self.screen) != self.screen {
+                self.mod_screen = None;
+                self.screen = armorstand_exit_screen(self.screen);
                 self.capture(true);
             }
         }
@@ -183,6 +219,12 @@ impl Game<'_> {
         };
         let label = |s: &str| horizon_client::lang::get(&format!("horizon.armorstands.{s}"));
         let mut b = vec![];
+        if r.armorstand.active.is_some_and(|s| s.2 == 5) {
+            return armorstand::page_requests(id)
+                .into_iter()
+                .map(|(key, command)| (label(key), Some(command)))
+                .collect();
+        }
         if r.armorstand.active.is_some_and(|s| s.2 == 3) {
             for key in [
                 "head",
@@ -727,6 +769,17 @@ impl Game<'_> {
             }
         }
     }
+    pub(super) fn armorstand_inventory_hovered(&self) -> bool {
+        if !self.remote.as_ref().is_some_and(|r| r.armorstand.active.is_some_and(|s| s.2 == 5)) {
+            return false;
+        }
+        let size = self.renderer.as_ref().map_or([1, 1], |r| [r.config.width, r.config.height]);
+        let batch = HudBatch::new(size);
+        let buttons = self.armorstand_buttons();
+        self.armorstand_layout(&batch, &buttons).iter().any(|&(x, y, w)| {
+            ui::hovered(self.cursor, x, y, w - 3., 20.)
+        })
+    }
     pub(super) fn armorstand_click(&mut self) {
         let size = self
             .renderer
@@ -741,6 +794,12 @@ impl Game<'_> {
         for (i, (_, command)) in buttons.iter().enumerate() {
             if ui::hovered(self.cursor, layout[i].0, layout[i].1, layout[i].2 - 3., 20.) {
                 if let Some(c) = command {
+                    if let Command::Request(_, page) = c {
+                        armorstand::diagnostic(format_args!(
+                            "page switch session={:?} target={page}",
+                            self.remote.as_ref().and_then(|r| r.armorstand.active)
+                        ));
+                    }
                     self.armorstand_send(c.clone());
                 } else if self.remote.as_ref().unwrap().armorstand.active.unwrap().2 == 3 && i < 8 {
                     match i {

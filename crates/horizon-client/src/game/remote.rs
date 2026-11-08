@@ -10076,7 +10076,7 @@ impl Game<'_> {
         self.send(S::ContainerClose(play::ContainerClose { container: id }));
         self.remote_close_local();
     }
-    fn remote_close_local(&mut self) {
+    pub(super) fn remote_close_local(&mut self) {
         // `Gui.setScreen` clears the focus of the screen it takes down: the
         // container's keyboard focus must not outlive it (a Tab bound to the
         // inventory moves the focus and closes the container in one press).

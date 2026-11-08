@@ -9247,6 +9247,9 @@ impl Game<'_> {
             Screen::HudEditor => self.draw_hud_editor(&mut batch),
             Screen::Inventory => {
                 self.draw_inventory(&mut batch);
+                if self.remote.as_ref().is_some_and(|r| r.armorstand.active.is_some_and(|s| s.2 == 5)) {
+                    self.draw_armorstand(&mut batch);
+                }
                 self.draw_mod_browser(&mut batch);
             }
             Screen::Creative => {
@@ -18990,6 +18993,13 @@ impl Game<'_> {
                     }
                 }
                 WindowEvent::MouseInput { .. } if self.title.is_some() => {}
+                WindowEvent::MouseInput { state, button, .. }
+                    if self.armorstand_inventory_hovered() =>
+                {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        self.armorstand_click();
+                    }
+                }
                 WindowEvent::MouseInput { state, button, .. }
                     if self
                         .remote

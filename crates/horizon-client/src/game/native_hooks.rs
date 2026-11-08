@@ -10320,7 +10320,7 @@ impl Game<'_> {
                 atlas,
                 &horizon_client::lang::get("item.minecraft.armor_stand"),
                 ox + 8.0,
-                oy - 12.0,
+                oy + horizon_client::armorstand::INVENTORY_TITLE_Y,
                 u32::MAX,
                 true,
             );
@@ -10328,7 +10328,11 @@ impl Game<'_> {
             batch.text_styled(atlas, &title, ox + 8.0, oy + 6.0, grey, false);
         }
         let inventory = self.translate("container.inventory", "Inventory");
-        let label_y = oy + s.screen.inventory_y - 11.0;
+        let label_y = oy + if armorstand {
+            horizon_client::armorstand::INVENTORY_LABEL_Y
+        } else {
+            s.screen.inventory_y - 11.0
+        };
         batch.text(atlas, &inventory, ox + 8.0, label_y, grey, false);
         true
     }
