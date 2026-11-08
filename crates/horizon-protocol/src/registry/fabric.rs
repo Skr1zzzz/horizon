@@ -168,6 +168,18 @@ impl Handshake {
                 })
             })
     }
+    pub fn headpat_channels(&self) -> Vec<String> {
+        self.server_channels
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.as_str(),
+                    "headpats:petting" | "cardinal-components:entity_sync"
+                )
+            })
+            .cloned()
+            .collect()
+    }
     pub fn voicechat(&self) -> bool {
         self.enabled
             && self
@@ -199,15 +211,71 @@ impl Handshake {
                     return Ok(None);
                 }
                 self.server_channels.extend(channels);
+                if std::env::var_os("HORIZON_HEADPATS_LOG").is_some_and(|v| v == "1") {
+                    log::info!(
+                        "headpats: config minecraft:register headpats:petting={} cardinal-components:entity_sync={} available={}",
+                        self.server_channels.contains("headpats:petting"),
+                        self.server_channels
+                            .contains("cardinal-components:entity_sync"),
+                        self.server_channels.contains("headpats:petting")
+                    );
+                }
                 if self.registered {
                     return Ok(None);
                 }
                 self.registered = true;
                 let mut receivers = RECEIVERS.to_vec();
+                // Server registrations advertise C2S receivers; CCA's S2C channel
+                // is ours to advertise, not a prerequisite in that server list.
+                if self.server_channels.contains("headpats:petting") {
+                    receivers.extend_from_slice(b"\0cardinal-components:entity_sync");
+                }
                 if self.pod {
                     receivers.extend_from_slice(b"\0pod:rsnap/part\0pod:assets/part");
                 }
                 ("minecraft:register", receivers)
+            }
+            "c:register" => {
+                // Common registration v1 explicitly names the phase; unlike
+                // minecraft:register it is not a NUL-separated byte string.
+                let mut r = Reader::new(&p.data);
+                let version = r.varint()?;
+                let phase = r.string(32)?;
+                if version != 1 {
+                    return Err(invalid());
+                }
+                let mut channels = BTreeSet::new();
+                for _ in 0..r.count(8192)? {
+                    let channel = r.string(128)?;
+                    if !identifier(&channel) {
+                        return Err(invalid());
+                    }
+                    channels.insert(channel);
+                }
+                if r.remaining() != 0 {
+                    return Err(invalid());
+                }
+                if phase != "play" {
+                    return Ok(None);
+                }
+                self.server_channels.extend(channels);
+                if std::env::var_os("HORIZON_HEADPATS_LOG").is_some_and(|v| v == "1") {
+                    log::info!(
+                        "headpats: config c:register phase=play headpats:petting={} cardinal-components:entity_sync={}",
+                        self.server_channels.contains("headpats:petting"),
+                        self.server_channels
+                            .contains("cardinal-components:entity_sync")
+                    );
+                }
+                let mut w = crate::buf::Writer::new();
+                w.varint(1);
+                w.string("play");
+                let available = self.server_channels.contains("headpats:petting");
+                w.varint(i32::from(available));
+                if available {
+                    w.string("cardinal-components:entity_sync");
+                }
+                ("c:register", w.data)
             }
             "fabric:split" => {
                 return Err(Error::new("Fabric split payloads are not supported yet"));

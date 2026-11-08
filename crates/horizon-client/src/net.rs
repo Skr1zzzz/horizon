@@ -46,6 +46,7 @@ pub enum Event {
     Status(String),
     VoiceAvailable(bool),
     LaserAvailable(bool),
+    HeadpatChannels(Vec<String>),
     VoiceSecret(crate::voicechat::wire::Secret, String),
     /// Generated startup content must survive the game thread's later settings saves.
     PodEnabled(Vec<String>),
@@ -1202,6 +1203,7 @@ fn configure(
                 registries.custom_components = content_verified;
                 let _ = send.send(Event::VoiceAvailable(fabric.voicechat()));
                 let _ = send.send(Event::LaserAvailable(fabric.laser_eyes()));
+                let _ = send.send(Event::HeadpatChannels(fabric.headpat_channels()));
                 registries.fabric = fabric.into_map();
                 let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
                 let w = w.as_mut().ok_or_else(|| Reason::plain("Disconnected"))?;

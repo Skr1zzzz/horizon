@@ -767,11 +767,35 @@ pub fn setup(
     w_anims: &HashMap<String, super::keyframes::Animation>,
 ) {
     let Some(playing) = &m.emote else {
-        return vanilla_setup(m, s, p, w_anims);
+        vanilla_setup(m, s, p, w_anims);
+        headpat_pose(m, s.partial, p);
+        return;
     };
     let rest = horizon_cosmetics::BODY.map(|b| p.has(b.part()).then(|| *p.get(b.part())));
     vanilla_setup(m, s, p, w_anims);
     emote(playing, s.age, rest, p);
+    headpat_pose(m, s.partial, p);
+}
+
+// Adapted from headpats (MIT, enjarai): apply after vanilla so its arm swing blends out.
+fn headpat_pose(m: &Mob, partial: f32, p: &mut Poses) {
+    let (time, weight) = m.headpat.petting.at(partial);
+    if weight > 0.0 {
+        let arm = if m.main_arm_left() {
+            "left_arm"
+        } else {
+            "right_arm"
+        };
+        let a = p.get(arm);
+        a[3] = a[3] * (1.0 - weight) - weight * 2.1;
+        a[4] = a[4] * (1.0 - weight) - (time * 0.4).sin() * weight * 0.5;
+    }
+    let (time, weight) = m.headpat.petted.at(partial);
+    if weight > 0.0 {
+        let head = p.get("head");
+        head[3] += weight * 0.4;
+        head[5] = -(time * 0.4).sin() * weight * 0.15;
+    }
 }
 
 /// Poses the bones `rest` names (those the model has; at rest) as `playing` has them at `age`.

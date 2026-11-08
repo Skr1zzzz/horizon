@@ -499,6 +499,7 @@ pub(super) struct Remote {
     pub session: Session,
     pub(super) voice: Option<horizon_client::voicechat::Connection>,
     pub(super) laser: super::laser::State,
+    pub(super) headpats: super::headpats::State,
     voice_available: bool,
     voice_requested: bool,
     voice_streams: HashMap<u128, (Option<u64>, std::time::Instant)>,
@@ -1090,6 +1091,7 @@ impl Game<'_> {
             session,
             voice: None,
             laser: Default::default(),
+            headpats: Default::default(),
             voice_available: false,
             voice_requested: false,
             voice_streams: HashMap::new(),
@@ -1971,6 +1973,23 @@ impl Game<'_> {
                 }
             };
             match event {
+                Event::HeadpatChannels(channels) => {
+                    if let Some(r) = self.remote.as_mut() {
+                        r.headpats = super::headpats::State::default();
+                        r.headpats.channels.extend(channels);
+                        horizon_client::headpat::diagnostic(format_args!(
+                            "config declarations={:?} headpats:petting={} cardinal-components:entity_sync={} available={}",
+                            r.headpats.channels,
+                            r.headpats
+                                .channels
+                                .contains(horizon_client::headpat::PETTING),
+                            r.headpats
+                                .channels
+                                .contains(horizon_client::headpat::CHANNEL),
+                            r.headpats.available()
+                        ));
+                    }
+                }
                 Event::LaserAvailable(available) => {
                     if let Some(r) = self.remote.as_mut() {
                         r.laser = super::laser::State::default();
@@ -3307,6 +3326,22 @@ impl Game<'_> {
             }
             // A mod menu type's block and its mod's bytes, just before the
             // menu's `OpenScreen`.
+            C::CustomPayload(p) if p.channel == horizon_client::headpat::CHANNEL => {
+                match horizon_client::headpat::decode(&p.data) {
+                    Ok(Some((id, target, incoming))) => {
+                        horizon_client::headpat::diagnostic(format_args!(
+                            "receive cardinal-components:entity_sync headpats:petting entity={id} target={target:?} incoming={incoming}"
+                        ));
+                        if let Some(r) = self.remote.as_mut().filter(|r| r.headpats.available()) {
+                            let c = r.headpats.players.entry(id).or_default();
+                            c.target = target;
+                            c.incoming = incoming;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("Ignoring malformed headpats sync: {e}"),
+                }
+            }
             C::CustomPayload(p) if p.channel == "pod:entity" => {
                 match horizon_client::net::pod::decode_entity(&p.data) {
                     Ok((id, kind)) => {
@@ -3367,6 +3402,38 @@ impl Game<'_> {
                 ) =>
             {
                 if let Some(r) = self.remote.as_mut() {
+                    for channel in p
+                        .data
+                        .split(|b| *b == 0)
+                        .filter_map(|b| std::str::from_utf8(b).ok())
+                    {
+                        if p.channel == "minecraft:register" {
+                            r.headpats.channels.insert(channel.into());
+                        } else {
+                            r.headpats.channels.remove(channel);
+                        }
+                    }
+                    horizon_client::headpat::diagnostic(format_args!(
+                        "play {} headpats:petting={} cardinal-components:entity_sync={} available={}",
+                        p.channel,
+                        r.headpats
+                            .channels
+                            .contains(horizon_client::headpat::PETTING),
+                        r.headpats
+                            .channels
+                            .contains(horizon_client::headpat::CHANNEL),
+                        r.headpats.available()
+                    ));
+                    if !r.headpats.available() {
+                        r.headpats.players.clear();
+                        r.headpats.registered = false;
+                        for m in self.mobs.iter_mut() {
+                            m.headpat = Default::default();
+                        }
+                        if let Some(m) = self.player_model.as_mut() {
+                            m.headpat = Default::default();
+                        }
+                    }
                     if p.data
                         .split(|b| *b == 0)
                         .any(|c| c.starts_with(b"laser-eyes:"))
@@ -6248,6 +6315,7 @@ impl Game<'_> {
         self.tick_remote_level()?;
         self.tick_voicechat();
         self.tick_laser();
+        self.tick_headpats();
         // The rockets boosting this player tick after it, also while it waits
         // for chunks.
         self.tick_own_rockets();
@@ -8014,6 +8082,9 @@ impl Game<'_> {
             && self.before_block(distance)
         {
             let id = self.mobs[i].id as i32;
+            if self.start_headpat(i, location) {
+                return true;
+            }
             self.send(S::Interact(play::Interact {
                 id,
                 hand: hand_id(hand),

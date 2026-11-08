@@ -1371,6 +1371,7 @@ pub struct Mob {
     pub head_pitch: f32,
     /// Session-only emissive overlay supplied by the laser-eyes client.
     pub laser_glow: Option<(u32, i32)>,
+    pub headpat: crate::headpat::Component,
     pub previous_head_pitch: f32,
     pub on_ground: bool,
     pub horizontal_collision: bool,
@@ -3068,6 +3069,7 @@ impl Mob {
             previous_head_yaw: yaw,
             head_pitch: 0.0,
             laser_glow: None,
+            headpat: Default::default(),
             previous_head_pitch: 0.0,
             on_ground: false,
             horizontal_collision: false,

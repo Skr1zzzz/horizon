@@ -151,6 +151,7 @@ mod golems;
 mod growth;
 mod hand;
 mod headless;
+mod headpats;
 mod hud_editor;
 mod ime;
 mod initial_spawn;
@@ -14652,7 +14653,13 @@ impl Game<'_> {
         else {
             return;
         };
-        let z_rot = if left { -0.1 } else { 0.1 };
+        let weight = self
+            .remote
+            .as_ref()
+            .filter(|r| r.headpats.available())
+            .and_then(|r| r.headpats.players.get(&r.entity_id))
+            .map_or(0.0, |c| c.petting.at(self.clock.fraction() as f32).1);
+        let z_rot = (if left { -0.1 } else { 0.1 }) * (1.0 - weight);
         let pose = |p: &horizon_client::mobs::Part| {
             let mut pose = p.pose;
             pose[3] = 0.0;
@@ -14789,7 +14796,20 @@ impl Game<'_> {
                     continue;
                 }
                 // renderPlayerArm
+                let mut pat = glam::Mat4::IDENTITY;
+                if let Some(r) = self.remote.as_ref().filter(|r| r.headpats.available())
+                    && let Some(c) = r.headpats.players.get(&r.entity_id)
+                {
+                    let (time, weight) = c.petting.at(a);
+                    let pivot = glam::Vec3::new(if left { -1.0 } else { 1.0 }, -1.0, 0.0);
+                    pat = glam::Mat4::from_translation(pivot)
+                        * glam::Mat4::from_rotation_y(
+                            ((time * 0.4).sin() * 16.0 * weight).to_radians(),
+                        )
+                        * glam::Mat4::from_translation(-pivot);
+                }
                 let m = to_world
+                    * pat
                     * horizon_client::first_person::player_arm_pose(left, inverse_height, attack);
                 runs.push((out.len() as u32, 0));
                 self.first_person_arm(left, m, packed, &mut out);
@@ -16654,6 +16674,20 @@ impl Game<'_> {
             glam::Mat4::IDENTITY
         } else {
             self.bob_matrix(camera_alpha as f32)
+        };
+        let bob = if !title && self.camera_type.first_person() {
+            let roll = self
+                .remote
+                .as_ref()
+                .filter(|r| r.headpats.available())
+                .and_then(|r| r.headpats.players.get(&r.entity_id))
+                .map_or(0.0, |c| {
+                    let (time, weight) = c.petted.at(camera_alpha as f32);
+                    -(time * 0.4).sin() * weight * 0.1
+                });
+            glam::Mat4::from_rotation_z(roll) * bob
+        } else {
+            bob
         };
         let spin = if title {
             glam::Mat4::IDENTITY
