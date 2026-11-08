@@ -312,6 +312,13 @@ pub struct Chat {
     clock: Option<(u8, u8)>,
 }
 impl Chat {
+    /// Replace a local player's component without adding history or resetting its age.
+    pub fn replace_local(&mut self, atlas: &HudAtlas, marker: &str, content: Text) {
+        if let Some(message) = self.messages.iter_mut().find(|m| m.content.spans.iter().any(|s| matches!(&s.style.click, Some(crate::text::ClickEvent::Custom { id, .. }) if id == marker))) {
+            message.content = content;
+            self.rescale(atlas);
+        }
+    }
     pub fn lines_per_page(&self, focused: bool) -> usize {
         (self.options.height_px(focused) / self.options.line_height().max(1)) as usize
     }

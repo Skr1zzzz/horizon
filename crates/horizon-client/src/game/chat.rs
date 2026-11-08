@@ -140,11 +140,18 @@ fn should_discard_draft(reason: ChatExit, save_chat_drafts: bool) -> bool {
 pub struct UiState {
     pub chat: Chat,
     pub voice_messages: Vec<Vec<f32>>,
+    pub voice_labels: Vec<Text>,
+    pub voice_levels: Vec<Vec<f32>>,
+    pub voice_senders: Vec<u128>,
+    pub voice_player: horizon_client::voicechat::messages::Playback,
     pub voice_recording: Option<(String, Vec<f32>, std::sync::mpsc::Receiver<Vec<f32>>)>,
     #[cfg(feature = "audio")]
     pub voice_capture: Option<horizon_client::voicechat::sender::CaptureStream>,
     pub voice_review: Option<(String, Vec<f32>)>,
+    pub voice_errors: Option<std::sync::mpsc::Receiver<String>>,
     pub voice_playing: Option<(usize, usize, std::time::Instant, Option<u64>)>,
+    pub voice_preview_at: usize,
+    pub voice_record_wav: Option<(Vec<f32>, usize, std::time::Instant)>,
     pub chat_screen: Option<ChatScreen>,
     /// `ChatComponent.latestDraft`.
     pub chat_draft: Option<ChatDraft>,
@@ -198,6 +205,246 @@ impl UiState {
 }
 
 impl Game<'_> {
+    fn voice_mic_target(&self) -> Option<String> {
+        let r = self.remote.as_ref().filter(|r| r.messages.ready())?;
+        let target = r.messages.targets.as_ref()?.first()?;
+        (!r.players.values().any(|name| name == target)).then(|| target.clone())
+    }
+    fn voice_overlay_click(&mut self) -> bool {
+        let (w, h) = self.gui_size();
+        let (cx, cy) = self.cursor;
+        let active = self.ui.voice_recording.is_some() || self.ui.voice_review.is_some();
+        if !active {
+            if cx >= w - 18.0
+                && cy >= h - 18.0
+                && let Some(target) = self.voice_mic_target()
+            {
+                self.voice_message_command(&format!("/vmsg {target}"));
+                return true;
+            }
+            return false;
+        }
+        let (x, y) = (w / 2.0 - 140.0, h / 2.0 - 40.0);
+        if cy >= y + 55.0 && cy < y + 75.0 {
+            if cx >= x && cx < x + 90.0 {
+                self.voice_message_command(if self.ui.voice_recording.is_some() {
+                    "/vmsg done"
+                } else {
+                    "/vmsg send"
+                });
+            } else if cx >= x + 190.0 && cx < x + 280.0 {
+                self.voice_message_command("/vmsg cancel");
+            }
+        }
+        if self.ui.voice_review.is_some() {
+            if cy >= y + 34.0 && cy < y + 49.0 && cx >= x + 10.0 && cx < x + 270.0 {
+                let frames = self.ui.voice_review.as_ref().unwrap().1.len().div_ceil(960);
+                self.ui.voice_preview_at =
+                    horizon_client::voicechat::messages::seek_frame(cx - x - 10.0, 260.0, frames)
+                        * 960;
+                self.voice_message_stop();
+                if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                    log::info!(
+                        "voicemessage: review seek frame={}",
+                        self.ui.voice_preview_at / 960
+                    );
+                }
+                self.voice_preview_play();
+            } else if cy >= y + 55.0 && cy < y + 75.0 && cx >= x + 95.0 && cx < x + 185.0 {
+                if self.ui.voice_playing.is_some() {
+                    self.voice_message_stop();
+                    if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                        log::info!("voicemessage: playback pause");
+                    }
+                } else {
+                    self.voice_preview_play();
+                }
+            }
+        }
+        true
+    }
+    fn voice_preview_play(&mut self) {
+        let Some((_, pcm)) = &self.ui.voice_review else {
+            return;
+        };
+        if self.ui.voice_preview_at >= pcm.len() {
+            self.ui.voice_preview_at = 0;
+        }
+        self.voice_message_stop();
+        self.ui.voice_playing = Some((
+            usize::MAX,
+            self.ui.voice_preview_at,
+            std::time::Instant::now(),
+            None,
+        ));
+        if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+            log::info!(
+                "voicemessage: playback start preview from frame={}",
+                self.ui.voice_preview_at / 960
+            );
+        }
+    }
+    fn draw_voice_overlay(&self, batch: &mut HudBatch) {
+        use horizon_client::{
+            ui,
+            voicechat::messages::{level, time_label},
+        };
+        let atlas = &self.gui.atlas;
+        let recording = self.ui.voice_recording.as_ref();
+        let review = self.ui.voice_review.as_ref();
+        if recording.is_none() && review.is_none() {
+            if self.voice_mic_target().is_some() {
+                let (x, y) = (batch.width - 18.0, batch.height - 18.0);
+                let label = Text::translate_with_fallback(
+                    "horizon.voicemessage.record",
+                    "Voice message",
+                    &[],
+                );
+                horizon_client::widgets::record(&label.plain(), [x, y, 14.0, 14.0], true);
+                batch.fill(atlas, x, y, 14.0, 14.0, 0xff20222c);
+                batch.fill(atlas, x + 6.0, y + 2.0, 3.0, 7.0, 0xffecedf3);
+                batch.fill(atlas, x + 4.0, y + 9.0, 7.0, 1.0, 0xffecedf3);
+                batch.fill(atlas, x + 7.0, y + 10.0, 1.0, 3.0, 0xffecedf3);
+            }
+            return;
+        }
+        horizon_client::widgets::cover_frame();
+        let (target, pcm) = if let Some((t, p, _)) = recording {
+            (t, p)
+        } else {
+            let (t, p) = review.unwrap();
+            (t, p)
+        };
+        let (x, y) = (batch.width / 2.0 - 140.0, batch.height / 2.0 - 40.0);
+        batch.fill(atlas, x - 12.0, y - 12.0, 304.0, 100.0, 0xf016181f);
+        let title = Text::translate_with_fallback(
+            if recording.is_some() {
+                "horizon.voicemessage.recording"
+            } else {
+                "horizon.voicemessage.review"
+            },
+            if recording.is_some() {
+                "Recording"
+            } else {
+                "Review"
+            },
+            &[],
+        );
+        ui::centered_text(batch, atlas, &title, x, y, 280.0, 0xffffffff);
+        let frames = pcm.len().div_ceil(960);
+        let total = if recording.is_some() {
+            self.remote
+                .as_ref()
+                .and_then(|r| r.messages.max_frames)
+                .unwrap_or(4500)
+                .min(4500)
+        } else {
+            frames
+        };
+        let elapsed = if recording.is_some() {
+            frames
+        } else {
+            self.ui.voice_preview_at / 960
+        };
+        let timer = Text::literal(format!(
+            "{} / {}{}",
+            time_label(elapsed),
+            time_label(total),
+            if target == "all" {
+                String::new()
+            } else {
+                format!(" → {target}")
+            }
+        ));
+        ui::centered_text(batch, atlas, &timer, x, y + 16.0, 280.0, 0xffffffff);
+        let width = if recording.is_some() { 240 } else { 260 };
+        let start = if recording.is_some() {
+            frames.saturating_sub(width)
+        } else {
+            0
+        };
+        for bar in 0..width {
+            let frame = if recording.is_some() {
+                start + bar
+            } else {
+                bar * frames / width
+            };
+            let height = pcm
+                .get(frame * 960..((frame + 1) * 960).min(pcm.len()))
+                .map(level)
+                .unwrap_or(0.0)
+                * 15.0;
+            batch.fill(
+                atlas,
+                x + 10.0 + bar as f32,
+                y + 34.0 + (15.0 - height) / 2.0,
+                1.0,
+                height.max(1.0),
+                0xff9a86ff,
+            );
+        }
+        if review.is_some() {
+            let seek = horizon_client::lang::get_or("horizon.voicemessage.seek", "Seek");
+            horizon_client::widgets::record(&seek, [x + 10.0, y + 34.0, 260.0, 15.0], true);
+            let playing = self.ui.voice_playing.is_some();
+            let label = Text::translate_with_fallback(
+                if playing {
+                    "horizon.voicemessage.pause"
+                } else {
+                    "horizon.voicemessage.play"
+                },
+                if playing { "Pause" } else { "Play" },
+                &[],
+            );
+            ui::button(
+                batch,
+                atlas,
+                x + 95.0,
+                y + 55.0,
+                90.0,
+                20.0,
+                &label,
+                true,
+                false,
+            );
+            batch.fill(
+                atlas,
+                x + 10.0 + 260.0 * elapsed as f32 / frames.max(1) as f32,
+                y + 34.0,
+                1.0,
+                15.0,
+                0xffffffff,
+            );
+        }
+        for (offset, key, fallback) in [
+            (
+                0.0,
+                if recording.is_some() {
+                    "gui.done"
+                } else {
+                    "horizon.voicemessage.send"
+                },
+                if recording.is_some() { "Done" } else { "Send" },
+            ),
+            (190.0, "gui.cancel", "Cancel"),
+        ] {
+            let label = Text::translate_with_fallback(key, fallback, &[]);
+            ui::button(
+                batch,
+                atlas,
+                x + offset,
+                y + 55.0,
+                90.0,
+                20.0,
+                &label,
+                true,
+                self.cursor.0 >= x + offset
+                    && self.cursor.0 < x + offset + 90.0
+                    && self.cursor.1 >= y + 55.0
+                    && self.cursor.1 < y + 75.0,
+            );
+        }
+    }
     fn voice_message_send(&mut self, target: &str, pcm: &[f32]) {
         use horizon_client::voicechat::messages::{encode_audio, upload};
         let Some(limit) = self
@@ -225,12 +472,19 @@ impl Game<'_> {
             Err(e) => log::warn!("voicemessage: {e}"),
         }
     }
+    fn voice_message_stop(&mut self) {
+        self.ui.voice_player.pause();
+        if let Some((_, _, _, Some(id))) = self.ui.voice_playing.take() {
+            self.audio.release_stream(id);
+        }
+    }
     fn voice_message_command(&mut self, message: &str) -> bool {
         let mut words = message.split_whitespace();
         if !matches!(words.next(), Some("/vmsg" | "/voicemsg")) {
             return false;
         }
         let target = words.next().unwrap_or("all");
+        self.voice_message_stop();
         match target {
             "cancel" => {
                 self.ui.voice_recording = None;
@@ -238,7 +492,14 @@ impl Game<'_> {
             }
             "done" => {
                 if let Some((target, pcm, _)) = self.ui.voice_recording.take() {
+                    if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                        log::info!(
+                            "voicemessage: record stop frames={}",
+                            pcm.len().div_ceil(960)
+                        );
+                    }
                     if !pcm.is_empty() {
+                        self.ui.voice_preview_at = 0;
                         self.ui.voice_review = Some((target, pcm));
                     }
                 }
@@ -267,14 +528,48 @@ impl Game<'_> {
                     );
                     return true;
                 }
+                if self.screen != Screen::Chat {
+                    self.open_chat("");
+                }
+                self.ui.voice_recording = None;
+                self.ui.voice_review = None;
+                if let Some(path) = std::env::var_os("HORIZON_VOICECHAT_MIC_WAV") {
+                    match horizon_client::voicechat::sender::read_wav(std::path::Path::new(&path)) {
+                        Ok(pcm) => {
+                            let (_, rx) = std::sync::mpsc::sync_channel(1);
+                            self.ui.voice_recording = Some((target.into(), Vec::new(), rx));
+                            self.ui.voice_record_wav = Some((pcm, 0, std::time::Instant::now()));
+                            if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                                log::info!("voicemessage: record start target={target}");
+                            }
+                        }
+                        Err(e) => self.titles.set_overlay(
+                            Text::translate_with_fallback(
+                                "horizon.voicemessage.microphone",
+                                "Microphone error: %s",
+                                &[Text::literal(e.to_string())],
+                            )
+                            .with_color(0xff5555),
+                            false,
+                        ),
+                    }
+                    return true;
+                }
                 #[cfg(feature = "audio")]
                 {
+                    self.ui.voice_capture = None;
                     let (tx, rx) = std::sync::mpsc::sync_channel(100);
-                    match horizon_client::voicechat::sender::capture(
+                    let (error_tx, error_rx) = std::sync::mpsc::sync_channel(1);
+                    self.ui.voice_errors = Some(error_rx);
+                    match horizon_client::voicechat::sender::capture_with_errors(
                         &self.settings.file.string("voicechatInputDevice"),
                         tx,
+                        Some(error_tx),
                     ) {
                         Ok(stream) => {
+                            if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                                log::info!("voicemessage: record start target={target}");
+                            }
                             self.ui.voice_capture = Some(stream);
                             self.ui.voice_recording = Some((target.into(), Vec::new(), rx));
                             self.ui.voice_review = None;
@@ -291,6 +586,9 @@ impl Game<'_> {
                     }
                 }
             }
+        }
+        if self.ui.voice_recording.is_none() {
+            self.ui.voice_record_wav = None;
         }
         #[cfg(feature = "audio")]
         if self.ui.voice_recording.is_none() {
@@ -315,32 +613,97 @@ impl Game<'_> {
             })
         };
         let n = self.ui.voice_messages.len();
-        let seconds = pcm.len() / 48000;
-        self.ui.voice_messages.push(pcm);
-        let control = Text::styled(
-            format!(" ▶ ■ {}:{:02}", seconds / 60, seconds % 60),
-            Style {
-                click: Some(ClickEvent::Custom {
-                    id: format!("horizon:voice/{n}"),
-                    payload: None,
-                }),
-                ..Default::default()
-            },
+        self.ui.voice_levels.push(
+            pcm.chunks(960)
+                .map(horizon_client::voicechat::messages::level)
+                .collect(),
         );
-        self.system_message(label.append(control));
+        self.ui.voice_labels.push(label);
+        self.ui.voice_senders.push(sender);
+        self.ui.voice_messages.push(pcm);
+        self.ui.voice_player.positions.push(0);
+        self.system_message(self.voice_component(n));
+    }
+    fn voice_component(&self, n: usize) -> Text {
+        use horizon_client::voicechat::messages::time_label;
+        let levels = &self.ui.voice_levels[n];
+        let at = self.ui.voice_player.positions[n] / 960;
+        let playing = self.ui.voice_player.active == Some(n);
+        let clickable = |text: String, id: String, color| {
+            Text::styled(
+                text,
+                Style {
+                    click: Some(ClickEvent::Custom { id, payload: None }),
+                    color: Some(color),
+                    ..Default::default()
+                },
+            )
+        };
+        let mut text = self.ui.voice_labels[n].clone().append(clickable(
+            format!(
+                " {} ",
+                horizon_client::lang::get_or(
+                    if playing {
+                        "horizon.voicemessage.pause"
+                    } else {
+                        "horizon.voicemessage.play"
+                    },
+                    if playing { "Pause" } else { "Play" }
+                )
+            ),
+            format!("horizon:voice/{n}"),
+            0xffffff,
+        ));
+        for bar in 0..24 {
+            let frame = bar * levels.len() / 24;
+            let end = ((bar + 1) * levels.len() / 24)
+                .max(frame + 1)
+                .min(levels.len());
+            let peak = levels[frame..end].iter().copied().fold(0.0_f32, f32::max);
+            let glyph = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'][(peak * 7.0).round() as usize];
+            text = text.append(clickable(
+                glyph.to_string(),
+                format!("horizon:voice_seek/{n}/{frame}"),
+                if frame < at { 0x9a86ff } else { 0x888888 },
+            ));
+        }
+        text.append(Text::literal(format!(
+            " {} / {}",
+            time_label(at),
+            time_label(levels.len())
+        )))
+    }
+    fn refresh_voice_players(&mut self) {
+        for n in 0..self.ui.voice_messages.len() {
+            let text = self.voice_component(n);
+            self.ui
+                .chat
+                .replace_local(&self.gui.atlas, &format!("horizon:voice/{n}"), text);
+        }
     }
     fn voice_message_play(&mut self, n: usize) {
-        if let Some((old, _, _, id)) = self.ui.voice_playing.take() {
-            if let Some(id) = id {
-                self.audio.release_stream(id);
-            }
-            if old == n {
-                return;
-            }
+        if n >= self.ui.voice_messages.len() {
+            return;
         }
-        if n < self.ui.voice_messages.len() {
-            self.ui.voice_playing = Some((n, 0, std::time::Instant::now(), None));
+        let pause = self.ui.voice_player.active == Some(n);
+        self.voice_message_stop();
+        if !pause {
+            self.ui
+                .voice_player
+                .start(n, self.ui.voice_messages[n].len());
+            let at = self.ui.voice_player.positions[n];
+            self.ui.voice_playing = Some((n, at, std::time::Instant::now(), None));
+            if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                log::info!(
+                    "voicemessage: playback start {} from frame={}",
+                    horizon_protocol::crypto::uuid_string(self.ui.voice_senders[n]),
+                    at / 960
+                );
+            }
+        } else if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+            log::info!("voicemessage: playback pause");
         }
+        self.refresh_voice_players();
     }
     pub(super) fn tick_voice_messages(&mut self) {
         use horizon_client::voicechat::messages::{Payload, RECEIVERS};
@@ -392,35 +755,98 @@ impl Game<'_> {
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
+        if self.screen != Screen::Chat
+            && (self.ui.voice_recording.is_some() || self.ui.voice_review.is_some())
+        {
+            self.voice_message_command("/vmsg cancel");
+        }
+        if let Some(error) = self
+            .ui
+            .voice_errors
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            if self.ui.voice_recording.is_some() {
+                self.voice_message_command("/vmsg cancel");
+                self.titles.set_overlay(
+                    Text::translate_with_fallback(
+                        "horizon.voicemessage.microphone",
+                        "Microphone error: %s",
+                        &[Text::literal(error)],
+                    )
+                    .with_color(0xff5555),
+                    false,
+                );
+            }
+        }
         if let Some((_, pcm, rx)) = self.ui.voice_recording.as_mut() {
             let limit = self
                 .remote
                 .as_ref()
                 .and_then(|r| r.messages.max_frames)
-                .unwrap_or(0)
-                * 960;
+                .unwrap_or(4500)
+                .min(4500);
+            if let Some((wav, at, start)) = &mut self.ui.voice_record_wav {
+                let end = ((start.elapsed().as_millis() as usize / 20) * 960).min(wav.len());
+                horizon_client::voicechat::messages::append_recording(pcm, &wav[*at..end], limit);
+                *at = end;
+            }
             for frame in rx.try_iter() {
-                if pcm.len() + frame.len() <= limit {
-                    pcm.extend(frame);
+                if horizon_client::voicechat::messages::append_recording(pcm, &frame, limit) {
+                    break;
                 }
             }
-            if pcm.len() >= limit {
+            if pcm.len() >= limit * 960 {
                 self.voice_message_command("/vmsg done");
             }
         }
         if let Some((n, at, next, id)) = self.ui.voice_playing.as_mut() {
             if std::time::Instant::now() >= *next {
-                let pcm = &self.ui.voice_messages[*n];
+                let pcm = if *n == usize::MAX {
+                    match &self.ui.voice_review {
+                        Some((_, pcm)) => pcm,
+                        None => return,
+                    }
+                } else {
+                    &self.ui.voice_messages[*n]
+                };
                 if *at < pcm.len() {
                     let end = (*at + 960).min(pcm.len());
                     self.audio.stream_pcm(id, &pcm[*at..end], None, 1.0);
                     *at = end;
+                    if *n == usize::MAX {
+                        self.ui.voice_preview_at = end;
+                    } else {
+                        self.ui.voice_player.positions[*n] = end;
+                    }
                     *next = std::time::Instant::now() + std::time::Duration::from_millis(20);
                 } else {
                     if let Some(id) = *id {
                         self.audio.release_stream(id);
                     }
+                    let finished = *n;
                     self.ui.voice_playing = None;
+                    self.ui.voice_player.pause();
+                    if finished != usize::MAX {
+                        if let Some(next) = self
+                            .ui
+                            .voice_player
+                            .next(finished, self.ui.voice_messages.len())
+                        {
+                            if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                                log::info!(
+                                    "voicemessage: chain next {}",
+                                    horizon_protocol::crypto::uuid_string(
+                                        self.ui.voice_senders[next]
+                                    )
+                                );
+                            }
+                            self.voice_message_play(next);
+                        }
+                    }
+                    if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                        log::info!("voicemessage: playback finish");
+                    }
                 }
             }
         }
@@ -1169,6 +1595,22 @@ impl Game<'_> {
     }
     /// A key (and the text it typed) while the chat screen is open.
     pub(super) fn chat_key_code(&mut self, key: KeyCode, typed_text: Option<&str>) {
+        if self.ui.voice_recording.is_some() || self.ui.voice_review.is_some() {
+            match key {
+                KeyCode::Escape => {
+                    self.voice_message_command("/vmsg cancel");
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    self.voice_message_command(if self.ui.voice_recording.is_some() {
+                        "/vmsg done"
+                    } else {
+                        "/vmsg send"
+                    });
+                }
+                _ => {}
+            }
+            return;
+        }
         // The live modifiers, not `self.keys`: every ModifiersChanged runs
         // sync_toggle, which drops ShiftLeft and ControlLeft from `self.keys`
         // while a screen is open.
@@ -1336,6 +1778,9 @@ impl Game<'_> {
         self.ui.chat.scroll_by(amount as i32, true);
     }
     pub(super) fn chat_click(&mut self) {
+        if self.voice_overlay_click() {
+            return;
+        }
         let cursor = self.cursor;
         let height = self.renderer.as_ref().map_or(720.0, |r| {
             HudBatch::new([r.config.width, r.config.height]).height
@@ -1417,6 +1862,18 @@ impl Game<'_> {
             Some(ClickEvent::ShowDialog(dialog)) => self.show_dialog_ref(&dialog),
             // Screen.defaultHandleGameClickEvent: custom actions retain chat.
             Some(ClickEvent::Custom { id, payload }) => {
+                if let Some((n, frame)) = id
+                    .strip_prefix("horizon:voice_seek/")
+                    .and_then(|v| v.split_once('/'))
+                    .and_then(|(n, f)| Some((n.parse::<usize>().ok()?, f.parse::<usize>().ok()?)))
+                {
+                    if n < self.ui.voice_messages.len() {
+                        self.voice_message_stop();
+                        self.ui.voice_player.positions[n] = frame * 960;
+                        self.voice_message_play(n);
+                    }
+                    return;
+                }
                 if let Some(n) = id
                     .strip_prefix("horizon:voice/")
                     .and_then(|n| n.parse::<usize>().ok())
@@ -1580,6 +2037,7 @@ impl Game<'_> {
         // The fractional tick makes the smooth chat extra's slide move every
         // frame; vanilla's fade reads it too.
         let now = self.visual_ticks() as f32 + self.clock.fraction() as f32;
+        self.refresh_voice_players();
         self.ui.chat.draw(batch, &self.gui.atlas, now, focused);
     }
     /// `HoverEvent.EntityTooltipInfo.getTooltipLines`: the name when the
@@ -1637,7 +2095,13 @@ impl Game<'_> {
             dispatcher: chat_tree(&self.remote),
             registries: &self.ui.registries,
         };
-        screen.resize(&m, &c, batch.width as i32, batch.height as i32);
+        let input_width = batch.width as i32
+            - if self.voice_mic_target().is_some() {
+                18
+            } else {
+                0
+            };
+        screen.resize(&m, &c, input_width, batch.height as i32);
         // Options.getBackgroundColor(Integer.MIN_VALUE).
         let background = if self.settings.file.bool("backgroundForChatOnly") {
             i32::MIN
@@ -1656,6 +2120,7 @@ impl Game<'_> {
             let button = Self::leave_bed_draws(&m, mouse, batch.width, batch.height);
             horizon_client::screen_draw::paint(batch, &self.gui.atlas, &button);
         }
+        self.draw_voice_overlay(batch);
         // The hovered message part's tooltip (`renderComponentHoverEffect`),
         // or the text of the message tag under the cursor.
         let height = batch.height as i32;

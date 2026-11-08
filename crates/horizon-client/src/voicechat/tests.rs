@@ -2,9 +2,7 @@ use super::*;
 use wire::*;
 #[test]
 fn voice_dump_short_heard_audio_reaches_wav() {
-    let path = std::env::current_dir()
-        .unwrap()
-        .join(format!("voice-dump-test-{}.wav", std::process::id()));
+    let path = std::env::temp_dir().join(format!("voice-dump-test-{}.wav", std::process::id()));
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

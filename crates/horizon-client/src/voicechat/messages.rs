@@ -9,6 +9,47 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Default)]
+pub struct Playback {
+    pub active: Option<usize>,
+    pub positions: Vec<usize>,
+}
+impl Playback {
+    pub fn start(&mut self, n: usize, total: usize) {
+        self.positions.resize(self.positions.len().max(n + 1), 0);
+        if self.positions[n] >= total {
+            self.positions[n] = 0;
+        }
+        self.active = Some(n);
+    }
+    pub fn pause(&mut self) {
+        self.active = None;
+    }
+    pub fn next(&self, n: usize, count: usize) -> Option<usize> {
+        (n + 1 < count).then_some(n + 1)
+    }
+}
+pub fn time_label(frames: usize) -> String {
+    let seconds = frames / 50;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+pub fn level(pcm: &[f32]) -> f32 {
+    pcm.iter()
+        .filter(|v| v.is_finite())
+        .fold(0.0_f32, |a, v| a.max(v.abs()))
+        .min(1.0)
+}
+pub fn seek_frame(x: f32, width: f32, frames: usize) -> usize {
+    if frames == 0 || width <= 0.0 {
+        return 0;
+    }
+    (((x / width).clamp(0.0, 1.0) * frames as f32).floor() as usize).min(frames - 1)
+}
+pub fn append_recording(pcm: &mut Vec<f32>, frame: &[f32], limit: usize) -> bool {
+    let remaining = limit.min(4500) * 960 - pcm.len().min(limit.min(4500) * 960);
+    pcm.extend_from_slice(&frame[..frame.len().min(remaining)]);
+    pcm.len() >= limit.min(4500) * 960
+}
 pub const PREFIX: &str = "voicemessages:";
 pub const RECEIVERS: &[u8] = b"voicemessages:config_v0\0voicemessages:targets\0voicemessages:voice_message_chunk_s2c\0voicemessages:voice_message_end_s2c";
 #[derive(Debug, PartialEq)]
@@ -221,6 +262,46 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn voice_single_player_pause_resume_and_chain() {
+        let mut p = Playback::default();
+        p.start(0, 48000);
+        p.positions[0] = 1920;
+        p.pause();
+        assert_eq!(p.active, None);
+        p.start(0, 48000);
+        assert_eq!(p.positions[0], 1920);
+        p.start(1, 48000);
+        assert_eq!(p.active, Some(1));
+        assert_eq!(p.positions[0], 1920);
+        p.positions[1] = 48000;
+        p.start(1, 48000);
+        assert_eq!(p.positions[1], 0);
+        assert_eq!(p.next(0, 3), Some(1));
+        assert_eq!(p.next(1, 3), Some(2));
+        assert_eq!(p.next(2, 3), None);
+    }
+    #[test]
+    fn voice_recording_levels_time_and_limit() {
+        assert_eq!(time_label(0), "0:00");
+        assert_eq!(time_label(50), "0:01");
+        assert_eq!(time_label(4500), "1:30");
+        assert_eq!(level(&[-0.5, 0.25, f32::NAN]), 0.5);
+        assert_eq!(level(&[2.0]), 1.0);
+        let mut pcm = vec![0.0; 4499 * 960];
+        assert!(!append_recording(&mut pcm, &[0.2; 480], 5000));
+        assert!(append_recording(&mut pcm, &[0.4; 960], 5000));
+        assert_eq!(pcm.len(), 4500 * 960);
+        assert_eq!(pcm.last(), Some(&0.4));
+    }
+    #[test]
+    fn voice_review_seek_mapping() {
+        assert_eq!(seek_frame(-1.0, 260.0, 100), 0);
+        assert_eq!(seek_frame(130.0, 260.0, 100), 50);
+        assert_eq!(seek_frame(260.0, 260.0, 100), 99);
+        assert_eq!(seek_frame(300.0, 260.0, 100), 99);
+        assert_eq!(seek_frame(10.0, 260.0, 0), 0);
+    }
     #[test]
     fn voice_message_wire_vectors() {
         let cases = [

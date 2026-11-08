@@ -219,6 +219,14 @@ pub fn capture(
     name: &str,
     tx: SyncSender<Vec<f32>>,
 ) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
+    capture_with_errors(name, tx, None)
+}
+#[cfg(feature = "audio")]
+pub fn capture_with_errors(
+    name: &str,
+    tx: SyncSender<Vec<f32>>,
+    errors: Option<SyncSender<String>>,
+) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
     let device = if name.is_empty() {
@@ -229,7 +237,7 @@ pub fn capture(
     }
     .ok_or("input device unavailable")?;
     let config = device.default_input_config()?;
-    macro_rules! build { ($($format:ident => $ty:ty),*) => { match config.sample_format() { $(cpal::SampleFormat::$format => input::<$ty>(&device, &config, tx),)* _ => Err("unsupported input format".into()) } }; }
+    macro_rules! build { ($($format:ident => $ty:ty),*) => { match config.sample_format() { $(cpal::SampleFormat::$format => input::<$ty>(&device, &config, tx, errors),)* _ => Err("unsupported input format".into()) } }; }
     let stream = build!(I8=>i8,I16=>i16,I32=>i32,I64=>i64,U8=>u8,U16=>u16,U32=>u32,U64=>u64,F32=>f32,F64=>f64)?;
     stream.play()?;
     Ok(stream)
@@ -239,6 +247,7 @@ fn input<T: cpal::SizedSample>(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     tx: SyncSender<Vec<f32>>,
+    errors: Option<SyncSender<String>>,
 ) -> Result<cpal::Stream, Box<dyn std::error::Error>>
 where
     f32: cpal::FromSample<T>,
@@ -259,6 +268,9 @@ where
         },
         move |e| {
             if !logged {
+                if let Some(tx) = &errors {
+                    let _ = tx.try_send(e.to_string());
+                }
                 log::warn!("voicechat: microphone: {e}");
                 logged = true;
             }
