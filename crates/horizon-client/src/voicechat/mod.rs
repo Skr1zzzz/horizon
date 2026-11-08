@@ -1,4 +1,6 @@
 //! Clean-room protocol implemented from a written interoperability description.
+pub mod messages;
+pub mod registration;
 pub mod sender;
 pub mod wire;
 use horizon_protocol::buf::{Reader, Writer};
@@ -353,7 +355,12 @@ impl Dump {
         let count = if all {
             self.samples.len()
         } else {
-            self.samples.len().saturating_sub(4800)
+            // A short utterance can fit entirely inside the retained tail. Once
+            // its wall-clock mixing window has passed, it must still reach disk.
+            let safe = (self.start.elapsed().as_secs_f64() * 48000.0) as usize;
+            self.samples
+                .len()
+                .min(safe.saturating_sub(4800).saturating_sub(self.base))
         };
         let bytes: Vec<u8> = self
             .samples

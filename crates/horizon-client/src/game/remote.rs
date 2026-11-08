@@ -502,6 +502,7 @@ pub(super) struct Remote {
     pub(super) headpats: super::headpats::State,
     voice_available: bool,
     voice_requested: bool,
+    pub(super) messages: horizon_client::voicechat::messages::State,
     voice_streams: HashMap<u128, (Option<u64>, std::time::Instant)>,
     pub brand: String,
     /// This connection's configured feature flags, carried through reconfiguration.
@@ -660,7 +661,7 @@ pub(super) struct Remote {
     /// `ClientSuggestionProvider.customCompletionSuggestions`: the extra chat
     /// completions this server sent (ClientboundCustomChatCompletionsPacket).
     custom_completions: std::collections::BTreeSet<String>,
-    players: HashMap<u128, String>,
+    pub(super) players: HashMap<u128, String>,
     /// `ClientPacketListener.playerInfoMap` as player-list entries, and
     /// which of them are listed.
     tab_players: HashMap<u128, horizon_client::tab_list::TabPlayer>,
@@ -1094,6 +1095,7 @@ impl Game<'_> {
             headpats: Default::default(),
             voice_available: false,
             voice_requested: false,
+            messages: Default::default(),
             voice_streams: HashMap::new(),
             brand: "unknown".into(),
             features: vec!["minecraft:vanilla".into()],
@@ -3395,19 +3397,58 @@ impl Game<'_> {
                     log::warn!("voicechat: {e}");
                 }
             }
+            C::CustomPayload(p) if p.channel.starts_with("voicemessages:") => {
+                use horizon_client::voicechat::messages::Payload;
+                let result = Payload::decode(&p.channel, &p.data).and_then(|p| {
+                    self.remote
+                        .as_mut()
+                        .ok_or_else(|| horizon_protocol::Error::new("No connection"))?
+                        .messages
+                        .receive(p, std::time::Instant::now())
+                });
+                match result {
+                    Ok(Some((id, target, pcm, frames))) => {
+                        if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                            log::info!(
+                                "voicemessage: received {} frames={frames}",
+                                horizon_protocol::crypto::uuid_string(id)
+                            );
+                        }
+                        self.voice_message_received(id, &target, pcm);
+                    }
+                    Err(e) => {
+                        let hex = p
+                            .data
+                            .iter()
+                            .take(64)
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        log::warn!(
+                            "voicemessage: channel={} payload_hex=[{}] bytes={}: {e}",
+                            p.channel,
+                            hex,
+                            p.data.len()
+                        );
+                    }
+                    _ => {}
+                }
+            }
             C::CustomPayload(p)
                 if matches!(
                     p.channel.as_str(),
-                    "minecraft:register" | "minecraft:unregister"
+                    "minecraft:register" | "minecraft:unregister" | "c:register"
                 ) =>
             {
+                let channels =
+                    horizon_client::voicechat::registration::channels(&p.channel, &p.data)
+                        .unwrap_or_default();
                 if let Some(r) = self.remote.as_mut() {
-                    for channel in p
-                        .data
-                        .split(|b| *b == 0)
-                        .filter_map(|b| std::str::from_utf8(b).ok())
-                    {
-                        if p.channel == "minecraft:register" {
+                    if channels.iter().any(|c| c == "voicemessages:version") {
+                        r.messages.available = p.channel != "minecraft:unregister";
+                    }
+                    for channel in channels.iter().map(String::as_str) {
+                        if p.channel != "minecraft:unregister" {
                             r.headpats.channels.insert(channel.into());
                         } else {
                             r.headpats.channels.remove(channel);
@@ -3444,11 +3485,8 @@ impl Game<'_> {
                 if let Some(r) = self.remote.as_mut()
                     && std::env::var_os("HORIZON_FABRIC_SYNC").is_some_and(|v| v == "1")
                 {
-                    if p.data
-                        .split(|b| *b == 0)
-                        .any(|c| c.starts_with(b"voicechat:"))
-                    {
-                        r.voice_available = p.channel == "minecraft:register";
+                    if channels.iter().any(|c| c.starts_with("voicechat:")) {
+                        r.voice_available = p.channel != "minecraft:unregister";
                     }
                 }
             }
@@ -6313,6 +6351,7 @@ impl Game<'_> {
     }
     pub(super) fn tick_remote(&mut self) -> Result<()> {
         self.tick_remote_level()?;
+        self.tick_voice_messages();
         self.tick_voicechat();
         self.tick_laser();
         self.tick_headpats();

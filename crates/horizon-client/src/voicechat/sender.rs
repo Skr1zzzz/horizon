@@ -12,6 +12,7 @@ pub struct Controls {
     pub muted: AtomicBool,
     pub disabled: AtomicBool,
     pub transmitting: AtomicBool,
+    pub recording_message: AtomicBool,
 }
 pub struct Config {
     pub device: String,
@@ -145,7 +146,8 @@ impl Sender {
         })
     }
     pub fn poll(&mut self, mut send: impl FnMut(Packet) -> bool) -> usize {
-        let blocked = self.controls.muted.load(Ordering::Relaxed)
+        let blocked = self.controls.recording_message.load(Ordering::Relaxed)
+            || self.controls.muted.load(Ordering::Relaxed)
             || self.controls.disabled.load(Ordering::Relaxed);
         let mut frames: Vec<_> = self.frames.try_iter().collect();
         if let Some((wav, at)) = self.wav.as_mut() {
@@ -211,7 +213,9 @@ impl Sender {
     }
 }
 #[cfg(feature = "audio")]
-fn capture(
+pub type CaptureStream = cpal::Stream;
+#[cfg(feature = "audio")]
+pub fn capture(
     name: &str,
     tx: SyncSender<Vec<f32>>,
 ) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
@@ -262,7 +266,7 @@ where
         None,
     )?)
 }
-fn read_wav(path: &std::path::Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn read_wav(path: &std::path::Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
         return Err("not a WAV".into());

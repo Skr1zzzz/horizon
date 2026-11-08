@@ -139,6 +139,12 @@ fn should_discard_draft(reason: ChatExit, save_chat_drafts: bool) -> bool {
 #[derive(Default)]
 pub struct UiState {
     pub chat: Chat,
+    pub voice_messages: Vec<Vec<f32>>,
+    pub voice_recording: Option<(String, Vec<f32>, std::sync::mpsc::Receiver<Vec<f32>>)>,
+    #[cfg(feature = "audio")]
+    pub voice_capture: Option<horizon_client::voicechat::sender::CaptureStream>,
+    pub voice_review: Option<(String, Vec<f32>)>,
+    pub voice_playing: Option<(usize, usize, std::time::Instant, Option<u64>)>,
     pub chat_screen: Option<ChatScreen>,
     /// `ChatComponent.latestDraft`.
     pub chat_draft: Option<ChatDraft>,
@@ -188,6 +194,236 @@ impl UiState {
             ui.chat.load_history(&dir);
         }
         ui
+    }
+}
+
+impl Game<'_> {
+    fn voice_message_send(&mut self, target: &str, pcm: &[f32]) {
+        use horizon_client::voicechat::messages::{encode_audio, upload};
+        let Some(limit) = self
+            .remote
+            .as_ref()
+            .filter(|r| r.messages.ready())
+            .and_then(|r| r.messages.max_frames)
+        else {
+            return;
+        };
+        match encode_audio(pcm, limit).and_then(|f| {
+            let n = f.len();
+            upload(f, target).map(|p| (n, p))
+        }) {
+            Ok((n, packets)) => {
+                for (channel, data) in packets {
+                    self.send(horizon_protocol::packets::play::Serverbound::CustomPayload(
+                        horizon_protocol::packets::configuration::CustomPayload { channel, data },
+                    ));
+                }
+                if std::env::var_os("HORIZON_VOICECHAT_LOG").is_some_and(|v| v == "1") {
+                    log::info!("voicemessage: sent {n} frames");
+                }
+            }
+            Err(e) => log::warn!("voicemessage: {e}"),
+        }
+    }
+    fn voice_message_command(&mut self, message: &str) -> bool {
+        let mut words = message.split_whitespace();
+        if !matches!(words.next(), Some("/vmsg" | "/voicemsg")) {
+            return false;
+        }
+        let target = words.next().unwrap_or("all");
+        match target {
+            "cancel" => {
+                self.ui.voice_recording = None;
+                self.ui.voice_review = None;
+            }
+            "done" => {
+                if let Some((target, pcm, _)) = self.ui.voice_recording.take() {
+                    if !pcm.is_empty() {
+                        self.ui.voice_review = Some((target, pcm));
+                    }
+                }
+            }
+            "send" => {
+                if let Some((target, pcm)) = self.ui.voice_review.take() {
+                    self.voice_message_send(&target, &pcm);
+                }
+            }
+            _ => {
+                let allowed = self.remote.as_ref().is_some_and(|r| {
+                    r.messages.ready()
+                        && r.messages
+                            .targets
+                            .as_ref()
+                            .is_some_and(|t| t.iter().any(|t| t == target))
+                });
+                if !allowed {
+                    self.system_message(
+                        Text::translate_with_fallback(
+                            "horizon.voicemessage.unavailable",
+                            "Voice message target unavailable",
+                            &[],
+                        )
+                        .with_color(0xff5555),
+                    );
+                    return true;
+                }
+                #[cfg(feature = "audio")]
+                {
+                    let (tx, rx) = std::sync::mpsc::sync_channel(100);
+                    match horizon_client::voicechat::sender::capture(
+                        &self.settings.file.string("voicechatInputDevice"),
+                        tx,
+                    ) {
+                        Ok(stream) => {
+                            self.ui.voice_capture = Some(stream);
+                            self.ui.voice_recording = Some((target.into(), Vec::new(), rx));
+                            self.ui.voice_review = None;
+                        }
+                        Err(e) => self.titles.set_overlay(
+                            Text::translate_with_fallback(
+                                "horizon.voicemessage.microphone",
+                                "Microphone error: %s",
+                                &[Text::literal(e.to_string())],
+                            )
+                            .with_color(0xff5555),
+                            false,
+                        ),
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "audio")]
+        if self.ui.voice_recording.is_none() {
+            self.ui.voice_capture = None;
+        }
+        true
+    }
+    pub(super) fn voice_message_received(&mut self, sender: u128, target: &str, pcm: Vec<f32>) {
+        let name = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.players.get(&sender))
+            .cloned()
+            .unwrap_or_default();
+        let label = if target == "all" {
+            Text::literal(name)
+        } else {
+            Text::literal(format!("{name} → ")).append(if target == "team" {
+                Text::translate_with_fallback("horizon.voicemessage.team", "Team", &[])
+            } else {
+                Text::literal(target)
+            })
+        };
+        let n = self.ui.voice_messages.len();
+        let seconds = pcm.len() / 48000;
+        self.ui.voice_messages.push(pcm);
+        let control = Text::styled(
+            format!(" ▶ ■ {}:{:02}", seconds / 60, seconds % 60),
+            Style {
+                click: Some(ClickEvent::Custom {
+                    id: format!("horizon:voice/{n}"),
+                    payload: None,
+                }),
+                ..Default::default()
+            },
+        );
+        self.system_message(label.append(control));
+    }
+    fn voice_message_play(&mut self, n: usize) {
+        if let Some((old, _, _, id)) = self.ui.voice_playing.take() {
+            if let Some(id) = id {
+                self.audio.release_stream(id);
+            }
+            if old == n {
+                return;
+            }
+        }
+        if n < self.ui.voice_messages.len() {
+            self.ui.voice_playing = Some((n, 0, std::time::Instant::now(), None));
+        }
+    }
+    pub(super) fn tick_voice_messages(&mut self) {
+        use horizon_client::voicechat::messages::{Payload, RECEIVERS};
+        let announce = self
+            .remote
+            .as_ref()
+            .is_some_and(|r| r.logged_in && r.messages.available && !r.messages.announced);
+        if announce {
+            self.remote.as_mut().unwrap().messages.announced = true;
+            for (channel, data) in [
+                ("minecraft:register", RECEIVERS.to_vec()),
+                (
+                    "voicemessages:version",
+                    Payload::Version("1.0.12-1.21.11".into()).encode().unwrap(),
+                ),
+            ] {
+                self.send(horizon_protocol::packets::play::Serverbound::CustomPayload(
+                    horizon_protocol::packets::configuration::CustomPayload {
+                        channel: channel.into(),
+                        data,
+                    },
+                ));
+            }
+        }
+        let wav = self
+            .remote
+            .as_mut()
+            .filter(|r| {
+                r.messages.ready()
+                    && !r.messages.wav_sent
+                    && r.messages
+                        .targets
+                        .as_ref()
+                        .is_some_and(|t| t.iter().any(|t| t == "all"))
+            })
+            .and_then(|r| {
+                r.messages.wav_sent = true;
+                std::env::var_os("HORIZON_VOICEMESSAGE_SEND_WAV")
+            });
+        if let Some(path) = wav {
+            match horizon_client::voicechat::sender::read_wav(std::path::Path::new(&path)) {
+                Ok(pcm) => self.voice_message_send("all", &pcm),
+                Err(e) => log::warn!("voicemessage: {e}"),
+            }
+        }
+        if let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref()) {
+            v.controls.recording_message.store(
+                self.ui.voice_recording.is_some(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        if let Some((_, pcm, rx)) = self.ui.voice_recording.as_mut() {
+            let limit = self
+                .remote
+                .as_ref()
+                .and_then(|r| r.messages.max_frames)
+                .unwrap_or(0)
+                * 960;
+            for frame in rx.try_iter() {
+                if pcm.len() + frame.len() <= limit {
+                    pcm.extend(frame);
+                }
+            }
+            if pcm.len() >= limit {
+                self.voice_message_command("/vmsg done");
+            }
+        }
+        if let Some((n, at, next, id)) = self.ui.voice_playing.as_mut() {
+            if std::time::Instant::now() >= *next {
+                let pcm = &self.ui.voice_messages[*n];
+                if *at < pcm.len() {
+                    let end = (*at + 960).min(pcm.len());
+                    self.audio.stream_pcm(id, &pcm[*at..end], None, 1.0);
+                    *at = end;
+                    *next = std::time::Instant::now() + std::time::Duration::from_millis(20);
+                } else {
+                    if let Some(id) = *id {
+                        self.audio.release_stream(id);
+                    }
+                    self.ui.voice_playing = None;
+                }
+            }
+        }
     }
 }
 
@@ -1046,6 +1282,9 @@ impl Game<'_> {
         if message.is_empty() || !self.chat_abilities().allows(&message) {
             return;
         }
+        if self.voice_message_command(&message) {
+            return;
+        }
         self.ui.chat.add_recent(&message);
         // On a server (single player's own included) the server runs it,
         // unless a client mod owns the command.
@@ -1178,6 +1417,13 @@ impl Game<'_> {
             Some(ClickEvent::ShowDialog(dialog)) => self.show_dialog_ref(&dialog),
             // Screen.defaultHandleGameClickEvent: custom actions retain chat.
             Some(ClickEvent::Custom { id, payload }) => {
+                if let Some(n) = id
+                    .strip_prefix("horizon:voice/")
+                    .and_then(|n| n.parse::<usize>().ok())
+                {
+                    self.voice_message_play(n);
+                    return;
+                }
                 if let Some(remote) = &self.remote {
                     remote.session.send_custom_click(&id, payload);
                 }

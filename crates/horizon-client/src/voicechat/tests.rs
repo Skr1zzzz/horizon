@@ -1,5 +1,47 @@
 use super::*;
 use wire::*;
+#[test]
+fn voice_dump_short_heard_audio_reaches_wav() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join(format!("voice-dump-test-{}.wav", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    use std::io::Write;
+    (&file).write_all(&[0; 44]).unwrap();
+    let now = Instant::now();
+    let mut dump = Dump {
+        file: Some(file),
+        start: now,
+        last: now,
+        base: 0,
+        samples: Vec::new(),
+        ends: HashMap::new(),
+    };
+    let mut c = Channel {
+        reorder: Reorder::default(),
+        decoder: OpusDecoder::new(48000, 1).unwrap(),
+        last: sound(0),
+        arrival: now,
+    };
+    let frames = messages::encode_audio(&vec![0.2; 960], 4500).unwrap();
+    let mut s = sound(0);
+    s.opus = frames[0].clone();
+    let (tx, rx) = mpsc::sync_channel(2);
+    decode(&mut c, vec![Some(s)], &tx, &mut HashMap::new(), &mut dump);
+    assert!(matches!(rx.try_recv(), Ok(Event::Pcm(_, _))));
+    dump.start = now - Duration::from_secs(2);
+    dump.last = now - Duration::from_secs(2);
+    dump.flush(false);
+    let pcm = sender::read_wav(&path).unwrap();
+    assert!(pcm.len() >= 960);
+    assert!(pcm.iter().any(|v| v.abs() > 0.01));
+    drop(dump);
+    std::fs::remove_file(path).unwrap();
+}
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
