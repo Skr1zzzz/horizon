@@ -55,6 +55,7 @@ mod agent;
 mod agent_settings;
 mod allays;
 mod armor_stands;
+mod armorstand_editor;
 mod atlas_slots;
 mod attachment_sync;
 mod banners;
@@ -9230,7 +9231,9 @@ impl Game<'_> {
             Screen::Dead => self.draw_death_screen(&mut batch),
             Screen::Stats => self.draw_stats(&mut batch),
             Screen::Advancements => self.draw_advancements(&mut batch),
-            Screen::Mod => {}
+            Screen::Mod => {
+                self.draw_armorstand(&mut batch);
+            }
             Screen::WorldOptions => self.draw_world_options(&mut batch),
             Screen::Friends => self.draw_friends_screen(&mut batch),
             Screen::Social => self.draw_social_screen(&mut batch),
@@ -17193,6 +17196,19 @@ impl Game<'_> {
     /// `Screen.keyPressed` hears the raw one, and only a raw key settles what
     /// the container's hotbar keys are now (`checkHotbarKeyPressed`).
     fn key_pressed(&mut self, key: KeyCode, raw: KeyCode) -> Result<()> {
+        if self
+            .remote
+            .as_ref()
+            .is_some_and(|r| r.armorstand.active.is_some())
+        {
+            if key == KeyCode::Escape
+                || horizon_client::keybinds::key_name(key)
+                    .is_some_and(|name| self.settings.keys.get("key.inventory") == name)
+            {
+                self.armorstand_close(true);
+            }
+            return Ok(());
+        }
         // `CreativeModeInventoryScreen.keyPressed` clears `ignoreTextInput` on
         // every key, before it decides anything.
         self.creative_ignore_text = false;
@@ -18970,6 +18986,16 @@ impl Game<'_> {
                     }
                 }
                 WindowEvent::MouseInput { .. } if self.title.is_some() => {}
+                WindowEvent::MouseInput { state, button, .. }
+                    if self
+                        .remote
+                        .as_ref()
+                        .is_some_and(|r| r.armorstand.active.is_some()) =>
+                {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        self.armorstand_click();
+                    }
+                }
                 WindowEvent::MouseInput { state, button, .. } if self.book.is_some() => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         let size = self

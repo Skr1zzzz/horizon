@@ -5,6 +5,7 @@ extern crate self as horizon_client;
 pub mod advancements;
 pub mod ambience;
 pub mod animate_tick;
+pub mod armorstand;
 pub mod arrows;
 pub mod block_contact;
 pub mod liminal;

@@ -1,5 +1,16 @@
 # Third-party notices
 
+## Armor Stands protocol compatibility
+
+`crates/horizon-client/src/armorstand.rs` and `game/armorstand_editor.rs`
+implement Armor Stands 2.2.4 compatibility from the supplied written protocol
+requirements, with codec corrections adapted from armorstands (MIT),
+`network/Networking.java` and its indexed-enum/string codecs in the supplied
+2.2.4 decompilation. Copyright (c) 2021 Evan Steinkerchner (Roundaround).
+The optional pose/scale UI and inventory are not included in this stage.
+The MIT permission and warranty notice reproduced below applies to these
+adapted portions as well.
+
 ## headpats and Cardinal Components API
 
 `crates/horizon-client/src/headpat.rs`, `game/headpats.rs`, and the headpat

@@ -500,6 +500,8 @@ pub(super) struct Remote {
     pub(super) voice: Option<horizon_client::voicechat::Connection>,
     pub(super) laser: super::laser::State,
     pub(super) headpats: super::headpats::State,
+    pub(super) armorstand: horizon_client::armorstand::Session,
+    pub(super) armorstand_registered: bool,
     voice_available: bool,
     voice_requested: bool,
     pub(super) messages: horizon_client::voicechat::messages::State,
@@ -1093,6 +1095,8 @@ impl Game<'_> {
             voice: None,
             laser: Default::default(),
             headpats: Default::default(),
+            armorstand: Default::default(),
+            armorstand_registered: false,
             voice_available: false,
             voice_requested: false,
             messages: Default::default(),
@@ -3328,6 +3332,9 @@ impl Game<'_> {
             }
             // A mod menu type's block and its mod's bytes, just before the
             // menu's `OpenScreen`.
+            C::CustomPayload(p) if p.channel.starts_with("armorstands:") => {
+                self.armorstand_receive(&p.channel, &p.data);
+            }
             C::CustomPayload(p) if p.channel == horizon_client::headpat::CHANNEL => {
                 match horizon_client::headpat::decode(&p.data) {
                     Ok(Some((id, target, incoming))) => {
@@ -4869,6 +4876,22 @@ impl Game<'_> {
                     self.selected = p.slot as usize;
                 }
             }
+            C::ContainerSetContent(p)
+                if self
+                    .remote
+                    .as_ref()
+                    .and_then(|r| r.armorstand.active)
+                    .is_some_and(|s| s.0 == p.container) =>
+            {
+                // Slotless editor pages have no inventory mapping, only a carried stack.
+                self.carried = self.to_stack(&p.carried);
+            }
+            C::ContainerSetSlot(p)
+                if self
+                    .remote
+                    .as_ref()
+                    .and_then(|r| r.armorstand.active)
+                    .is_some_and(|s| s.0 == p.container) => {}
             C::ContainerSetContent(p) => {
                 let pending = self.remote.as_mut().and_then(|r| r.pending_pod.take());
                 if let Some(pending) = pending {
@@ -4977,7 +5000,15 @@ impl Game<'_> {
             C::RecipeBookSettings(p) => self.remote_recipe_book_settings(p),
             C::PlaceGhostRecipe(p) => self.remote_ghost_recipe(p),
             C::MerchantOffers(p) => self.remote_merchant_offers(p),
-            C::ContainerClose(_) => {
+            C::ContainerClose(p) => {
+                if self
+                    .remote
+                    .as_ref()
+                    .and_then(|r| r.armorstand.active)
+                    .is_some_and(|s| s.0 == p.container)
+                {
+                    self.armorstand_close(false);
+                }
                 // `LocalPlayer.clientSideCloseContainer` sets the screen to
                 // null, including dialogs and WaitingForResponseScreen. This
                 // differs from clearDialog, which restores the parent screen.
@@ -6354,6 +6385,7 @@ impl Game<'_> {
         self.tick_voice_messages();
         self.tick_voicechat();
         self.tick_laser();
+        self.tick_armorstand();
         self.tick_headpats();
         // The rockets boosting this player tick after it, also while it waits
         // for chunks.
@@ -10117,6 +10149,9 @@ impl Game<'_> {
         (self.pod_screen_shown() && r.menu.as_ref()?.0 == layout.sync_id).then_some(layout)
     }
     fn remote_pod_menu(&mut self, layout: horizon_client::net::pod::Menu) {
+        if self.armorstand_takeover(layout.sync_id, "pod layout") {
+            return;
+        }
         let Some(r) = self.remote.as_mut() else {
             return;
         };
@@ -10146,8 +10181,32 @@ impl Game<'_> {
         self.screen = Screen::Inventory;
         self.capture(false);
     }
+    /// The authorized mod session owns this sync ID, regardless of packet order.
+    pub(super) fn armorstand_takeover(&mut self, sync: i32, source: &str) -> bool {
+        let Some(r) = self.remote.as_mut() else {
+            return false;
+        };
+        if !r.armorstand.owns(sync) {
+            return false;
+        }
+        r.pending_pod = None;
+        r.pod_menu = None;
+        r.menu = Some((sync, "armorstands:editor".into()));
+        r.menu_title = None;
+        self.container = None;
+        self.mod_screen = None;
+        self.screen = Screen::Mod;
+        self.capture(false);
+        horizon_client::armorstand::diagnostic(format_args!(
+            "editor takes over container sync={sync} source={source}"
+        ));
+        true
+    }
     /// ClientboundOpenScreenPacket for the menus Horizon draws.
     fn remote_open_screen(&mut self, p: play::OpenScreen) {
+        if self.armorstand_takeover(p.container, "vanilla open screen") {
+            return;
+        }
         // A new RecipeBookComponent owns fresh ghost slots and an overlay,
         // even when the server replaces a menu without a close packet.
         self.recipe_ui.reset_screen();
