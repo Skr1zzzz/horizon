@@ -31,7 +31,7 @@ pub fn decode(channel: &str, bytes: &[u8]) -> Result<Incoming> {
     }
     Ok(p)
 }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Property {
     pub value: String,
     pub signature: Option<String>,
@@ -63,6 +63,122 @@ impl Property {
         Ok(p)
     }
 }
+pub const SAVED_FILE: &str = "horizon-skinshuffle.txt";
+
+pub fn profile_property(text: &str) -> std::result::Result<Property, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let textures = v["properties"]
+        .as_array()
+        .and_then(|ps| ps.iter().find(|p| p["name"] == "textures"))
+        .ok_or("profile missing textures")?;
+    let field = |key: &str| {
+        textures[key]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("textures missing {key}"))
+    };
+    Ok(Property {
+        value: field("value")?,
+        signature: Some(field("signature")?),
+    })
+}
+
+pub fn own_property(uuid: u128) -> std::result::Result<Property, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(60))
+        .build();
+    let response = agent
+        .get(&format!(
+            "https://sessionserver.mojang.com/session/minecraft/profile/{uuid:032x}?unsigned=false"
+        ))
+        .call()
+        .map_err(|e| format!("session server: {e}"))?;
+    let text = response.into_string().map_err(|e| e.to_string())?;
+    profile_property(&text)
+}
+
+fn saved_accounts(
+    home: &std::path::Path,
+) -> std::io::Result<std::collections::BTreeMap<u128, Property>> {
+    let text = match std::fs::read_to_string(home.join(SAVED_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let (uuid, json) = line.split_once(':')?;
+            if uuid.len() != 32 {
+                return None;
+            }
+            Some((
+                u128::from_str_radix(uuid, 16).ok()?,
+                serde_json::from_str(json).ok()?,
+            ))
+        })
+        .collect())
+}
+
+pub fn load_saved(home: &std::path::Path, uuid: u128) -> std::io::Result<Option<Property>> {
+    Ok(saved_accounts(home)?.remove(&uuid))
+}
+
+pub fn save_property(
+    home: &std::path::Path,
+    uuid: u128,
+    property: &Property,
+) -> std::io::Result<()> {
+    let mut accounts = saved_accounts(home)?;
+    accounts.insert(uuid, property.clone());
+    let mut text = String::new();
+    for (uuid, property) in accounts {
+        text.push_str(&format!(
+            "{uuid:032x}:{}\n",
+            serde_json::to_string(&property)?
+        ));
+    }
+    std::fs::create_dir_all(home)?;
+    let temporary = home.join(format!("{SAVED_FILE}.tmp"));
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(temporary, home.join(SAVED_FILE))
+}
+
+#[derive(Debug, PartialEq)]
+pub enum JoinSource {
+    Hook,
+    Saved,
+    Mojang,
+    Nothing,
+}
+
+/// Mark the decision before starting work, so failures cannot cause retry loops.
+#[derive(Default)]
+pub struct JoinDecision {
+    used: bool,
+}
+impl JoinDecision {
+    pub fn used(&self) -> bool {
+        self.used
+    }
+    pub fn take(&mut self, hook: bool, saved: bool, online: bool) -> Option<JoinSource> {
+        if self.used {
+            return None;
+        }
+        self.used = true;
+        Some(if hook {
+            JoinSource::Hook
+        } else if saved {
+            JoinSource::Saved
+        } else if online {
+            JoinSource::Mojang
+        } else {
+            JoinSource::Nothing
+        })
+    }
+}
+
 pub fn request(url: Option<&str>, slim: bool) -> Value {
     json!({"type": if url.is_some() {"url"} else {"file"}, "url": url, "model": if slim {"slim"} else {"classic"}})
 }
@@ -186,6 +302,72 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_profile_textures() {
+        assert_eq!(profile_property(r#"{"id":"abc","properties":[{"name":"other","value":"ignored"},{"name":"textures","value":"v","signature":"s"}]}"#).unwrap(),
+            Property { value: "v".into(), signature: Some("s".into()) });
+        assert!(profile_property(r#"{"properties":[]}"#).is_err());
+        assert!(profile_property(r#"{"properties":[{"name":"other","value":"v"}]}"#).is_err());
+        assert!(profile_property(r#"{"properties":[{"name":"textures","value":"v"}]}"#).is_err());
+        assert!(profile_property("not json").is_err());
+        assert!(profile_property("").is_err());
+    }
+
+    #[test]
+    fn saved_skin_accounts_round_trip() {
+        let home = std::env::temp_dir().join(format!(
+            "horizon-skinshuffle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert_eq!(load_saved(&home, 1).unwrap(), None);
+        let first = Property {
+            value: "one".into(),
+            signature: Some("sig".into()),
+        };
+        let second = Property {
+            value: "two".into(),
+            signature: None,
+        };
+        save_property(&home, 1, &first).unwrap();
+        save_property(&home, 2, &second).unwrap();
+        assert_eq!(load_saved(&home, 1).unwrap(), Some(first));
+        assert_eq!(load_saved(&home, 2).unwrap(), Some(second.clone()));
+        save_property(&home, 1, &second).unwrap();
+        let path = home.join(SAVED_FILE);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("malformed\nnot-a-uuid:{}\n00000000000000000000000000000003:invalid json\n");
+        std::fs::write(path, text).unwrap();
+        assert_eq!(load_saved(&home, 1).unwrap(), Some(second.clone()));
+        assert_eq!(load_saved(&home, 2).unwrap(), Some(second));
+        assert_eq!(load_saved(&home, 3).unwrap(), None);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn join_source_priority_once_per_session() {
+        use JoinSource::*;
+        for (hook, saved, online, expected) in [
+            (false, false, false, Nothing),
+            (false, false, true, Mojang),
+            (false, true, false, Saved),
+            (false, true, true, Saved),
+            (true, false, false, Hook),
+            (true, false, true, Hook),
+            (true, true, false, Hook),
+            (true, true, true, Hook),
+        ] {
+            let mut decision = JoinDecision::default();
+            assert_eq!(decision.take(hook, saved, online), Some(expected));
+            assert_eq!(decision.take(true, true, true), None);
+            decision = JoinDecision::default();
+            assert_eq!(decision.take(false, false, true), Some(Mojang));
+        }
+    }
+
     #[test]
     fn skin_payload_vectors() {
         assert_eq!(decode(HANDSHAKE, &[]).unwrap(), Incoming::Handshake);

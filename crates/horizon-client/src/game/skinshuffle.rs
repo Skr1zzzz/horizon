@@ -11,7 +11,8 @@ pub(super) struct State {
     slim: bool,
     status: String,
     job: Option<std::sync::mpsc::Receiver<Result<wire::Property, String>>>,
-    hook_used: bool,
+    join: wire::JoinDecision,
+    save_account: Option<u128>,
 }
 impl Game<'_> {
     pub(super) fn skin_ready(&self) -> bool {
@@ -52,6 +53,7 @@ impl Game<'_> {
         }
     }
     fn start_skin(&mut self, source: String, slim: bool) {
+        let account = self.skin_account();
         let Some(s) = self.remote.as_mut().map(|r| &mut r.skinshuffle) else {
             return;
         };
@@ -60,23 +62,67 @@ impl Game<'_> {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         s.job = Some(rx);
+        s.save_account = Some(account);
         s.status = horizon_client::lang::get("horizon.skin.working");
         std::thread::spawn(move || {
             let _ = tx.send(wire::apply(&source, slim));
         });
     }
+    fn skin_account(&self) -> u128 {
+        horizon_client::auth::current().map_or_else(
+            || self.remote.as_ref().unwrap().profile,
+            |session| session.uuid,
+        )
+    }
+    fn skin_home() -> std::path::PathBuf {
+        Self::options_path().parent().unwrap().to_path_buf()
+    }
     pub(super) fn tick_skinshuffle(&mut self) {
         if !self.skin_ready() {
             return;
         }
-        let s = &mut self.remote.as_mut().unwrap().skinshuffle;
-        if !s.hook_used {
-            s.hook_used = true;
-            if let Ok(source) = std::env::var("HORIZON_SKINSHUFFLE_APPLY") {
-                let (source, slim) = source
-                    .strip_suffix("|slim")
-                    .map_or((source.as_str(), false), |s| (s, true));
-                self.start_skin(source.to_owned(), slim);
+        let first = !self.remote.as_ref().unwrap().skinshuffle.join.used();
+        if first {
+            let hook = std::env::var("HORIZON_SKINSHUFFLE_APPLY").ok();
+            let account = self.skin_account();
+            let saved = if hook.is_none() {
+                wire::load_saved(&Self::skin_home(), account).unwrap_or_else(|e| {
+                    log::warn!("SkinShuffle load saved skin: {e}");
+                    None
+                })
+            } else {
+                None
+            };
+            let online = horizon_client::auth::current();
+            let s = &mut self.remote.as_mut().unwrap().skinshuffle;
+            match s
+                .join
+                .take(hook.is_some(), saved.is_some(), online.is_some())
+                .unwrap()
+            {
+                wire::JoinSource::Hook => {
+                    let source = hook.unwrap();
+                    let (source, slim) = source
+                        .strip_suffix("|slim")
+                        .map_or((source.as_str(), false), |s| (s, true));
+                    self.start_skin(source.to_owned(), slim);
+                }
+                wire::JoinSource::Saved => {
+                    wire::trace("join: saved skin");
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    s.job = Some(rx);
+                    let _ = tx.send(Ok(saved.unwrap()));
+                }
+                wire::JoinSource::Mojang => {
+                    wire::trace("join: own Mojang textures");
+                    let uuid = online.unwrap().uuid;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    s.job = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = tx.send(wire::own_property(uuid));
+                    });
+                }
+                wire::JoinSource::Nothing => wire::trace("join: nothing to send"),
             }
         }
         let s = &mut self.remote.as_mut().unwrap().skinshuffle;
@@ -89,6 +135,7 @@ impl Game<'_> {
         });
         if let Some(result) = result {
             s.job = None;
+            let save_account = s.save_account.take();
             match result {
                 Ok(p) => {
                     s.status = horizon_client::lang::get("horizon.skin.done");
@@ -103,6 +150,11 @@ impl Game<'_> {
                         channel: wire::APPLY.into(),
                         data: p.encode(),
                     }));
+                    if let Some(uuid) = save_account {
+                        if let Err(e) = wire::save_property(&Self::skin_home(), uuid, &p) {
+                            log::warn!("SkinShuffle save skin: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     log::warn!("SkinShuffle apply: {e}");

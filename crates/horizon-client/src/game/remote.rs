@@ -703,7 +703,7 @@ pub(super) struct Remote {
     /// `Player.DATA_SHOULDER_PARROT_LEFT` and `_RIGHT` of the own player.
     pub(super) own_shoulders: [Option<i32>; 2],
     /// The local player's profile UUID (always in the level).
-    profile: u128,
+    pub(super) profile: u128,
     /// The local player's profile name: its score holder and team member.
     pub(super) profile_name: String,
     /// `MultiPlayerGameMode.destroyBlockPos`, `.destroyProgress` and the face last sent: the block
@@ -2116,6 +2116,7 @@ impl Game<'_> {
                     }
                     let ticks = self.ticks;
                     if let Some(r) = self.remote.as_mut() {
+                        r.skinshuffle = Default::default();
                         r.reconfiguring = Some(ticks);
                         r.chat_tree_received = false;
                     }
