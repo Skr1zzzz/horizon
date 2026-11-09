@@ -12,6 +12,7 @@ use std::{path::Path, sync::atomic::Ordering::Relaxed};
 use winit::keyboard::KeyCode;
 pub(super) struct State {
     pub open: bool,
+    from_play: bool,
     pub groups: groups::State,
     pub local: players::Local,
     devices: Vec<String>,
@@ -26,7 +27,84 @@ pub(super) struct State {
     invalid: bool,
     dragging: Option<f32>,
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn state() -> State {
+        State {
+            open: true,
+            from_play: false,
+            groups: Default::default(),
+            local: Default::default(),
+            devices: vec![],
+            page: 0,
+            group_page: 0,
+            name: String::new(),
+            password: String::new(),
+            field: 0,
+            kind: 0,
+            join: None,
+            creating: false,
+            invalid: false,
+            dragging: None,
+        }
+    }
+    #[test]
+    fn closing_resumes_only_when_opened_from_play() {
+        for from_play in [false, true] {
+            let mut s = state();
+            s.from_play = from_play;
+            s.creating = true;
+            s.password = "secret".into();
+            s.dragging = Some(74.0);
+            assert_eq!(s.close(), from_play);
+            assert!(!s.open && !s.creating && s.password.is_empty() && s.dragging.is_none());
+        }
+    }
+    #[test]
+    fn player_pages_and_slider_targets_exclude_local_uuid() {
+        let mut s = state();
+        for id in 1..=4 {
+            s.groups.players.insert(
+                id,
+                groups::Player {
+                    id,
+                    name: format!("player{id}"),
+                    disabled: false,
+                    disconnected: false,
+                    group: None,
+                },
+            );
+        }
+        assert_eq!(s.players(2).map(|p| p.id).collect::<Vec<_>>(), [1, 3, 4]);
+        assert_eq!(s.page_count(2), 1);
+        assert_eq!(s.page_count(99), 2);
+        s.groups.players.clear();
+        assert_eq!(s.page_count(2), 0);
+    }
+}
 impl State {
+    fn close(&mut self) -> bool {
+        self.open = false;
+        self.close_prompt();
+        self.dragging = None;
+        self.from_play
+    }
+    fn players(&self, local: u128) -> impl Iterator<Item = &groups::Player> {
+        self.groups.players.values().filter(move |p| p.id != local)
+    }
+    fn page_count(&self, local: u128) -> usize {
+        if self.group_page == 0 {
+            self.players(local).count().div_ceil(3)
+        } else {
+            self.groups
+                .groups
+                .values()
+                .filter(|g| !g.hidden && Some(g.id) != self.groups.current)
+                .count()
+                .div_ceil(2)
+        }
+    }
     pub fn close_prompt(&mut self) {
         self.creating = false;
         self.join = None;
@@ -36,6 +114,7 @@ impl State {
     pub fn new(path: &Path) -> Self {
         Self {
             open: false,
+            from_play: false,
             groups: Default::default(),
             local: players::Local::load(path),
             devices: vec![],
@@ -66,6 +145,56 @@ fn button(
     ui::button(b, a, x, y, w, 20.0, &Text::literal(label), true, false);
 }
 impl Game<'_> {
+    pub(super) fn toggle_voice(&mut self, mute: bool) {
+        let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref()) else {
+            return;
+        };
+        let (value, bit, key) = if mute {
+            let value = !v.controls.muted.fetch_xor(true, Relaxed);
+            (
+                value,
+                if value { 1 } else { 2 },
+                if value {
+                    "horizon.voice.muted"
+                } else {
+                    "horizon.voice.unmuted"
+                },
+            )
+        } else {
+            let value = !v.controls.disabled.fetch_xor(true, Relaxed);
+            (
+                value,
+                if value { 4 } else { 8 },
+                if value {
+                    "horizon.voice.disabled"
+                } else {
+                    "horizon.voice.enabled"
+                },
+            )
+        };
+        let notify = v.controls.notices.fetch_or(bit, Relaxed) & bit == 0;
+        if notify {
+            self.send_overlay_message(Text::translate(key, &[]));
+        }
+        if !mute {
+            self.send(Serverbound::CustomPayload(CustomPayload {
+                channel: "voicechat:update_state".into(),
+                data: vec![u8::from(value)],
+            }));
+        }
+    }
+    fn close_voice(&mut self) {
+        let resume = if let Some(r) = self.remote.as_mut() {
+            r.voice_ui.close()
+        } else {
+            false
+        };
+        if resume {
+            self.pause_menu = false;
+            // Use the pause menu's Back to game action, including pointer capture.
+            let _ = self.execute_pause_action(0);
+        }
+    }
     pub(super) fn voice_ready(&self) -> bool {
         self.remote.as_ref().is_some_and(|r| r.voice.is_some())
     }
@@ -77,6 +206,7 @@ impl Game<'_> {
             return;
         }
         if let Some(r) = self.remote.as_mut() {
+            r.voice_ui.from_play = self.screen == Screen::Playing;
             r.voice_ui.open = true;
             r.voice_ui.devices = sender::input_devices();
         }
@@ -85,17 +215,14 @@ impl Game<'_> {
         self.capture(false);
     }
     pub(super) fn voice_key(&mut self, key: KeyCode, text: Option<&str>) {
+        if key == KeyCode::Escape {
+            self.close_voice();
+            return;
+        }
         let Some(r) = self.remote.as_mut() else {
             return;
         };
         let s = &mut r.voice_ui;
-        if key == KeyCode::Escape {
-            s.open = false;
-            s.creating = false;
-            s.join = None;
-            s.password.clear();
-            return;
-        }
         if !s.creating && s.join.is_none() {
             return;
         }
@@ -275,14 +402,7 @@ impl Game<'_> {
             button(b, a, x + 154.0, 150.0, 146.0, tr("groups"));
         }
         if s.group_page == 0 {
-            for (i, p) in s
-                .groups
-                .players
-                .values()
-                .skip(s.page * 3)
-                .take(3)
-                .enumerate()
-            {
+            for (i, p) in s.players(r.profile).skip(s.page * 3).take(3).enumerate() {
                 let status = if p.disabled {
                     tr("disabled")
                 } else if p.disconnected {
@@ -352,8 +472,28 @@ impl Game<'_> {
             }
         }
         let y = h - 24.0;
-        button(b, a, x, y, 94.0, tr("previous"));
-        button(b, a, x + 102.0, y, 94.0, tr("next"));
+        ui::button(
+            b,
+            a,
+            x,
+            y,
+            94.0,
+            20.0,
+            &Text::literal(tr("previous")),
+            s.page > 0,
+            false,
+        );
+        ui::button(
+            b,
+            a,
+            x + 102.0,
+            y,
+            94.0,
+            20.0,
+            &Text::literal(tr("next")),
+            s.page + 1 < s.page_count(r.profile),
+            false,
+        );
         button(b, a, x + 204.0, y, 96.0, tr("done"));
     }
     fn voice_option(&mut self, key: &str, value: horizon_client::options_file::V) {
@@ -469,12 +609,7 @@ impl Game<'_> {
             return;
         }
         if hit(26.0) {
-            let key = if cx < x + 150.0 {
-                KeyCode::KeyM
-            } else {
-                KeyCode::KeyJ
-            };
-            let _ = self.key_pressed(key, key);
+            self.toggle_voice(cx < x + 150.0);
         } else if hit(50.0) {
             let active = !self.settings.file.bool("voicechatActivation");
             self.voice_option(
@@ -521,30 +656,24 @@ impl Game<'_> {
             s.group_page = usize::from(cx >= x + 154.0 && s.groups.enabled);
             s.page = 0;
         } else if hit(h - 24.0) {
+            let local = r.profile;
             let s = &mut self.remote.as_mut().unwrap().voice_ui;
             if cx < x + 94.0 {
                 s.page = s.page.saturating_sub(1);
             } else if cx < x + 196.0 {
-                let count = if s.group_page == 0 {
-                    s.groups.players.len().div_ceil(3)
-                } else {
-                    s.groups
-                        .groups
-                        .values()
-                        .filter(|g| !g.hidden && Some(g.id) != s.groups.current)
-                        .count()
-                        .div_ceil(2)
-                };
+                let count = s.page_count(local);
                 s.page = (s.page + 1).min(count.saturating_sub(1));
             } else {
-                s.open = false;
+                self.close_voice();
             }
         } else if s.group_page == 0 {
             let i = ((cy - 176.0) / 24.0).floor() as usize;
-            if cy >= 176.0
-                && cy < 248.0
-                && let Some(id) = s.groups.players.values().nth(s.page * 3 + i).map(|p| p.id)
-            {
+            // Resolved before the mutable borrow below: the player iterator borrows `remote`.
+            let target = (176.0..248.0)
+                .contains(&cy)
+                .then(|| s.players(r.profile).nth(s.page * 3 + i).map(|p| p.id))
+                .flatten();
+            if let Some(id) = target {
                 let gain = ui::slider_value(x, 300.0, cx) * 2.0;
                 let s = &mut self.remote.as_mut().unwrap().voice_ui;
                 s.local.volumes.insert(id, gain);

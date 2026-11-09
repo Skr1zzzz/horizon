@@ -1,6 +1,42 @@
 //! A key press while a world is open (`KeyboardHandler.keyPress` and the gameplay mappings).
 use super::*;
 
+fn voice_toggle_binding(playing: bool, name: &str, mute: &str, disable: &str) -> Option<bool> {
+    if !playing {
+        None
+    } else if name == mute {
+        Some(true)
+    } else if name == disable {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod voice_binding_tests {
+    use super::voice_toggle_binding;
+    #[test]
+    fn rebound_voice_shortcuts_only_act_during_play() {
+        assert_eq!(
+            voice_toggle_binding(true, "key.keyboard.r", "key.keyboard.r", "key.keyboard.t"),
+            Some(true)
+        );
+        assert_eq!(
+            voice_toggle_binding(true, "key.keyboard.t", "key.keyboard.r", "key.keyboard.t"),
+            Some(false)
+        );
+        assert_eq!(
+            voice_toggle_binding(true, "key.keyboard.m", "key.keyboard.r", "key.keyboard.t"),
+            None
+        );
+        assert_eq!(
+            voice_toggle_binding(false, "key.keyboard.r", "key.keyboard.r", "key.keyboard.t"),
+            None
+        );
+    }
+}
+
 impl Game<'_> {
     /// A key press while a world is open (keyboard or control socket). `key`
     /// is the vanilla default the pressed mapping translates to, `raw` the
@@ -70,45 +106,15 @@ impl Game<'_> {
             self.open_voice();
             return Ok(());
         }
-        if matches!(self.screen, Screen::Playing | Screen::Paused)
-            && matches!(key, KeyCode::KeyM | KeyCode::KeyJ)
+        if let Some(name) = horizon_client::keybinds::key_name(raw)
+            && let Some(mute) = voice_toggle_binding(
+                self.screen == Screen::Playing,
+                name,
+                self.settings.keys.get("key.voiceMute"),
+                self.settings.keys.get("key.voiceDisable"),
+            )
         {
-            if let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref()) {
-                use std::sync::atomic::Ordering::Relaxed;
-                if key == KeyCode::KeyM {
-                    let muted = !v.controls.muted.fetch_xor(true, Relaxed);
-                    let bit = if muted { 1 } else { 2 };
-                    if v.controls.notices.fetch_or(bit, Relaxed) & bit == 0 {
-                        self.send_overlay_message(horizon_client::text::Text::translate(
-                            if muted {
-                                "horizon.voice.muted"
-                            } else {
-                                "horizon.voice.unmuted"
-                            },
-                            &[],
-                        ));
-                    }
-                } else {
-                    let disabled = !v.controls.disabled.fetch_xor(true, Relaxed);
-                    let bit = if disabled { 4 } else { 8 };
-                    if v.controls.notices.fetch_or(bit, Relaxed) & bit == 0 {
-                        self.send_overlay_message(horizon_client::text::Text::translate(
-                            if disabled {
-                                "horizon.voice.disabled"
-                            } else {
-                                "horizon.voice.enabled"
-                            },
-                            &[],
-                        ));
-                    }
-                    self.send(horizon_protocol::packets::play::Serverbound::CustomPayload(
-                        horizon_protocol::packets::configuration::CustomPayload {
-                            channel: "voicechat:update_state".into(),
-                            data: vec![u8::from(disabled)],
-                        },
-                    ));
-                }
-            }
+            self.toggle_voice(mute);
         }
         if self.sleeping.is_some()
             && self.screen == Screen::Playing
@@ -158,6 +164,9 @@ impl Game<'_> {
                     self.screen = Screen::Playing;
                     self.capture(true);
                 }
+                // The voice menu draws over the pause screen; Escape closes it the way the
+                // window's key path does, or its open flag would reopen it on the next pause.
+                Screen::Paused if self.voice_open() => self.voice_key(KeyCode::Escape, None),
                 Screen::Paused | Screen::Inventory => {
                     self.close_container();
                     self.pause_focus = None;

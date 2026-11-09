@@ -1486,14 +1486,13 @@ pub fn json_text(v: &serde_json::Value, lang: &Language) -> String {
 /// language set (a dedicated server's log) reads en_us.json.
 pub fn load_language(resources: &std::path::Path) -> Language {
     if let Some(lang) = crate::lang::current() {
-        return lang.map().clone();
+        return lang.resolved_map();
     }
     // No language screen ran (a dedicated server's log): en_us, with
     // Horizon's own strings included — the net thread resolves keys with
     // this map (`Reason::keyed`).
     horizon_client_core::lang::Language::load(&[&resources.to_path_buf()], "en_us")
-        .map()
-        .clone()
+        .resolved_map()
 }
 
 /// Ask a server for its status (ServerStatusPinger): MOTD, players and the

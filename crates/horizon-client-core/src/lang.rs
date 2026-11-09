@@ -31,6 +31,7 @@ pub struct Language {
     /// right to left (`ClientLanguage.defaultRightToLeft`).
     bidirectional: bool,
     map: HashMap<String, String>,
+    fallback: HashMap<String, String>,
 }
 pub const DEFAULT: &str = "en_us";
 
@@ -464,11 +465,15 @@ impl Language {
         }
         // DeprecatedTranslationsInfo.loadFromDefaultResource().applyToMap: the
         // game's own deprecated.json, not a resource pack's.
+        let mut fallback = HashMap::new();
         if let Some(bytes) = sources
             .iter()
             .find_map(|s| s.read("assets/minecraft/lang/deprecated.json"))
         {
+            let before = map.clone();
             apply_deprecated(&mut map, &bytes);
+            // Older servers still send names vanilla removed from the current language.
+            fallback.extend(before.into_iter().filter(|(key, _)| !map.contains_key(key)));
         }
         let bidirectional = available(sources)
             .iter()
@@ -477,10 +482,20 @@ impl Language {
             code: code.to_owned(),
             bidirectional,
             map,
+            fallback,
         }
     }
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.map.get(key).map(String::as_str)
+        self.map
+            .get(key)
+            .or_else(|| self.fallback.get(key))
+            .map(String::as_str)
+    }
+    /// Translation resolution for protocol components, with current names taking priority.
+    pub fn resolved_map(&self) -> HashMap<String, String> {
+        let mut map = self.fallback.clone();
+        map.extend(self.map.clone());
+        map
     }
     /// The resolved map, for `horizon_protocol::text::plain`: a server's
     /// components carry keys, and the network layer resolves them with this.
@@ -874,6 +889,38 @@ mod tests {
             }
         }
         assert!(found > 50, "found only {found} key names");
+    }
+
+    #[test]
+    fn deprecated_server_keys_resolve_without_changing_vanilla_map() {
+        let source = Mem(HashMap::from([
+            (
+                "assets/minecraft/lang/en_us.json".into(),
+                br#"{"commands.time.query":"Time: %s","old.name":"Renamed"}"#.to_vec(),
+            ),
+            (
+                "assets/minecraft/lang/deprecated.json".into(),
+                br#"{"removed":["commands.time.query"],"renamed":{"old.name":"new.name"}}"#
+                    .to_vec(),
+            ),
+        ]));
+        let language = Language::load(&[&source], "en_us");
+        assert!(!language.map().contains_key("commands.time.query"));
+        assert!(!language.map().contains_key("old.name"));
+        assert_eq!(language.get("commands.time.query"), Some("Time: %s"));
+        assert_eq!(language.get("old.name"), Some("Renamed"));
+        assert_eq!(language.get("new.name"), Some("Renamed"));
+        assert_eq!(language.get("absent"), None);
+        assert_eq!(language.resolved_map()["commands.time.query"], "Time: %s");
+        let (_, missed) = scoped(language, || {
+            assert!(has("old.name"));
+            assert!(!has("absent"));
+            assert_eq!(
+                crate::text::Text::tr("commands.time.query", &[&42]).plain(),
+                "Time: 42"
+            );
+        });
+        assert!(missed.is_empty());
     }
 
     #[test]

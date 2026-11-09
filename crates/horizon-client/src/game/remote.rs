@@ -11288,7 +11288,7 @@ impl Game<'_> {
         if let Some(lang) = horizon_client::lang::current()
             && let Some(r) = self.remote.as_mut()
         {
-            r.lang = Arc::new(lang.map().clone());
+            r.lang = Arc::new(lang.resolved_map());
         }
     }
     /// A server's chest-like menu (`MenuType.GENERIC_9xN`): its rows and title.

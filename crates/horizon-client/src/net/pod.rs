@@ -250,6 +250,13 @@ fn template(
         "minecraft:stone"
     }
 }
+fn separate_block_item(id: &str, server_item: bool, block: &Value) -> Option<Value> {
+    (server_item && block["item"] == false).then(|| {
+        json!({
+            "template": "minecraft:diamond", "place_block": id
+        })
+    })
+}
 #[cfg(test)]
 fn declaration(
     snap: &Snapshot,
@@ -480,7 +487,7 @@ fn package(files: &Files) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 // Revisioned independently of the wire format so cached packages get new adaptations.
-const GENERATOR_REVISION: u32 = 18;
+const GENERATOR_REVISION: u32 = 19;
 
 fn entity_template(
     meta: &Value,
@@ -1214,6 +1221,15 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
                     value["fluid_textures"] = json!(pair);
                 }
             }
+            // Itemless visual templates must not hide a server's independently modelled item.
+            if let Some(item) =
+                separate_block_item(&block.name, items.contains(&block.name), &value)
+            {
+                files.insert(
+                    format!("data/{ns}/horizon/item/{name}.json"),
+                    serde_json::to_vec(&item)?,
+                );
+            }
             files.insert(
                 format!("data/{ns}/horizon/block/{name}.json"),
                 serde_json::to_vec(&value)?,
@@ -1272,6 +1288,23 @@ pub(super) fn install(rsnap: &[u8], archive: &[u8], dir: &Path) -> Result<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn end_portal_visual_keeps_independent_placeable_item() {
+        let mut snap = declaration_snapshot();
+        snap.blocks[0].name = "deco-blocks:deco_end_portal".into();
+        snap.blocks[1].name = "minecraft:end_portal".into();
+        let block = declaration(&snap, &snap.blocks[0], true).unwrap();
+        assert_eq!(block["template"], "minecraft:end_portal");
+        assert_eq!(block["item"], false);
+        assert_eq!(
+            separate_block_item(&snap.blocks[0].name, true, &block),
+            Some(json!({
+                "template": "minecraft:diamond", "place_block": "deco-blocks:deco_end_portal"
+            }))
+        );
+        assert!(separate_block_item(&snap.blocks[0].name, false, &block).is_none());
+        assert!(separate_block_item("test:stone", true, &json!({"item":true})).is_none());
+    }
     #[test]
     fn deco_nether_portal_declaration_keeps_axis() {
         let mut snap = declaration_snapshot();

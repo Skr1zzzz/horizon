@@ -62,6 +62,7 @@ struct Button {
     label: Text,
     change: Change,
     swatch: Option<u32>,
+    active: bool,
 }
 fn buttons(c: &Config, w: f32, h: f32) -> Vec<Button> {
     // Independent columns prevent palette targets from covering number controls.
@@ -80,6 +81,12 @@ fn buttons(c: &Config, w: f32, h: f32) -> Vec<Button> {
                 bh,
             ],
             label: Text::translate(key, args),
+            active: match &change {
+                Change::Mode("damage") => c.break_blocks || c.ignite_blocks,
+                Change::Mode("burn") => !c.break_blocks || !c.ignite_blocks,
+                Change::Color(_) => swatch != Some(c.color & 0xffffff),
+                _ => true,
+            },
             change,
             swatch,
         });
@@ -232,7 +239,7 @@ impl Game<'_> {
                 w,
                 h,
                 &b.label,
-                true,
+                b.active,
                 ui::hovered(self.cursor, x, y, w, h),
             );
             if let Some(rgb) = b.swatch {
@@ -254,7 +261,7 @@ impl Game<'_> {
         let (w, h) = self.gui_size();
         let Some(b) = buttons(&r.laser.config, w, h).into_iter().find(|b| {
             let [x, y, w, h] = b.rect;
-            ui::hovered(self.cursor, x, y, w, h)
+            b.active && ui::hovered(self.cursor, x, y, w, h)
         }) else {
             return;
         };
@@ -278,6 +285,34 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_mode_and_color_are_inactive() {
+        let mut config = Config::default();
+        for (breaking, igniting, selected) in [
+            (false, false, Some("damage")),
+            (true, true, Some("burn")),
+            (true, false, None),
+            (false, true, None),
+        ] {
+            config.break_blocks = breaking;
+            config.ignite_blocks = igniting;
+            for button in buttons(&config, 900.0, 320.0) {
+                if let Change::Mode(mode) = button.change {
+                    assert_eq!(!button.active, selected == Some(mode));
+                }
+                if let Some(rgb) = button.swatch {
+                    assert_eq!(!button.active, rgb == config.color);
+                }
+            }
+        }
+        config.color = 0x123456;
+        assert!(
+            buttons(&config, 900.0, 320.0)
+                .iter()
+                .filter(|b| b.swatch.is_some())
+                .all(|b| b.active)
+        );
+    }
     #[test]
     fn java_menu_commands() {
         for (change, expected) in [
