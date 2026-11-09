@@ -11058,6 +11058,7 @@ impl Game<'_> {
         pr.lap("pr_projection");
         // GUI hooks project against this frame's camera, including its bob/spin and FOV.
         let mut hud = horizon_client::spans::time("hud", || self.hud(size));
+        self.draw_voice_group(&mut hud);
         if !self.ui.hide_gui
             && let Some(v) = self.remote.as_ref().and_then(|r| r.voice.as_ref())
         {

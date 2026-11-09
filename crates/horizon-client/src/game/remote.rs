@@ -717,7 +717,7 @@ pub(super) struct Remote {
     /// Active skin and cape from the services profile when the server sent none.
     own_profile: OwnProfile,
     /// The skin texture each profile's players show, once its download is ready.
-    skins: HashMap<u128, String>,
+    pub(super) skins: HashMap<u128, String>,
     skins_revision: u64,
     published_skins: Option<(usize, u128, u64, u64)>,
     listed: std::collections::HashSet<u128>,

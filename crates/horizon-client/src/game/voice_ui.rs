@@ -50,6 +50,72 @@ mod tests {
         }
     }
     #[test]
+    fn group_hud_selects_current_members_local_first_then_name() {
+        let mut s = state();
+        for (id, name, group) in [
+            (1, "Zoe", Some(7)),
+            (2, "Bob", Some(7)),
+            (3, "Alice", Some(7)),
+            (4, "Away", Some(8)),
+            (5, "Ungrouped", None),
+            (6, "Bob", Some(7)),
+        ] {
+            s.groups.players.insert(
+                id,
+                groups::Player {
+                    id,
+                    name: name.into(),
+                    group,
+                    disabled: false,
+                    disconnected: false,
+                },
+            );
+        }
+        assert!(group_members(&s.groups, 1).is_empty());
+        s.groups.current = Some(7);
+        assert_eq!(
+            group_members(&s.groups, 1)
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            [1, 3, 2, 6]
+        );
+        assert_eq!(
+            group_members(&s.groups, 99)
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            [3, 2, 6, 1]
+        );
+        s.groups.current = Some(9);
+        assert!(group_members(&s.groups, 1).is_empty());
+    }
+    #[test]
+    fn prompt_text_routes_filters_limits_and_backspaces_unicode() {
+        let mut s = state();
+        assert!(!s.type_text("ignored"));
+        s.creating = true;
+        assert!(s.type_text("A\n\té"));
+        assert_eq!(s.name, "Aé");
+        s.type_text(&"я".repeat(30));
+        assert_eq!(s.name.chars().count(), 24);
+        s.text_field().unwrap().pop();
+        assert_eq!(s.name.chars().count(), 23);
+        s.field = 1;
+        s.type_text("secret");
+        assert_eq!(s.password, "secret");
+        s.creating = false;
+        s.join = Some(7);
+        s.field = 0;
+        s.type_text("é");
+        assert_eq!(s.password, "secreté");
+        s.text_field().unwrap().pop();
+        assert_eq!(s.password, "secret");
+        s.open = false;
+        assert!(!s.type_text("ignored"));
+        assert!(s.text_field().is_none());
+    }
+    #[test]
     fn closing_resumes_only_when_opened_from_play() {
         for from_play in [false, true] {
             let mut s = state();
@@ -83,7 +149,40 @@ mod tests {
         assert_eq!(s.page_count(2), 0);
     }
 }
+fn group_members(groups: &groups::State, local: u128) -> Vec<&groups::Player> {
+    let Some(current) = groups.current else {
+        return Vec::new();
+    };
+    let mut members: Vec<_> = groups
+        .players
+        .values()
+        .filter(|p| p.group == Some(current))
+        .collect();
+    members.sort_by(|a, b| (a.id != local, &a.name, a.id).cmp(&(b.id != local, &b.name, b.id)));
+    members
+}
 impl State {
+    fn text_field(&mut self) -> Option<&mut String> {
+        if !self.open || (!self.creating && self.join.is_none()) {
+            return None;
+        }
+        Some(if self.field == 0 && self.creating {
+            &mut self.name
+        } else {
+            &mut self.password
+        })
+    }
+    fn type_text(&mut self, text: &str) -> bool {
+        let Some(target) = self.text_field() else {
+            return false;
+        };
+        for c in text.chars().filter(|c| !c.is_control()) {
+            if target.chars().count() < 24 {
+                target.push(c);
+            }
+        }
+        true
+    }
     fn close(&mut self) -> bool {
         self.open = false;
         self.close_prompt();
@@ -230,20 +329,72 @@ impl Game<'_> {
             s.field = 1 - s.field;
             return;
         }
-        let target = if s.field == 0 && s.creating {
-            &mut s.name
-        } else {
-            &mut s.password
-        };
         if key == KeyCode::Backspace {
-            target.pop();
+            self.voice_backspace();
         } else if let Some(t) = text {
-            for c in t.chars().filter(|c| !c.is_control()) {
-                if target.chars().count() < 24 {
-                    target.push(c);
-                }
-            }
+            self.voice_type(t);
         }
+    }
+    pub(super) fn voice_type(&mut self, text: &str) -> bool {
+        self.remote
+            .as_mut()
+            .is_some_and(|r| r.voice_ui.type_text(text))
+    }
+    pub(super) fn voice_backspace(&mut self) -> bool {
+        let Some(target) = self.remote.as_mut().and_then(|r| r.voice_ui.text_field()) else {
+            return false;
+        };
+        target.pop();
+        true
+    }
+    pub(super) fn draw_voice_group(&mut self, b: &mut HudBatch) {
+        if self.ui.hide_gui {
+            return;
+        }
+        let Some(r) = self.remote.as_ref() else {
+            return;
+        };
+        let Some(v) = r.voice.as_ref() else {
+            return;
+        };
+        if v.controls.disabled.load(Relaxed) {
+            return;
+        }
+        let members: Vec<_> = group_members(&r.voice_ui.groups, r.profile)
+            .into_iter()
+            .map(|p| {
+                let talking = if p.id == r.profile {
+                    v.controls.transmitting.load(Relaxed)
+                } else {
+                    r.voice_ui
+                        .local
+                        .heard
+                        .get(&p.id)
+                        .is_some_and(|last| players::talking(last.elapsed()))
+                };
+                let skin = r
+                    .skins
+                    .get(&p.id)
+                    .cloned()
+                    .unwrap_or_else(|| horizon_client::tab_list::default_skin(p.id).to_owned());
+                (p.id, skin, talking)
+            })
+            .collect();
+        let mut draws = Vec::new();
+        for (i, (id, skin, talking)) in members.into_iter().enumerate() {
+            let skin = self.face_skin(id, &skin);
+            let y = 4 + i as i32 * 18;
+            if talking {
+                let a = &self.gui.atlas;
+                let green = horizon_client::hud::rgba(85, 255, 85, 255);
+                b.fill(a, 3.0, (y - 1) as f32, 18.0, 1.0, green);
+                b.fill(a, 3.0, (y + 16) as f32, 18.0, 1.0, green);
+                b.fill(a, 3.0, y as f32, 1.0, 16.0, green);
+                b.fill(a, 20.0, y as f32, 1.0, 16.0, green);
+            }
+            horizon_client::tab_list::face(&mut draws, &skin, 4, y, 16, true, false, u32::MAX);
+        }
+        horizon_client::hud_layout::paint(b, &self.gui.atlas, &draws);
     }
     pub(super) fn draw_voice(&self, b: &mut HudBatch) {
         let Some(r) = self.remote.as_ref() else {

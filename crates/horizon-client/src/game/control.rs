@@ -237,6 +237,13 @@ impl Game<'_> {
     /// the screen takes it.
     pub(super) fn type_into_screen(&mut self, text: &str) -> Result<()> {
         if text == "\\b" {
+            if !self.dialog_open()
+                && !self.prompt_open()
+                && self.voice_open()
+                && self.voice_backspace()
+            {
+                return Ok(());
+            }
             match self.screen {
                 Screen::WorldOptions => {
                     self.world_options_text(None);
@@ -267,6 +274,9 @@ impl Game<'_> {
             return Ok(());
         }
         if self.prompt_open() {
+            return Ok(());
+        }
+        if self.voice_open() && self.voice_type(text) {
             return Ok(());
         }
         if let Some(result) = self.type_text_field_input(text) {
