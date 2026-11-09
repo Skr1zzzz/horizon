@@ -666,10 +666,10 @@ mod tests {
         assert_eq!(zh.get("Preset"), Some("预设"));
         assert_eq!(zh.get("%s chunks"), Some("%s 个区块"));
         // Not every bundle is complete: the en_us layer is in every map, so a
-        // missing key falls back to English (`horizon.mods.not_built` is not
+        // missing key falls back to English (`horizon.pvp.crosshair` is not
         // in ru_ru either).
         assert_eq!(zh.get("LOD Distance"), Some("LOD 距离"));
-        assert_eq!(ru.get("horizon.mods.not_built"), Some(" (Not built)"));
+        assert_eq!(ru.get("horizon.pvp.crosshair"), Some("Custom crosshair"));
         let pl = Language::load(&[&empty], "pl_pl");
         assert_eq!(pl.get("horizon.options.controller"), Some("Kontroler"));
         assert_eq!(pl.get("horizon.options.vibration"), Some("Wibracje"));
