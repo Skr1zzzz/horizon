@@ -1289,6 +1289,65 @@ impl Game<'_> {
             self.armor_stands[i].health = health;
         }
     }
+    /// Reuse the CPU world geometry so GUI previews retain the edited pose and equipment.
+    pub(super) fn draw_armor_stand_preview(
+        &self,
+        batch: &mut horizon_client::hud::HudBatch,
+        ox: f32,
+        oy: f32,
+    ) {
+        let Some((_, id, _)) = self.remote.as_ref().and_then(|r| r.armorstand.active) else {
+            return;
+        };
+        let Some(a) = self.armor_stands.iter().find(|a| a.id as i32 == id) else {
+            return;
+        };
+        let (cx, cy) = (ox + 88.0, oy + 43.0);
+        let yaw = ((cx - self.cursor.0) / 40.0).atan();
+        let pitch = ((cy - self.cursor.1) / 40.0).atan();
+        let base = glam::Mat4::from_rotation_y((-yaw * 20.0).to_radians())
+            * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
+            * glam::Mat4::from_translation(glam::Vec3::new(0.0, -1.501, 0.0));
+        let mut verts = Vec::new();
+        horizon_client::mobs::cem_anim::in_gui(|| {
+            self.armor_stand_vertices(a, base, 240 | 240 << 8, None, &mut verts);
+        });
+        let size = if a.small { 58.0 } else { 29.0 };
+        let height = if a.small { 0.9875 } else { 1.975 };
+        let gui = glam::Mat4::from_translation(glam::Vec3::new(cx, cy, 0.0))
+            * glam::Mat4::from_scale(glam::Vec3::new(size, size, -size))
+            * glam::Mat4::from_translation(glam::Vec3::new(0.0, height / 2.0, 0.0))
+            * glam::Mat4::from_rotation_z(std::f32::consts::PI)
+            * glam::Mat4::from_rotation_x((pitch * 20.0).to_radians());
+        let mut quads = Vec::new();
+        for q in verts.as_chunks::<4>().0 {
+            let p: [glam::Vec3; 4] =
+                std::array::from_fn(|i| gui.transform_point3(glam::Vec3::from_array(q[i].pos)));
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            if n.z >= 0.0 {
+                continue;
+            }
+            let n = n.normalize_or_zero();
+            let shade = (0.55 + 0.45 * -n.z - 0.15 * n.y).clamp(0.4, 1.0);
+            let c = q[0].color;
+            let ch = |s: u32| ((((c >> s) & 255) as f32 * shade) as u32) << s;
+            let color = (c & 0xff00_0000) | ch(0) | ch(8) | ch(16);
+            let depth = p.iter().map(|v| v.z).sum::<f32>() / 4.0;
+            quads.push((
+                depth,
+                p.map(|v| [v.x, v.y]),
+                std::array::from_fn::<_, 4, _>(|i| q[i].uv),
+                color,
+            ));
+        }
+        quads.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let start = batch.vertices.len();
+        for (_, p, uv, color) in quads {
+            batch.quad(p, uv, color);
+        }
+        batch.clip_since(start, ox + 62.0, oy + 8.0, ox + 114.0, oy + 78.0);
+    }
+
     /// ArmorStandRenderer: the stand with its default pose, then armor layers.
     pub(super) fn armor_stand_geometry(
         &self,

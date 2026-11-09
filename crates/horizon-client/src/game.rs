@@ -8505,7 +8505,11 @@ impl Game<'_> {
             Screen::Inventory => {
                 let from = batch.vertices.len();
                 self.draw_inventory(&mut batch);
-                if self.remote.as_ref().is_some_and(|r| r.armorstand.active.is_some_and(|s| s.2 == 5)) {
+                if self
+                    .remote
+                    .as_ref()
+                    .is_some_and(|r| r.armorstand.active.is_some_and(|s| s.2 == 5))
+                {
                     self.draw_armorstand(&mut batch);
                 }
                 self.draw_mod_browser(&mut batch);
@@ -14732,31 +14736,17 @@ impl Game<'_> {
             use std::sync::atomic::Ordering::Relaxed;
             let disabled = v.controls.disabled.load(Relaxed);
             let muted = v.controls.muted.load(Relaxed);
-            use horizon_client::voicechat::hud::{Icon, state};
+            use horizon_client::voicechat::hud::{draw, state};
             if let Some(icon) = state(
                 v.controls.connected.load(Relaxed),
                 muted,
                 disabled,
                 v.controls.transmitting.load(Relaxed),
             ) {
-                let color = match icon {
-                    Icon::Disconnected => 0xffffaa00,
-                    Icon::Disabled => 0xff777777,
-                    Icon::Muted => 0xffff5555,
-                    Icon::Talking => 0xff55ff55,
-                };
-                let atlas = &self.gui.atlas;
-                let y = hud.height - 54.0;
-                hud.fill(atlas, 8.0, y, 4.0, 7.0, color);
-                hud.fill(atlas, 6.0, y + 6.0, 8.0, 2.0, color);
-                hud.fill(atlas, 9.0, y + 8.0, 2.0, 3.0, color);
-                if matches!(icon, Icon::Disabled | Icon::Muted) {
-                    hud.fill(atlas, 5.0, y + 2.0, 10.0, 2.0, color);
-                }
-                if icon == Icon::Disconnected {
-                    hud.fill(atlas, 17.0, y, 2.0, 6.0, color);
-                    hud.fill(atlas, 17.0, y + 8.0, 2.0, 2.0, color);
-                }
+                // The bottom-left corner below the chat lines (they end 40 px above the
+                // bottom), 16 px in from both edges.
+                let y = hud.height - 32.0;
+                draw(&mut hud, &self.gui.atlas, [16.0, y], icon);
             }
         }
         self.flush_ime(&mut hud);

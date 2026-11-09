@@ -434,9 +434,14 @@ impl Game<'_> {
                 );
                 horizon_client::widgets::record(&label.plain(), [x, y, 14.0, 14.0], true);
                 batch.fill(atlas, x, y, 14.0, 14.0, 0xff20222c);
-                batch.fill(atlas, x + 6.0, y + 2.0, 3.0, 7.0, 0xffecedf3);
-                batch.fill(atlas, x + 4.0, y + 9.0, 7.0, 1.0, 0xffecedf3);
-                batch.fill(atlas, x + 7.0, y + 10.0, 1.0, 3.0, 0xffecedf3);
+                horizon_client::voicechat::hud::draw_microphone(
+                    batch,
+                    atlas,
+                    [x + 2.5, y + 1.0],
+                    0.75,
+                    horizon_client::hud::rgba(255, 255, 255, 255),
+                    horizon_client::voicechat::hud::Icon::Talking,
+                );
             }
             return;
         }

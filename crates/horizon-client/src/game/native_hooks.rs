@@ -12312,6 +12312,8 @@ impl Game<'_> {
             .and_then(|r| r.pod_menu.as_ref())
             .is_some_and(|m| m.menu == "armorstands:inventory");
         if armorstand {
+            batch.fill(atlas, ox + 62.0, oy + 8.0, 52.0, 70.0, rgba(0, 0, 0, 255));
+            self.draw_armor_stand_preview(batch, ox, oy);
             batch.text(
                 atlas,
                 &horizon_client::lang::get("item.minecraft.armor_stand"),
@@ -12324,11 +12326,12 @@ impl Game<'_> {
             batch.text_styled(atlas, &title, ox + 8.0, oy + 6.0, grey, false);
         }
         let inventory = self.translate("container.inventory", "Inventory");
-        let label_y = oy + if armorstand {
-            horizon_client::armorstand::INVENTORY_LABEL_Y
-        } else {
-            s.screen.inventory_y - 11.0
-        };
+        let label_y = oy
+            + if armorstand {
+                horizon_client::armorstand::INVENTORY_LABEL_Y
+            } else {
+                s.screen.inventory_y - 11.0
+            };
         batch.text(atlas, &inventory, ox + 8.0, label_y, grey, false);
         true
     }
