@@ -69,6 +69,7 @@
   "horizon.voice.next": "Далее >",
   "horizon.voice.done": "Готово",
   "horizon.voice.muted": "Микрофон выключен",
+  "horizon.pod.restart": "Моды сервера установлены. Перезапусти Horizon и зайди снова (нужно один раз после обновления модов сервера).",
   "horizon.voice.unmuted": "Микрофон включён",
   "horizon.voice.disabled": "Голосовой чат отключён",
   "horizon.voice.enabled": "Голосовой чат включён",

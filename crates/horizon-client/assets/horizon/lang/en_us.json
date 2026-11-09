@@ -884,6 +884,7 @@
   "horizon.voice.next": "Next page",
   "horizon.voice.done": "Done",
   "horizon.voice.muted": "Microphone muted",
+  "horizon.pod.restart": "The server's mods were installed. Restart Horizon and join again (needed once after the server's mods change).",
   "horizon.voice.unmuted": "Microphone unmuted",
   "horizon.voice.disabled": "Voice chat disabled",
   "horizon.voice.enabled": "Voice chat enabled",

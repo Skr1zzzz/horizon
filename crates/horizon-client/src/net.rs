@@ -1192,7 +1192,9 @@ fn configure(
                     .into_iter()
                     .collect();
                 let _ = send.send(Event::PodEnabled(enabled));
-                return Err(Reason::plain(messages.join("\n")));
+                // Blocks register at start-up only: a pack reload refuses the larger block
+                // registry, so the player restarts (the details are in the log).
+                return Err(Reason::keyed("horizon.pod.restart", lang));
             }
         }
         let (id, payload) = reader
