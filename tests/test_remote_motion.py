@@ -14,6 +14,10 @@ class RemoteMotionTests(unittest.TestCase):
         source = (next(ROOT.glob('crates/horizon-client/src/game/*/remote/entity_updates.rs'))).read_text()
         start = source.index("    pub(super) fn remote_motion_body(")
         end = source.index("    pub(super) fn apply_remote_health_body(", start)
+        # The kinds that have a list of their own, as the handler reads them (#13007).
+        module = (next(ROOT.glob('crates/horizon-client/src/game/*/remote/mod.rs'))).read_text()
+        own_start = module.rindex("#[derive", 0, module.index("enum OwnList {"))
+        own_end = module.index("\n}\n", module.index("impl OwnList {")) + 3
         fixture = r'''
 #![allow(dead_code)]
 use std::collections::HashMap;
@@ -33,8 +37,10 @@ struct Entity {
 trait EditEntity { fn update<R>(&mut self, i: usize, edit: impl FnOnce(&mut Entity) -> R) -> R; }
 impl EditEntity for Vec<Entity> { fn update<R>(&mut self, i: usize, edit: impl FnOnce(&mut Entity) -> R) -> R { edit(&mut self[i]) }
 }
+struct Tracked { kind: String }
 #[derive(Default)]
-struct Remote { pending_items: HashMap<i32, ((), Vec3)> }
+struct Remote { pending_items: HashMap<i32, ((), Vec3)>, entities: HashMap<i32, Tracked> }
+OWN_LIST
 #[derive(Default)]
 struct Creatures { projectiles: Vec<Entity> }
 #[derive(Default)]
@@ -100,8 +106,19 @@ fn main() {
     assert_eq!(game.tridents[0].in_ground_time, 0);
     game.remote_motion(45, [0.1, 0.0, 0.0]);
     assert!(!game.tridents[0].in_ground);
+    // A falling block, an item, TNT or an orb looks only in its own list (#13007): a mob
+    // under the same id, which the mob index would find first, is left alone.
+    let mut remote = Remote::default();
+    remote.entities.insert(50, Tracked { kind: "minecraft:falling_block".into() });
+    game.remote = Some(remote);
+    game.mobs.push(Entity { id: 50, ..Entity::default() });
+    game.falling.push(Entity { id: 50, ..Entity::default() });
+    game.remote_motion(50, [0.0, -0.5, 0.0]);
+    assert_eq!(game.falling[0].velocity, Vec3::new(0.0, -0.5, 0.0));
+    assert_eq!(game.mobs.last().unwrap().velocity, Vec3::default());
 }
-'''.replace("METHOD", source[start:end].replace("pub(super) fn", "fn").replace("_body(", "("))
+'''.replace("METHOD", source[start:end].replace("pub(super) fn", "fn").replace("_body(", "(")).replace(
+            "OWN_LIST", module[own_start:own_end])
         with tempfile.TemporaryDirectory(prefix="remote-motion-") as directory:
             path = Path(directory)
             (path / "main.rs").write_text(fixture)

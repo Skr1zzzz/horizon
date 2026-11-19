@@ -169,6 +169,7 @@ horizon-client game::remote::interaction_event_tests::mapping_press_tests::openi
 horizon-client game::remote::interaction_event_tests::mapping_press_tests::the_host_presses_by_name_and_refuses_the_others lib daily resources
 horizon-client game::remote::interaction_event_tests::predicted_use_tests::native_client_prediction_owns_the_hand_loop lib daily game-boot
 horizon-client game::remote::interaction_event_tests::predicted_use_tests::wasm_client_prediction_owns_the_hand_loop lib daily wasm-fixture
+horizon-client game::remote::own_list_tests::moves_and_motion_reach_their_own_list lib daily resources
 horizon-client game::remote::tests::predicted_block_notice_tests::applied_placement_carries_predicted_true lib daily game-boot
 horizon-client game::remote::tests::predicted_block_notice_tests::confirmed_prediction_has_no_duplicate lib daily game-boot
 horizon-client game::remote::tests::predicted_block_notice_tests::denied_prediction_notifies_predicted_to_server_once lib daily game-boot
