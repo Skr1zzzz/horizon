@@ -253,6 +253,36 @@ pub(super) struct Tracked {
     pub(in crate::game) vehicle: Option<u32>,
 }
 
+/// The kinds `AddEntity` puts in a list of their own (`dropped`, `falling`,
+/// `tnts`, `orbs`) and nowhere else. A packet for one of them looks only in
+/// that list: the mob index's miss walks every mob, and the lists searched
+/// before theirs can be thousands long (#13007).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnList {
+    Item,
+    Falling,
+    Tnt,
+    Orb,
+}
+
+impl OwnList {
+    fn of(kind: &str) -> Option<Self> {
+        match kind {
+            "minecraft:item" => Some(Self::Item),
+            "minecraft:falling_block" => Some(Self::Falling),
+            "minecraft:tnt" => Some(Self::Tnt),
+            "minecraft:experience_orb" => Some(Self::Orb),
+            _ => None,
+        }
+    }
+
+    /// Whether an entity whose kind has list `own` (None: any other kind, or
+    /// untracked) can be in `list`.
+    fn may_be(own: Option<Self>, list: Self) -> bool {
+        own.is_none_or(|own| own == list)
+    }
+}
+
 /// `Entity.startRiding` / `removePassenger` for a `SetPassengers` packet: the
 /// listed entities ride `vehicle`, the ones that rode it and are no longer
 /// listed got off. Every tracked entity counts, whatever its type, so a
@@ -2431,6 +2461,9 @@ mod interaction_event_tests;
 
 #[cfg(test)]
 mod native_entity_tests;
+
+#[cfg(test)]
+mod own_list_tests;
 
 #[cfg(test)]
 mod effect_blend_tests;

@@ -99,15 +99,18 @@ impl Game<'_> {
         // dragon where it spawned (arismoko/horizon#2083).
         let dragon = self.dragon.as_ref().is_some_and(|d| d.id as i32 == id);
         let driven = self.driven_mount().is_some_and(|m| m.id as i32 == id);
-        let mob = self
-            .mob_index
-            .get_mut(&mut self.mobs, id as u32)
-            .filter(|_| !dragon);
-        let tracked = self
+        let (tracked, own) = self
             .remote
             .as_ref()
             .and_then(|r| r.entities.get(&id))
-            .map(|t| t.position);
+            .map_or((None, None), |t| (Some(t.position), OwnList::of(&t.kind)));
+        let mob = match own {
+            Some(_) => None,
+            None => self
+                .mob_index
+                .get_mut(&mut self.mobs, id as u32)
+                .filter(|_| !dragon),
+        };
         let position = path
             .as_ref()
             .map(Path::end)
@@ -172,7 +175,9 @@ impl Game<'_> {
             }
             // An armor stand is a living entity too: the same handler, over
             // its type's update interval, stepped in `tick_remote_entities`.
-            if let Some(a) = self.armor_stands.iter_mut().find(|a| a.id == id as u32) {
+            if own.is_none()
+                && let Some(a) = self.armor_stands.iter_mut().find(|a| a.id == id as u32)
+            {
                 let entity = PosRot {
                     position: [a.position.x, a.position.y, a.position.z],
                     yaw: a.yaw,
@@ -205,11 +210,12 @@ impl Game<'_> {
             // flies them on (`tick_remote_projectiles`). Eased towards it
             // instead, they only moved when an update came, every 10 to 20
             // ticks.
-            if let Some(i) = self
-                .creatures
-                .projectiles
-                .iter()
-                .position(|p| p.id == id as u32)
+            if own.is_none()
+                && let Some(i) = self
+                    .creatures
+                    .projectiles
+                    .iter()
+                    .position(|p| p.id == id as u32)
             {
                 self.creatures.projectiles.update(i, |p| {
                     if path.is_some() {
@@ -223,6 +229,7 @@ impl Game<'_> {
                 return;
             }
             if path.is_some()
+                && own.is_none()
                 && (self.potions.move_remote_thrown(
                     id as u32,
                     Vec3::new(position[0], position[1], position[2]),
@@ -232,7 +239,7 @@ impl Game<'_> {
             }
             // A fishing hook keeps a LinearInterpolationHandler: eased towards the
             // update over three ticks, on top of its own movement (`tick_remote_hooks`).
-            if path.is_some() {
+            if path.is_some() && own.is_none() {
                 if let Some(h) = self.hook.as_mut().filter(|h| h.id() == id as u32) {
                     h.move_to(position, on_ground);
                     return;
@@ -243,7 +250,9 @@ impl Game<'_> {
                 }
             }
             // A thrown trident is an arrow: placed at once, flown on by its tick.
-            if let Some(t) = self.tridents.iter_mut().find(|t| t.id == id as u32) {
+            if own.is_none()
+                && let Some(t) = self.tridents.iter_mut().find(|t| t.id == id as u32)
+            {
                 if path.is_some() {
                     t.position = Vec3::new(position[0], position[1], position[2]);
                 }
@@ -255,6 +264,7 @@ impl Game<'_> {
             }
             // So does a firework rocket: its own tick flies it on.
             if path.is_some()
+                && own.is_none()
                 && let Some(f) = self.rockets.iter_mut().find(|f| f.id == id as u32)
             {
                 f.position = Vec3::new(position[0], position[1], position[2]);
@@ -268,16 +278,22 @@ impl Game<'_> {
             // at once, and their own tick moves them on between the server's
             // updates (`tick_remote_entities`, `tick_remote_projectiles`).
             let at = Vec3::new(position[0], position[1], position[2]);
-            if let Some(d) = self.dropped.iter_mut().find(|d| d.id == id as u32) {
+            if OwnList::may_be(own, OwnList::Item)
+                && let Some(d) = self.dropped.iter_mut().find(|d| d.id == id as u32)
+            {
                 d.position = at;
                 d.on_ground = on_ground;
                 return;
             }
-            if let Some(i) = self.falling.iter().rposition(|f| f.id == id as u32) {
+            if OwnList::may_be(own, OwnList::Falling)
+                && let Some(i) = self.falling.iter().rposition(|f| f.id == id as u32)
+            {
                 self.falling.update(i, |f| f.position = at);
                 return;
             }
-            if let Some(t) = self.tnts.iter_mut().rev().find(|t| t.id == id as u32) {
+            if OwnList::may_be(own, OwnList::Tnt)
+                && let Some(t) = self.tnts.iter_mut().rev().find(|t| t.id == id as u32)
+            {
                 t.position = at;
                 t.on_ground = on_ground;
                 return;
@@ -286,7 +302,9 @@ impl Game<'_> {
             // LinearInterpolationHandler: the correction is spread over 3
             // ticks (`tick_remote_entities`), while `ExperienceOrb.tick` keeps
             // moving it.
-            if let Some(o) = self.orbs.iter_mut().find(|o| o.id == id as u32) {
+            if OwnList::may_be(own, OwnList::Orb)
+                && let Some(o) = self.orbs.iter_mut().find(|o| o.id == id as u32)
+            {
                 o.on_ground = on_ground;
                 r.lerps.insert(
                     id,

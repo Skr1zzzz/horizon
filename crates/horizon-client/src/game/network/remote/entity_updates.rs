@@ -34,26 +34,44 @@ impl Game<'_> {
     pub(super) fn remote_motion_body(&mut self, id: i32, velocity: [f64; 3]) {
         self.remote_dragon_motion(id, velocity);
         let v = Vec3::new(velocity[0], velocity[1], velocity[2]);
+        let own = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.entities.get(&id))
+            .and_then(|t| OwnList::of(&t.kind));
         // `falling` and `tnts` are searched from the back: AddEntity calls this right after
         // appending the block or TNT, so a spawn doesn't walk the whole list.
-        if let Some(m) = self.mob_index.get_mut(&mut self.mobs, id as u32) {
+        if own.is_none()
+            && let Some(m) = self.mob_index.get_mut(&mut self.mobs, id as u32)
+        {
             // Squid.aiStep derives its body pitch and roll from network motion.
             m.velocity = v;
-        } else if let Some(d) = self.dropped.iter_mut().find(|d| d.id == id as u32) {
+        } else if OwnList::may_be(own, OwnList::Item)
+            && let Some(d) = self.dropped.iter_mut().find(|d| d.id == id as u32)
+        {
             d.velocity = v;
-        } else if let Some(i) = self.falling.iter().rposition(|f| f.id == id as u32) {
+        } else if OwnList::may_be(own, OwnList::Falling)
+            && let Some(i) = self.falling.iter().rposition(|f| f.id == id as u32)
+        {
             self.falling.update(i, |f| f.velocity = v);
-        } else if let Some(t) = self.tnts.iter_mut().rev().find(|t| t.id == id as u32) {
+        } else if OwnList::may_be(own, OwnList::Tnt)
+            && let Some(t) = self.tnts.iter_mut().rev().find(|t| t.id == id as u32)
+        {
             t.velocity = v;
-        } else if let Some(o) = self.orbs.iter_mut().find(|o| o.id == id as u32) {
+        } else if OwnList::may_be(own, OwnList::Orb)
+            && let Some(o) = self.orbs.iter_mut().find(|o| o.id == id as u32)
+        {
             o.velocity = v;
-        } else if let Some(i) = self.carts.iter().position(|c| c.id == id as u32) {
+        } else if own.is_none()
+            && let Some(i) = self.carts.iter().position(|c| c.id == id as u32)
+        {
             self.carts.update(i, |c| c.velocity = v);
-        } else if let Some(i) = self
-            .creatures
-            .projectiles
-            .iter()
-            .position(|p| p.id == id as u32)
+        } else if own.is_none()
+            && let Some(i) = self
+                .creatures
+                .projectiles
+                .iter()
+                .position(|p| p.id == id as u32)
         {
             self.creatures.projectiles.update(i, |p| {
                 p.velocity = v;
@@ -67,7 +85,9 @@ impl Game<'_> {
                     }
                 }
             });
-        } else if let Some(t) = self.tridents.iter_mut().find(|t| t.id == id as u32) {
+        } else if own.is_none()
+            && let Some(t) = self.tridents.iter_mut().find(|t| t.id == id as u32)
+        {
             t.velocity = v;
             // AbstractArrow.lerpMotion (ThrownTrident keeps it): `life`
             // restarts, and a trident set moving leaves its block.
@@ -75,9 +95,11 @@ impl Game<'_> {
             if t.in_ground && v.length_squared() > 0.0 {
                 t.in_ground = false;
             }
-        } else if let Some(r) = self.rockets.iter_mut().find(|r| r.id == id as u32) {
+        } else if own.is_none()
+            && let Some(r) = self.rockets.iter_mut().find(|r| r.id == id as u32)
+        {
             r.velocity = v;
-        } else if self.remote_hook_motion(id as u32, v) {
+        } else if own.is_none() && self.remote_hook_motion(id as u32, v) {
         } else if let Some(p) = self
             .remote
             .as_mut()
