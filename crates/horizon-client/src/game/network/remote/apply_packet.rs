@@ -93,6 +93,7 @@ impl Game<'_> {
                     // handleLogin makes a new ClientLevel: its predictions count from 0.
                     r.sequence = 0;
                     r.own_invisible = false;
+                    r.own_glowing = false;
                     r.own_on_fire = false;
                     r.online_mode = p.online_mode;
                     r.levels.clone_from(&p.levels);
@@ -163,6 +164,7 @@ impl Game<'_> {
                     self.experience.score = 0;
                     if let Some(r) = self.remote.as_mut() {
                         r.own_invisible = false;
+                        r.own_glowing = false;
                         r.own_on_fire = false;
                         r.local_entity_silent = false;
                     }
@@ -698,6 +700,8 @@ impl Game<'_> {
                             // Its invisible bit (Entity.isInvisible): the
                             // Invisibility effect's, or a plugin's that hides
                             // the real body under a pose (arismoko/horizon#3788).
+                            // Its glowing bit: the Glowing tag's or effect's, for
+                            // the outline of the player's own body (#18838).
                             (0, Value::Byte(flags)) => {
                                 if let Some(pl) = self.player.as_mut() {
                                     pl.sprinting = flags & 0x08 != 0;
@@ -716,6 +720,7 @@ impl Game<'_> {
                                 let on_fire = flags & 0x01 != 0;
                                 if let Some(r) = self.remote.as_mut() {
                                     r.own_invisible = flags & 0x20 != 0;
+                                    r.own_glowing = flags & 0x40 != 0;
                                     let was_on_fire =
                                         std::mem::replace(&mut r.own_on_fire, on_fire);
                                     // The server put the fire out: the
