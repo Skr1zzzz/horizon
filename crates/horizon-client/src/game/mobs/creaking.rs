@@ -38,9 +38,15 @@ struct Host<'a> {
     creaking: Option<Arc<MobType>>,
     next_entity: &'a mut u32,
     spawning: bool,
+    /// Every player in the level: its own, and the guests or server players
+    /// in it (a server has no player of its own).
+    players: Vec<(Vec3, bool)>,
     /// The game's index of `mobs` by id: a heart asks for its creaking a
     /// few times a tick.
     index: std::cell::RefCell<super::mob_index::MobIndex>,
+    /// The eyes of the level's players that are not spectators: its own,
+    /// and the guests or server players in it.
+    player_eyes: Vec<[f64; 3]>,
 }
 impl Host<'_> {
     /// The slot of the live mob `id` in `mobs`, as a scan for the first
@@ -53,6 +59,9 @@ impl Host<'_> {
     }
 }
 impl HeartHost for Host<'_> {
+    fn players(&self) -> &[(Vec3, bool)] {
+        &self.players
+    }
     fn mob(&self, id: u32) -> Option<&Mob> {
         match self.slot(id) {
             Some(slot) => Some(&self.mobs[slot]),
@@ -91,6 +100,9 @@ impl HeartHost for Host<'_> {
     }
     fn spawning_monsters(&self) -> bool {
         self.spawning
+    }
+    fn player_eyes(&self) -> &[[f64; 3]] {
+        &self.player_eyes
     }
 }
 
@@ -137,6 +149,22 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
+        // Only the update looks for a player near the heart.
+        let players: Vec<_> = if others {
+            self.level_players_iter()
+                .map(|p| (p.position, p.spectator))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // And for a player stuck in its creaking (`playerIsStuckInYou`).
+        let player_eyes: Vec<[f64; 3]> = if others {
+            let local = self.player_view().filter(|p| !p.spectator).map(|p| p.eye);
+            let guests = self.lan_present().into_iter().filter(|g| !g.spectator);
+            local.into_iter().chain(guests.map(|g| g.eye)).collect()
+        } else {
+            Vec::new()
+        };
         let mut events = Vec::new();
         let index = std::cell::RefCell::new(std::mem::take(&mut self.mob_index));
         let (added, index) = {
@@ -148,7 +176,9 @@ impl Game<'_> {
                 creaking,
                 next_entity: &mut next_entity,
                 spawning,
+                players,
                 index,
+                player_eyes,
             };
             f(heart, w.as_ref(), &mut random, &mut host, &mut events);
             (host.added, host.index.into_inner())

@@ -380,21 +380,20 @@ fn check_can_move(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) -> bool
     }
     true
 }
-/// `Creaking.playerIsStuckInYou`: the player's eyes inside it for more than 4 ticks.
-pub fn player_is_stuck(m: &mut Mob, eye: Option<[f64; 3]>) -> bool {
-    let Some(eye) = eye else {
-        m.extra.ints[STUCK] = 0;
-        return false;
-    };
+/// `Creaking.playerIsStuckInYou`: the eyes of a player in its
+/// `NEAREST_PLAYERS` (`eyes`) inside it for more than 4 ticks.
+pub fn player_is_stuck(m: &mut Mob, eyes: &[[f64; 3]]) -> bool {
     let b = m.bounds();
     let (lo, hi) = (b.min_position(), b.max_position());
     // AABB.contains: the far faces are outside.
-    let inside = eye[0] >= lo.x
-        && eye[0] < hi.x
-        && eye[1] >= lo.y
-        && eye[1] < hi.y
-        && eye[2] >= lo.z
-        && eye[2] < hi.z;
+    let inside = eyes.iter().any(|eye| {
+        eye[0] >= lo.x
+            && eye[0] < hi.x
+            && eye[1] >= lo.y
+            && eye[1] < hi.y
+            && eye[2] >= lo.z
+            && eye[2] < hi.z
+    });
     if inside {
         m.extra.ints[STUCK] += 1;
         m.extra.ints[STUCK] > 4

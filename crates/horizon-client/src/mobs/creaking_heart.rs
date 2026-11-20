@@ -54,8 +54,12 @@ pub enum HeartEvent {
     Mob(MobEvent),
 }
 
-/// The mobs a heart sees and the creakings it spawns.
+/// The mobs and players a heart sees and the creakings it spawns.
 pub trait HeartHost {
+    /// `Level.players()`: where each player in the heart's level stands and
+    /// whether it is a spectator. A server has no player of its own: these
+    /// are the players it serves.
+    fn players(&self) -> &[(Vec3, bool)];
     fn mob(&self, id: u32) -> Option<&Mob>;
     fn mob_mut(&mut self, id: u32) -> Option<&mut Mob>;
     /// The loaded mob with this UUID.
@@ -69,6 +73,9 @@ pub trait HeartHost {
     fn add_mob(&mut self, m: Mob);
     /// `ServerLevel.isSpawningMonsters` (rules and difficulty).
     fn spawning_monsters(&self) -> bool;
+    /// `Player.getEyePosition` of each player in the heart's level that is
+    /// not a spectator (`PlayerSensor` lists none in `NEAREST_PLAYERS`).
+    fn player_eyes(&self) -> &[[f64; 3]];
 }
 
 /// Block reads during a tick see the tick's own changes.
@@ -135,6 +142,17 @@ fn has_required_logs(b: &Blocks, state: BlockStateId, pos: [i32; 3]) -> bool {
     })
 }
 
+/// `Level.getNearestPlayer(x, y, z, 32, false) != null` at the heart's
+/// corner: any player in the level within 32 blocks that is not a spectator
+/// (`EntitySelector.NO_SPECTATORS`).
+fn player_near(host: &impl HeartHost, pos: [i32; 3]) -> bool {
+    let (x, y, z) = (f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]));
+    host.players().iter().any(|&(p, spectator)| {
+        let (dx, dy, dz) = (p.x - x, p.y - y, p.z - z);
+        !spectator && dx * dx + dy * dy + dz * dz < 32.0 * 32.0
+    })
+}
+
 /// `getCreakingProtector`: the protector's entity, resolving a UUID read
 /// from a save (forgotten 30 ticks after the heart came back unresolved).
 pub fn protector(heart: &mut CreakingHeart, host: &impl HeartHost) -> Option<u32> {
@@ -167,6 +185,18 @@ fn distance_to_creaking(heart: &mut CreakingHeart, pos: [i32; 3], host: &impl He
             );
             m.distance_sqr(at).sqrt()
         })
+}
+/// `Creaking.playerIsStuckInYou` of the protector `id`. The mob AI's
+/// `NEAREST_PLAYERS` says only whether the creaking lists a player (the one
+/// it sees: on a server, the guest it was ticked with), so once it does, the
+/// eyes of every player in the level that is not a spectator are looked at:
+/// a player whose eyes are inside the creaking is near it.
+fn protector_stuck(host: &mut impl HeartHost, id: u32) -> bool {
+    let eyes = host.player_eyes().to_vec();
+    host.mob_mut(id).is_some_and(|m| {
+        let listed = super::monster_brain::nearest_players(m).contains(&super::Who::Player);
+        creaking::player_is_stuck(m, if listed { eyes.as_slice() } else { &[] })
+    })
 }
 /// `computeAnalogOutputSignal`.
 fn output_signal(heart: &mut CreakingHeart, pos: [i32; 3], host: &impl HeartHost) -> i32 {
@@ -626,31 +656,604 @@ pub fn server_tick_update(
     }
     if heart.creaking.is_none() {
         let awake = b.prop(updated, "creaking_heart_state").as_deref() == Some("awake");
-        if awake && host.spawning_monsters() {
-            // getNearestPlayer(pos, 32, false): no spectators.
-            let (x, y, z) = (f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]));
-            let near = w.selected_player().is_some_and(|p| {
-                !p.spectator
-                    && (p.position.x - x).powi(2)
-                        + (p.position.y - y).powi(2)
-                        + (p.position.z - z).powi(2)
-                        < 32.0 * 32.0
-            });
-            if near && let Some(id) = spawn_protector(pos, w, lr, host, out) {
-                let uuid = host.uuid_for(id);
-                heart.creaking = Some((Some(id), uuid));
-            }
+        if awake
+            && host.spawning_monsters()
+            && player_near(host, pos)
+            && let Some(id) = spawn_protector(pos, w, lr, host, out)
+        {
+            let uuid = host.uuid_for(id);
+            heart.creaking = Some((Some(id), uuid));
         }
     } else if let Some(id) = protector(heart, host) {
         let persistent = host.mob(id).is_some_and(|m| m.persistent);
-        // playerIsStuckInYou reads the creaking's NEAREST_PLAYERS.
-        let stuck = host.mob_mut(id).is_some_and(|m| {
-            let listed = super::monster_brain::nearest_players(m).contains(&super::Who::Player);
-            let eye = w.selected_player().filter(|_| listed).map(|p| p.eye);
-            creaking::player_is_stuck(m, eye)
-        });
+        let stuck = protector_stuck(host, id);
         if !active && !persistent || distance_to_creaking(heart, pos, host) > TOO_FAR || stuck {
             remove_protector(heart, host, false, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_core::{
+        geometry::{Axis, VoxelShape},
+        nbt::Tag,
+    };
+
+    /// A level as a heart's spawn check sees it: its players, no mobs.
+    struct Level(Vec<(Vec3, bool)>);
+    impl HeartHost for Level {
+        fn players(&self) -> &[(Vec3, bool)] {
+            &self.0
+        }
+        fn mob(&self, _: u32) -> Option<&Mob> {
+            None
+        }
+        fn mob_mut(&mut self, _: u32) -> Option<&mut Mob> {
+            None
+        }
+        fn mob_for_uuid(&self, _: [i32; 4]) -> Option<u32> {
+            None
+        }
+        fn uuid_for(&mut self, _: u32) -> [i32; 4] {
+            unreachable!("no creaking is spawned here")
+        }
+        fn creaking_type(&self) -> Option<Arc<MobType>> {
+            None
+        }
+        fn create_mob(&mut self, _: Arc<MobType>, _: Vec3) -> Mob {
+            unreachable!("no creaking is spawned here")
+        }
+        fn add_mob(&mut self, _: Mob) {
+            unreachable!("no creaking is spawned here")
+        }
+        fn spawning_monsters(&self) -> bool {
+            true
+        }
+        fn player_eyes(&self) -> &[[f64; 3]] {
+            &[]
+        }
+    }
+
+    /// `getNearestPlayer(pos, 32, false)` asks every player in the level. A
+    /// server has no player of its own, so a heart there must see the player
+    /// it serves standing 10 blocks away, or it never spawns its creaking
+    /// (#15127). A spectator never counts, and 32 blocks is already too far.
+    #[test]
+    fn a_heart_sees_the_players_a_server_serves() {
+        let pos = [0, 64, 0];
+        let near = |players: &[(Vec3, bool)]| player_near(&Level(players.to_vec()), pos);
+        assert!(near(&[(Vec3::new(10.0, 64.0, 0.0), false)]));
+        assert!(near(&[
+            (Vec3::new(5.0, 64.0, 0.0), true),
+            (Vec3::new(0.0, 70.0, 31.0), false),
+        ]));
+        assert!(!near(&[]));
+        assert!(!near(&[(Vec3::new(10.0, 64.0, 0.0), true)]));
+        assert!(!near(&[(Vec3::new(32.0, 64.0, 0.0), false)]));
+    }
+
+    /// A heart's protector and the eyes of the players in its level.
+    struct Protector {
+        creaking: Mob,
+        eyes: Vec<[f64; 3]>,
+    }
+    impl HeartHost for Protector {
+        fn players(&self) -> &[(Vec3, bool)] {
+            &[]
+        }
+        fn player_eyes(&self) -> &[[f64; 3]] {
+            &self.eyes
+        }
+        fn mob(&self, id: u32) -> Option<&Mob> {
+            Some(&self.creaking).filter(|m| m.id == id)
+        }
+        fn mob_mut(&mut self, id: u32) -> Option<&mut Mob> {
+            Some(&mut self.creaking).filter(|m| m.id == id)
+        }
+        fn mob_for_uuid(&self, _: [i32; 4]) -> Option<u32> {
+            None
+        }
+        fn uuid_for(&mut self, _: u32) -> [i32; 4] {
+            unreachable!("no creaking is spawned here")
+        }
+        fn creaking_type(&self) -> Option<Arc<MobType>> {
+            None
+        }
+        fn create_mob(&mut self, _: Arc<MobType>, _: Vec3) -> Mob {
+            unreachable!("no creaking is spawned here")
+        }
+        fn add_mob(&mut self, _: Mob) {
+            unreachable!("no creaking is spawned here")
+        }
+        fn spawning_monsters(&self) -> bool {
+            true
+        }
+    }
+
+    /// `playerIsStuckInYou` looks at the eyes of the players the creaking's
+    /// `NEAREST_PLAYERS` lists. A server has no player of its own, so they
+    /// are the eyes of the players it serves: one whose eyes stay inside the
+    /// creaking frees it on the fifth check in a row (#15127), and none count
+    /// while the creaking lists no player.
+    #[test]
+    fn a_player_a_server_serves_gets_stuck_in_the_protector() {
+        let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        kind.species = crate::mobs::Species::Creaking;
+        // 0.9 wide and 1.4 tall: x and z from 0.05 to 0.95, y from 64 to 65.4.
+        let mut creaking = Mob::new(7, Arc::new(kind), Vec3::new(0.5, 64.0, 0.5), 0.0);
+        super::super::monster_brain::init(&mut creaking, 0);
+        let mut level = Protector {
+            creaking,
+            eyes: vec![[9.5, 65.62, 0.5], [0.5, 65.0, 0.5]],
+        };
+        for _ in 0..5 {
+            assert!(!protector_stuck(&mut level, 7), "no player listed");
+        }
+        super::super::monster_brain::mem(&mut level.creaking)
+            .nearest_players
+            .set_list(vec![crate::mobs::Who::Player]);
+        for check in 1..=4 {
+            assert!(!protector_stuck(&mut level, 7), "check {check}");
+        }
+        assert!(protector_stuck(&mut level, 7), "the fifth check in a row");
+    }
+
+    /// A server's level as a heart sees it: the players it serves, and the
+    /// creakings the heart spawns into it.
+    struct Server {
+        players: Vec<(Vec3, bool)>,
+        mobs: Vec<Mob>,
+    }
+    /// The UUID the server gives a creaking it adds.
+    const UUID: [i32; 4] = [0, 0, 0, 15127];
+    impl HeartHost for Server {
+        fn players(&self) -> &[(Vec3, bool)] {
+            &self.players
+        }
+        fn mob(&self, id: u32) -> Option<&Mob> {
+            self.mobs.iter().find(|m| m.id == id)
+        }
+        fn mob_mut(&mut self, id: u32) -> Option<&mut Mob> {
+            self.mobs.iter_mut().find(|m| m.id == id)
+        }
+        fn mob_for_uuid(&self, _: [i32; 4]) -> Option<u32> {
+            None
+        }
+        fn uuid_for(&mut self, _: u32) -> [i32; 4] {
+            UUID
+        }
+        fn creaking_type(&self) -> Option<Arc<MobType>> {
+            let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+            kind.species = crate::mobs::Species::Creaking;
+            Some(Arc::new(kind))
+        }
+        fn create_mob(&mut self, kind: Arc<MobType>, at: Vec3) -> Mob {
+            Mob::new(100, kind, at, 0.0)
+        }
+        fn add_mob(&mut self, m: Mob) {
+            self.mobs.push(m);
+        }
+        fn spawning_monsters(&self) -> bool {
+            true
+        }
+        fn player_eyes(&self) -> &[[f64; 3]] {
+            &[]
+        }
+    }
+
+    /// An awake heart in its trunk at midnight, ticked as a server ticks it.
+    /// The server's mob world has no player of its own (`selected_player`
+    /// is none, as `settle_spawn` leaves it); the level's one player, the
+    /// one it serves, stands 10 blocks away. `getNearestPlayer` finds that
+    /// player, so the heart spawns its creaking and keeps it as its
+    /// protector (#15127). A spectator there, or nobody, spawns nothing.
+    #[test]
+    fn a_heart_on_a_server_spawns_its_creaking_for_the_player_it_serves() {
+        with_trunk(|w| {
+            assert!(
+                w.selected_player().is_none(),
+                "a server has no player of its own"
+            );
+            let tick = |players: Vec<(Vec3, bool)>| {
+                let mut host = Server {
+                    players,
+                    mobs: Vec::new(),
+                };
+                // Its update is due this tick.
+                let mut heart = CreakingHeart {
+                    ticker: -1,
+                    ..Default::default()
+                };
+                let mut out = Vec::new();
+                let mut lr = crate::mobs::world::level_random(15127);
+                server_tick(&mut heart, HEART, w, &mut lr, &mut host, &mut out);
+                (heart.creaking, host.mobs, out)
+            };
+            let near = Vec3::new(10.0, 65.0, 0.0);
+            let (protector, mobs, out) = tick(vec![(near, false)]);
+            let [creaking] = mobs.as_slice() else {
+                panic!("one creaking spawned, got {}", mobs.len());
+            };
+            assert_eq!(
+                protector,
+                Some((Some(creaking.id), UUID)),
+                "the heart's protector"
+            );
+            assert_eq!(
+                creaking.extra.home,
+                Some(HEART),
+                "the creaking is bound to the heart"
+            );
+            assert!(
+                out.iter()
+                    .any(|e| matches!(e, HeartEvent::Sound("block.creaking_heart.spawn", ..))),
+                "the heart plays its spawn sound"
+            );
+            assert!(
+                !out.iter().any(|e| matches!(e, HeartEvent::SetBlock(..))),
+                "the heart stays awake in its trunk"
+            );
+            for (who, players) in [("a spectator", vec![(near, true)]), ("nobody", Vec::new())] {
+                let (protector, mobs, _) = tick(players);
+                assert!(protector.is_none() && mobs.is_empty(), "{who}: no creaking");
+            }
+        });
+    }
+
+    /// Where the heart sits: a pale oak log below and above it, over a stone
+    /// floor at y 63 from x and z -16 to 16, where `spawn_protector` looks.
+    const HEART: [i32; 3] = [0, 65, 0];
+    /// The level's block states, in registry order: the block, its
+    /// properties, and whether it is a full, sturdy cube.
+    const BLOCKS: [(&str, &[(&str, &str)], bool); 6] = [
+        ("minecraft:air", &[], false),
+        ("minecraft:stone", &[], true),
+        ("minecraft:pale_oak_log", &[("axis", "y")], true),
+        (
+            "minecraft:creaking_heart",
+            &[("axis", "y"), ("creaking_heart_state", "uprooted")],
+            true,
+        ),
+        (
+            "minecraft:creaking_heart",
+            &[("axis", "y"), ("creaking_heart_state", "dormant")],
+            true,
+        ),
+        (
+            "minecraft:creaking_heart",
+            &[("axis", "y"), ("creaking_heart_state", "awake")],
+            true,
+        ),
+    ];
+    const STONE: BlockStateId = BlockStateId(1);
+    const LOG: BlockStateId = BlockStateId(2);
+    const AWAKE: BlockStateId = BlockStateId(5);
+
+    /// Runs `f` over the heart's trunk as a server's mob world sees it at
+    /// midnight in the overworld, with no player of its own. Built from
+    /// [`BLOCKS`] alone: no prepared vanilla data.
+    fn with_trunk(f: impl FnOnce(&MobWorld<'_>)) {
+        use horizon_world::{
+            block_collision::BlockCollisionRegistry,
+            block_landing::{BlockLandingRegistry, FallDefinition, LandingDefinition},
+            collision::CachedCollisionRegistry,
+            movement_properties::MovementProperties,
+            registry::BlockRegistry,
+        };
+        let text = |s: &str| Tag::String(s.into());
+        let states: Vec<Tag> = BLOCKS
+            .iter()
+            .map(|&(name, properties, _)| {
+                let mut fields = vec![("id", text(name))];
+                if !properties.is_empty() {
+                    fields.push((
+                        "properties",
+                        Tag::compound(properties.iter().map(|&(key, value)| (key, text(value)))),
+                    ));
+                }
+                Tag::compound(fields)
+            })
+            .collect();
+        let mut names: Vec<&str> = BLOCKS.iter().map(|&(name, ..)| name).collect();
+        names.dedup();
+        let registry = BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(horizon_world::DATA_VERSION)),
+            ("states", Tag::List(states.clone())),
+            (
+                "defaults",
+                Tag::compound([
+                    ("minecraft:air", Tag::Int(0)),
+                    ("minecraft:stone", Tag::Int(1)),
+                    ("minecraft:pale_oak_log", Tag::Int(2)),
+                    ("minecraft:creaking_heart", Tag::Int(3)),
+                ]),
+            ),
+        ]))
+        .unwrap();
+        let facts = crate::blocks::BlockFacts {
+            states: BLOCKS
+                .iter()
+                .map(|&(name, _, full)| state_facts(name, full))
+                .collect(),
+            air: BlockStateId(0),
+            woods: Default::default(),
+            sign_texts: Default::default(),
+        };
+        let collision = Arc::new(
+            BlockCollisionRegistry::new(Arc::new(
+                CachedCollisionRegistry::from_nbt(
+                    &Tag::compound([
+                        ("DataVersion", Tag::Int(horizon_world::DATA_VERSION)),
+                        ("states", Tag::List(states.clone())),
+                        (
+                            "shapes",
+                            Tag::List(vec![
+                                shape_tag(&VoxelShape::empty()),
+                                shape_tag(&VoxelShape::block()),
+                            ]),
+                        ),
+                        (
+                            "cached_shapes",
+                            Tag::IntArray(
+                                BLOCKS.iter().map(|&(_, _, full)| i32::from(full)).collect(),
+                            ),
+                        ),
+                    ]),
+                    &registry,
+                )
+                .unwrap(),
+            ))
+            .unwrap(),
+        );
+        let suffocation =
+            crate::mobs::suffocation::bind(collision.clone(), &std::collections::BTreeSet::new())
+                .unwrap();
+        let fluids = crate::motion::FluidResources::from_registry(
+            &registry,
+            &facts,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        let attributes = Arc::new(
+            horizon_world::attributes::entity::Catalog::from_json(&serde_json::json!({
+                "data_version": horizon_world::DATA_VERSION,
+                "attributes": [],
+                "entities": {},
+            }))
+            .unwrap(),
+        );
+        let float = |v: f32| Tag::Float(v.to_bits());
+        let properties = MovementProperties::from_nbt(
+            &Tag::compound([
+                ("DataVersion", Tag::Int(horizon_world::DATA_VERSION)),
+                ("states", Tag::List(states)),
+                (
+                    "blocks",
+                    Tag::compound(names.iter().map(|&name| {
+                        (
+                            name,
+                            Tag::compound([
+                                ("friction", float(0.6)),
+                                ("speedFactor", float(1.0)),
+                                ("jumpFactor", float(1.0)),
+                                ("bounceRestitution", float(0.0)),
+                                ("fallDistanceReduction", float(0.0)),
+                                ("fenceGate", Tag::Byte(0)),
+                            ]),
+                        )
+                    })),
+                ),
+            ]),
+            &registry,
+        )
+        .unwrap();
+        let movement = properties.bind(&Default::default()).unwrap();
+        let landing = BlockLandingRegistry::new(
+            &properties,
+            &names
+                .iter()
+                .map(|&name| {
+                    let definition = LandingDefinition {
+                        fall: FallDefinition::Default,
+                        shelf_mushroom_bounce: false,
+                    };
+                    (name.to_owned(), definition)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        let data = crate::mobs::MobData::fallback(&facts);
+        // No biome files: a folder with an empty biome list.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "horizon-creaking-heart-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("data/minecraft/worldgen/biome")).unwrap();
+        let biomes = crate::biome::Biomes::load_for_server(
+            &horizon_assets::resource_source::ResourceRoot::directory(root.clone()),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        let biomes = biomes.unwrap();
+        let block_tags = std::collections::HashMap::from([(
+            "minecraft:pale_oak_logs".to_owned(),
+            std::collections::HashSet::from(["minecraft:pale_oak_log".to_owned()]),
+        )]);
+        let mut world = crate::world::World::new(BlockStateId(0), 0);
+        for x in -1..=1 {
+            for z in -1..=1 {
+                world
+                    .chunks
+                    .insert((x, z), Arc::new(crate::chunk::Chunk::empty(x, z)));
+            }
+        }
+        for x in -16..=16 {
+            for z in -16..=16 {
+                world.set(x, 63, z, STONE).unwrap();
+            }
+        }
+        let [x, y, z] = HEART;
+        world.set(x, y - 1, z, LOG).unwrap();
+        world.set(x, y, z, AWAKE).unwrap();
+        world.set(x, y + 1, z, LOG).unwrap();
+        let lid_openers = std::collections::HashMap::new();
+        let w = MobWorld {
+            mob_maps: horizon_client::neoforge_mob_maps::NeoForgeMobMaps::vanilla(),
+            goal_host: None,
+            teams: Default::default(),
+            professions: crate::mobs::villager::profession_table(),
+            loop_context: crate::test_resources::server_loop_context(),
+            world: &world,
+            registry: &registry,
+            facts: &facts,
+            fluid_tables: &fluids,
+            attributes: &attributes,
+            movement: &movement,
+            collision: &collision,
+            suffocation: &suffocation,
+            data: &data,
+            // A server has no player of its own (`settle_spawn`).
+            player: None,
+            player_identity: None,
+            player_selection: None,
+            controlling_player_movement: None,
+            nearest_player: None,
+            others: &[],
+            live_mobs: None,
+            dragon: None,
+            leash_boats: &[],
+            who_lookup: None,
+            foreign: None,
+            others_grid: None,
+            others_index: None,
+            passenger_objects: &[],
+            others_villagers: None,
+            species_slots: None,
+            others_solid: None,
+            daylight: false,
+            monsters_burn: false,
+            game_time: 1000,
+            // Midnight: creakings are active.
+            day_time: 18000,
+            raining: false,
+            thundering: false,
+            level: horizon_core::LevelKey::OVERWORLD,
+            block_tags: &block_tags,
+            landing: &landing,
+            biomes: &biomes,
+            mob_griefing: true,
+            universal_anger: false,
+            mob_drops: true,
+            max_entity_cramming: 24,
+            difficulty: crate::mobs::spawning::LocalDifficulty::new(2, 18000, 0, 0.0),
+            dimension_type: horizon_world::dimension_type::DimensionFacts::overworld(),
+            world_seed: 0,
+            sea_level: 63,
+            items: None,
+            lid_openers: &lid_openers,
+            mod_effects: None,
+            mob_hooks: None,
+            asks_animal_tame: false,
+            asks_living_destroy_block: false,
+            asks_baby_spawn: false,
+            border: None,
+            section_writer: None,
+        };
+        f(&w);
+    }
+
+    /// A block's facts: a full, sturdy cube when `full`, else empty space.
+    fn state_facts(name: &str, full: bool) -> crate::blocks::StateFacts {
+        let sound: Arc<str> = Arc::from("");
+        crate::blocks::StateFacts {
+            name: Arc::from(name),
+            emission: 0,
+            dynamic_light: false,
+            dampening: 0,
+            skylight_down: !full,
+            shape_occlusion: false,
+            can_occlude: full,
+            solid_render: full,
+            hardness: 1.0,
+            requires_tool: false,
+            replaceable: !full,
+            random_ticks: false,
+            block_entity: false,
+            render_shape: crate::blocks::RenderShape::Model,
+            destroy_overlay: true,
+            full_collision: full,
+            friction: 0.6,
+            explosion_resistance: 1.0,
+            item: Arc::from(name),
+            pick_item: Arc::from(name),
+            sounds: crate::blocks::Sounds {
+                volume: 1.0,
+                pitch: 1.0,
+                break_sound: sound.clone(),
+                step: sound.clone(),
+                place: sound.clone(),
+                hit: sound.clone(),
+                fall: sound,
+            },
+            fluid: crate::blocks::Fluid::None,
+            fluid_level: 0,
+            fluid_falling: false,
+            waterlogged: false,
+            random_offset: false,
+            outline_offset: false,
+            legacy_solid: full,
+            // isFaceSturdy(FULL) on all six faces.
+            sturdy_full: if full { 0b11_1111 } else { 0 },
+            classes: Arc::from([]),
+            outline: Arc::from([]),
+            outline_edges: Arc::from([]),
+            map_color: 0,
+        }
+    }
+
+    /// A collision shape as `cached-collision.nbt` stores it.
+    fn shape_tag(shape: &VoxelShape) -> Tag {
+        let sizes = shape.sizes();
+        let mut bits = Vec::new();
+        for z in 0..sizes[2] {
+            for y in 0..sizes[1] {
+                for x in 0..sizes[0] {
+                    bits.push(u8::from(shape.is_full(x as i32, y as i32, z as i32)));
+                }
+            }
+        }
+        let (min, max) = shape.discrete_bounds();
+        let mut fields = vec![
+            ("occupied", Tag::ByteArray(bits)),
+            ("cube", Tag::Byte(i8::from(shape.is_cube()))),
+            (
+                "cube_axes",
+                Tag::Byte(
+                    shape
+                        .cube_coordinate_axes()
+                        .iter()
+                        .enumerate()
+                        .fold(0, |mask, (i, on)| mask | (i8::from(*on) << i)),
+                ),
+            ),
+            ("discrete_min", Tag::IntArray(min.to_vec())),
+            ("discrete_max", Tag::IntArray(max.to_vec())),
+        ];
+        for (axis, name) in [(Axis::X, "x"), (Axis::Y, "y"), (Axis::Z, "z")] {
+            fields.push((
+                name,
+                Tag::LongArray(
+                    shape
+                        .coordinates(axis)
+                        .iter()
+                        .map(|v| v.to_bits() as i64)
+                        .collect(),
+                ),
+            ));
+        }
+        Tag::compound(fields)
     }
 }

@@ -458,8 +458,15 @@ struct Host<'a> {
     types: &'a MobTypes,
     created: &'a mut i64,
     spawning: bool,
+    /// The scenario's player, its one player in the level.
+    players: Vec<(Vec3, bool)>,
+    /// Its eyes, unless it spectates.
+    player_eyes: Vec<[f64; 3]>,
 }
 impl HeartHost for Host<'_> {
+    fn players(&self) -> &[(Vec3, bool)] {
+        &self.players
+    }
     fn mob(&self, id: u32) -> Option<&Mob> {
         self.mobs
             .iter()
@@ -499,6 +506,9 @@ impl HeartHost for Host<'_> {
     }
     fn spawning_monsters(&self) -> bool {
         self.spawning
+    }
+    fn player_eyes(&self) -> &[[f64; 3]] {
+        &self.player_eyes
     }
 }
 /// A scenario's beehives as `BeehiveBlockEntity.serverTick` sees the level:
@@ -1346,6 +1356,12 @@ pub fn main() -> horizon_client::Result<()> {
                             types: &types,
                             created: &mut created,
                             spawning: s.spawning,
+                            players: player.iter().map(|p| (p.position, p.spectator)).collect(),
+                            player_eyes: player
+                                .iter()
+                                .filter(|p| !p.spectator)
+                                .map(|p| p.eye)
+                                .collect(),
                         };
                         creaking_heart::creaking_hurt(
                             h,
@@ -1609,6 +1625,12 @@ pub fn main() -> horizon_client::Result<()> {
                     types: &types,
                     created: &mut created,
                     spawning: s.spawning,
+                    players: player.iter().map(|p| (p.position, p.spectator)).collect(),
+                    player_eyes: player
+                        .iter()
+                        .filter(|p| !p.spectator)
+                        .map(|p| p.eye)
+                        .collect(),
                 };
                 creaking_heart::server_tick(
                     h,
