@@ -443,10 +443,15 @@ impl Game<'_> {
         }
     }
 
-    fn dialog_layout(&self) -> Option<std::sync::Arc<Layout>> {
+    /// The open dialog's layout, from its `LayoutCache`: the body is wrapped
+    /// once per screen size, and the copy only shares each line's text, so a
+    /// frame neither wraps it again nor copies its spans (#19102). Mods hook
+    /// this, so draw, click, scroll and drag all ask it.
+    fn dialog_layout(&self) -> Option<Layout> {
         let open = self.dialogs.open.as_ref()?;
         let font = &self.gui.atlas.font;
-        Some(open.layout.get(&open.dialog, font, self.gui_size()))
+        let kept = open.layout.get(&open.dialog, font, self.gui_size());
+        Some(Layout::clone(&kept))
     }
 
     pub(super) fn draw_dialog(&mut self, batch: &mut HudBatch) {

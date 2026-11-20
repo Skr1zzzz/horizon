@@ -71,8 +71,8 @@ pub const WARNING_SPRITES: [&str; 3] = [
 /// the body's parts, from the top of the screen for the footer's.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Part {
-    /// A line of text and where it starts; shared, so placing the body each
-    /// frame doesn't copy every span of it.
+    /// A line of text and where it starts; shared, so copying the layout or
+    /// placing the body each frame doesn't copy every span of it.
     Line(Arc<Text>, f32, f32),
     /// A text input's box.
     Field { input: usize, rect: [f32; 4] },
