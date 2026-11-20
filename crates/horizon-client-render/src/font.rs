@@ -656,8 +656,34 @@ fn font_ids(source: &ResourceSource) -> Vec<String> {
 }
 
 impl Region {
-    /// Place `w x h` pixels in the region (rows left to right); their atlas
-    /// position, or none when it is full.
+    /// Where `w x h` pixels go next (rows left to right, 1 apart), checked
+    /// before they are made: none when no region could hold them, as no font
+    /// texture holds a glyph larger than itself (`FontTexture.add`), or when
+    /// this one has no room left for them now, which notes it full.
+    fn spot(
+        &mut self,
+        w: u32,
+        h: u32,
+        atlas: (u32, u32),
+        region: (u32, u32),
+    ) -> Option<(u32, u32)> {
+        // Not full: emptying the region would not make room either.
+        if w >= atlas.0 || h > region.1 {
+            return None;
+        }
+        let (mut x, mut y) = self.cursor;
+        if x + w + 1 > atlas.0 {
+            x = 0;
+            y += self.row + 1;
+        }
+        if y + h > region.1 {
+            self.full = true;
+            return None;
+        }
+        Some((x, y))
+    }
+    /// Place `w x h` pixels in the region at their [`Region::spot`]; their
+    /// atlas position, or none when they don't fit.
     fn place(
         &mut self,
         w: u32,
@@ -666,15 +692,9 @@ impl Region {
         atlas: (u32, u32),
         region: (u32, u32),
     ) -> Option<(u32, u32)> {
-        let (mut x, mut y) = self.cursor;
-        if x + w + 1 > atlas.0 {
-            x = 0;
-            y += self.row + 1;
+        let (x, y) = self.spot(w, h, atlas, region)?;
+        if y != self.cursor.1 {
             self.row = 0;
-        }
-        if y + h > region.1 {
-            self.full = true;
-            return None;
         }
         let (ax, ay) = (x, region.0 + y);
         self.pending.push(Patch {
@@ -985,6 +1005,9 @@ impl Font {
                         Some(BitmapGlyph::Sheet(cell))
                             if !(non_fishy && fishy_advance(cell.glyph.advance)) =>
                         {
+                            // Checked against the region before the cell is copied: a glyph is
+                            // uploaded once its slot is found (`FontTexture.add`).
+                            region.spot(cell.w, cell.h, self.atlas, self.region)?;
                             let Some(rgba) = cell.pixels() else {
                                 continue;
                             };
@@ -2159,6 +2182,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let epoch = font.epoch();
         assert!(font.glyph('z').rect.is_none());
+        font.begin_frame();
+        assert_eq!(font.epoch(), epoch);
+    }
+
+    /// A sheet cell no glyph region could hold, taller than the region or wider than the atlas,
+    /// is refused before it is copied and draws as the missing glyph, as vanilla's stitcher
+    /// gives one no font texture holds: nothing lands outside the atlas, and the region is not
+    /// emptied every frame for it.
+    #[test]
+    fn a_cell_no_region_holds_is_the_missing_glyph() {
+        let (tall, wide) = (png(4, 40, |_, _| true), png(12, 8, |_, _| true));
+        let default = br#"{"providers":[{"type":"bitmap","file":"pack:font/tall.png","ascent":7,"chars":["a"]},{"type":"bitmap","file":"pack:font/wide.png","ascent":7,"chars":["b"]}]}"#;
+        let root = root(
+            "unheld",
+            &[
+                ("assets/minecraft/font/default.json", default),
+                ("assets/pack/textures/font/tall.png", &tall),
+                ("assets/pack/textures/font/wide.png", &wide),
+            ],
+        );
+        // A 10 wide atlas whose region has 32 rows: 'a' is 4x40, 'b' 12x8.
+        let font = Font::load(
+            &ResourceSource::directory(root.clone()),
+            &HashMap::new(),
+            &[],
+            (10, 64),
+            (0, 32),
+            white(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let epoch = font.epoch();
+        for c in ['a', 'b', 'a'] {
+            let glyph = font.glyph(c);
+            assert_eq!((glyph.rect.is_none(), glyph.advance), (true, 6.0), "{c}");
+        }
+        assert!(font.take_patches().is_empty());
         font.begin_frame();
         assert_eq!(font.epoch(), epoch);
     }
