@@ -267,15 +267,15 @@ impl<P: FluidPicker, F: PositionalRandom, B: AquiferBlockStates> NoiseBasedAquif
     pub fn note_skipped(&mut self) {
         self.schedule = false;
     }
-    /// The y above which a non-positive density is the global fluid's air. The
-    /// vanilla fluid rules depend only on y; a picker that varies with x/z keeps
-    /// the per-block call by answering `None`.
-    pub fn air_above_y(&self) -> Option<i32> {
-        let center = self.picker.compute([0, i32::MAX, 0]);
-        let east = self.picker.compute([i32::MAX, i32::MAX, i32::MAX]);
-        let west = self.picker.compute([i32::MIN, i32::MAX, i32::MIN]);
-        (center.level == east.level && center.level == west.level)
-            .then(|| self.skip_above_y.max(center.level))
+    /// The y above which a non-positive density in the column whose highest
+    /// block is `top` is the global fluid's air: above `skipSamplingAboveY`,
+    /// vanilla's `NoiseBasedAquifer.computeSubstance` answers
+    /// `globalFluid.at(y)`. The picker is asked at that column, so its level may
+    /// vary with x/z. It may vary with y as long as no level above the skip
+    /// height is higher than the one at `top`, as vanilla's (lava below -54,
+    /// the sea above) is.
+    pub fn air_above_y(&self, top: [i32; 3]) -> i32 {
+        self.skip_above_y.max(self.picker.compute(top).level)
     }
     fn sample(
         &self,

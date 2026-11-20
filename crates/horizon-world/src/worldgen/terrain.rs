@@ -35,10 +35,11 @@ pub trait TerrainAquifer {
         density: f64,
     ) -> Result<Option<BlockStateId>, AquiferError>;
     fn should_schedule_fluid_update(&self) -> bool;
-    /// The y above which every non-positive density is the aquifer's air. The
-    /// fill skips those blocks without asking the aquifer; `None` keeps the
-    /// per-block call for aquifers whose global fluid can vary with x/z.
-    fn air_above_y(&self) -> Option<i32> {
+    /// The y above which every non-positive density in the column whose highest
+    /// filled block is `top` is the aquifer's air. The fill asks once per column
+    /// and skips those blocks without asking the aquifer; `None` keeps the
+    /// per-block call.
+    fn air_above_y(&self, _top: [i32; 3]) -> Option<i32> {
         None
     }
     /// The fill decided this block without the aquifer (positive density or air
@@ -72,8 +73,8 @@ impl<P: FluidPicker, F: PositionalRandom, B: AquiferBlockStates> TerrainAquifer
     fn should_schedule_fluid_update(&self) -> bool {
         NoiseBasedAquifer::should_schedule_fluid_update(self)
     }
-    fn air_above_y(&self) -> Option<i32> {
-        NoiseBasedAquifer::air_above_y(self)
+    fn air_above_y(&self, top: [i32; 3]) -> Option<i32> {
+        Some(NoiseBasedAquifer::air_above_y(self, top))
     }
     fn note_skipped(&mut self) {
         NoiseBasedAquifer::note_skipped(self);
@@ -785,7 +786,7 @@ fn fill_noise_inner<B: TerrainBlockStates>(
     chunk.ensure_heightmap(HeightmapType::OceanFloorWg);
     chunk.ensure_heightmap(HeightmapType::WorldSurfaceWg);
     final_density.sample_volume(context, density, volume)?;
-    let air_above = aquifer.air_above_y();
+    let top_y = by.wrapping_add(sy as i32).wrapping_sub(1);
     // A non-air, non-fluid default block may be written as a run without asking
     // the aquifer or touching the heightmap below the run's top.
     let solid_runs = default_block != chunk.blocks.air
@@ -799,6 +800,8 @@ fn fill_noise_inner<B: TerrainBlockStates>(
         let world_z = bz.wrapping_add(z as i32);
         for x in 0..sx {
             let world_x = bx.wrapping_add(x as i32);
+            // Per column: a mod's picker can give each column its own level.
+            let air_above = aquifer.air_above_y([world_x, top_y, world_z]);
             let col_base = (x + z * sx) * sy;
             let col_density = &density[col_base..col_base + sy];
             // Heightmap updates at or below first-available - 2 are no-ops. In a
@@ -901,9 +904,13 @@ fn fill_noise_inner<B: TerrainBlockStates>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worldgen::aquifer::FluidPicker;
+    use crate::worldgen::aquifer::{
+        AquiferSamplers, FluidPicker, FluidStatus, GlobalFluidPicker, RegistryAquiferBlockStates,
+    };
     use horizon_core::density::ConstantSampler;
     use horizon_core::nbt::Tag;
+    use horizon_core::random::LegacyPositionalRandom;
+    use std::sync::Arc;
 
     #[derive(Clone, Copy)]
     struct State(u32);
@@ -952,6 +959,7 @@ mod tests {
                     Tag::compound([("id", Tag::String("minecraft:void_air".into()))]),
                     Tag::compound([("id", Tag::String("minecraft:stone".into()))]),
                     Tag::compound([("id", Tag::String("minecraft:water".into()))]),
+                    Tag::compound([("id", Tag::String("minecraft:lava".into()))]),
                 ]),
             ),
             (
@@ -961,6 +969,7 @@ mod tests {
                     ("minecraft:void_air", Tag::Int(1)),
                     ("minecraft:stone", Tag::Int(2)),
                     ("minecraft:water", Tag::Int(3)),
+                    ("minecraft:lava", Tag::Int(4)),
                 ]),
             ),
         ]))
@@ -1057,6 +1066,78 @@ mod tests {
             for x in 0..16 {
                 assert_eq!(ocean_floor.first_available(x, z).unwrap(), 320);
                 assert_eq!(world_surface.first_available(x, z).unwrap(), 320);
+            }
+        }
+    }
+
+    /// Vanilla's picker, except that a mod floods x 100..200 to y 250, far above
+    /// the terrain there.
+    #[derive(Debug)]
+    struct Flood(GlobalFluidPicker);
+    impl FluidPicker for Flood {
+        fn compute(&self, position: [i32; 3]) -> FluidStatus {
+            let status = self.0.compute(position);
+            if (100..200).contains(&position[0]) && position[1] >= -54 {
+                FluidStatus {
+                    level: 250,
+                    ..status
+                }
+            } else {
+                status
+            }
+        }
+    }
+
+    /// Above the aquifer's skip height, `NoiseBasedAquifer.computeSubstance`
+    /// answers the global fluid at each block, so each column of the fill holds
+    /// water up to its own picker level: 250 in the flooded columns, sea level
+    /// (below the skip height) in the others.
+    #[test]
+    fn fill_noise_fills_each_column_to_its_own_fluid_level() {
+        let registry = test_registry();
+        let [air, water, lava] = [BlockStateId(0), BlockStateId(3), BlockStateId(4)];
+        let constant = |value| Arc::new(ConstantSampler(value)) as Arc<dyn DensitySampler>;
+        // Barrier, floodedness, spread, lava, exclusion; a surface at y 40.
+        let samplers = AquiferSamplers::new([
+            constant(0.),
+            constant(0.),
+            constant(0.),
+            constant(0.),
+            constant(0.),
+            constant(40.),
+        ]);
+        // x 96..112: columns 96..99 keep sea level, 100..111 are flooded.
+        let volume = DensityVolume::new([16, 384, 16], [96, -64, 0], [1, 1, 1]).unwrap();
+        let mut context = SamplerContext::sparse();
+        let mut aquifer = NoiseBasedAquifer::new(
+            samplers,
+            Flood(GlobalFluidPicker::new(63, water, lava, air)),
+            LegacyPositionalRandom::new(7),
+            RegistryAquiferBlockStates::new(&registry).unwrap(),
+            volume,
+            &mut context,
+        )
+        .unwrap();
+        let skip = aquifer.skip_sampling_above_y();
+        assert!((63..200).contains(&skip), "skip height {skip}");
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(6, 0), -64, 384, &registry, Properties).unwrap();
+        fill_noise(
+            &mut chunk,
+            volume,
+            &ConstantSampler(-1.0),
+            &mut context,
+            &mut aquifer,
+            BlockStateId(2),
+        )
+        .unwrap();
+        for z in 0..16 {
+            for x in 96..112 {
+                let level = if x >= 100 { 250 } else { 63 };
+                for y in skip + 1..320 {
+                    let want = if y < level { water } else { air };
+                    assert_eq!(chunk.block(x, y, z), want, "{x} {y} {z}");
+                }
             }
         }
     }

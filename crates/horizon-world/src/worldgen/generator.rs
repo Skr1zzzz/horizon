@@ -11,8 +11,8 @@ use super::{
     DecodeError,
     anchor::WorldGenerationContext,
     aquifer::{
-        AquiferConfig, AquiferField, AquiferSamplers, DisabledAquifer, GlobalFluidPicker,
-        NoiseBasedAquifer, RegistryAquiferBlockStates,
+        AquiferConfig, AquiferField, AquiferSamplers, DisabledAquifer, FluidPicker,
+        GlobalFluidPicker, NoiseBasedAquifer, RegistryAquiferBlockStates,
     },
     biome::BiomeId,
     biome_chunk::{BiomeChunk, BiomeRegion},
@@ -2425,10 +2425,22 @@ where
                 (min, min + height)
             } else {
                 let lowest = lowest.max(min);
+                // The global fluid at each column is in the band too: a mod's
+                // picker can raise it far above the terrain and the sea.
+                let top = min + height - 1;
+                let fluid = (0..side as i32)
+                    .flat_map(|dz| (0..side as i32).map(move |dx| (dx, dz)))
+                    .map(|(dx, dz)| {
+                        let position = [x + dx * width, top, z + dz * width];
+                        self.picker.compute(position).level
+                    })
+                    .max()
+                    .unwrap_or(i32::MIN);
                 (
                     min + (lowest - min) / step_y * step_y,
                     highest
                         .max(self.settings.sea_level + COARSE)
+                        .max(fluid)
                         .min(min + height),
                 )
             }
