@@ -10,7 +10,7 @@ use horizon_client::{
     clipboard::EditShortcut,
     confirm_screen::Confirm,
     dialog::{AfterAction, Body, Click, Control, Dialog, InputValue, Kind},
-    dialog_screen::{BOX, Layout, Part, WARNING_SPRITES, text_height, waiting_button},
+    dialog_screen::{BOX, Layout, LayoutCache, Part, WARNING_SPRITES, text_height, waiting_button},
     font::Font,
     hud::{HudBatch, rgba},
     multiline_edit::MultiLineEdit,
@@ -34,6 +34,8 @@ struct Open {
     dragging: Option<usize>,
     /// The multiline input the pointer is selecting in.
     selecting: Option<usize>,
+    /// Where its parts go, laid out once for each screen size.
+    layout: LayoutCache,
 }
 
 /// A dialog a clicked command closed, kept for its confirmation's no.
@@ -269,6 +271,7 @@ impl Game<'_> {
                 scroll: ui::Scroll::default(),
                 dragging: None,
                 selecting: None,
+                layout: LayoutCache::default(),
             });
             game.dialogs.waiting = None;
             game.keys.clear();
@@ -440,13 +443,10 @@ impl Game<'_> {
         }
     }
 
-    fn dialog_layout(&self) -> Option<Layout> {
+    fn dialog_layout(&self) -> Option<std::sync::Arc<Layout>> {
         let open = self.dialogs.open.as_ref()?;
-        Some(Layout::new(
-            &open.dialog,
-            &self.gui.atlas.font,
-            self.gui_size(),
-        ))
+        let font = &self.gui.atlas.font;
+        Some(open.layout.get(&open.dialog, font, self.gui_size()))
     }
 
     pub(super) fn draw_dialog(&mut self, batch: &mut HudBatch) {
@@ -1322,6 +1322,7 @@ mod pause_tests {
                 scroll: ui::Scroll::default(),
                 dragging: None,
                 selecting: None,
+                layout: LayoutCache::default(),
             }),
             waiting: None,
             warning: false,
