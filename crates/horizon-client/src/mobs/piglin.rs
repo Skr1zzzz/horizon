@@ -6,8 +6,8 @@ use super::{
     anim::{Poses, State},
     brain::{Ttl, living_near, melee_attack, melee_attack_by_age},
     goals::{
-        Cx, Float, Goal, HurtByTarget, LOOK, LookAtPlayer, MOVE, NearestTarget, Prey,
-        RandomLookAround, Stroll, TARGET, TargetState, goal_clone, target_continue,
+        Cx, Goal, HurtByTarget, LOOK, LookAtPlayer, MOVE, NearestTarget, Prey, RandomLookAround,
+        Stroll, TARGET, TargetState, goal_clone, target_continue,
     },
 };
 use horizon_core::geometry::{Vec3, trig::Mth};
@@ -1330,7 +1330,7 @@ pub fn register_piglin(m: &mut Mob) {
     // `AbstractPiglin.<init>`: a piglin's navigation opens doors.
     m.ai.nav.can_open_doors = true;
     let g = &mut m.ai.goals;
-    g.add(0, Float);
+    // No FloatGoal: the brain has no `Swim`, so it sinks in water and lava (#18493).
     // `PiglinAi.initCoreActivity`: `InteractWithDoor.create()`.
     g.add(0, super::doors::InteractWithDoor::default());
     g.add(1, Admire);
@@ -1463,7 +1463,7 @@ impl Goal for HuntHoglin {
 }
 pub fn register_brute(m: &mut Mob) {
     let g = &mut m.ai.goals;
-    g.add(0, Float);
+    // No FloatGoal: the brain has no `Swim`, so it sinks in water and lava (#18493).
     // `PiglinBruteAi.initFightActivity`: `MeleeAttack.create(20)`.
     g.add(2, melee_attack(20));
     // `PiglinBruteAi.createIdleMovementBehaviors`: `StrollToPoi(HOME, 0.6, 2,
@@ -1541,7 +1541,7 @@ impl Goal for BruteStrollHome {
 }
 pub fn register_hoglin(m: &mut Mob) {
     let g = &mut m.ai.goals;
-    g.add(0, Float);
+    // No FloatGoal: the brain has no `Swim`, so it sinks in water and lava (#18493).
     // `HoglinAi.initRetreatActivity`: `SetWalkTargetAwayFrom.entity(AVOID_TARGET, 1.3, 15, false)`.
     g.add(1, WalkAway::retreat(1.3, 15.0, false));
     // HoglinAi: MeleeAttack.create(40) for adults, 15 for babies, in the
@@ -1569,7 +1569,7 @@ pub fn register_hoglin(m: &mut Mob) {
 }
 pub fn register_zoglin(m: &mut Mob) {
     let g = &mut m.ai.goals;
-    g.add(0, Float);
+    // No FloatGoal: the brain has no `Swim`, so it sinks in water and lava (#18493).
     // `Zoglin.initFightActivity`: `create(40)` for adults, 15 for babies.
     g.add(2, melee_attack_by_age(40, 15));
     g.add(5, Stroll::avoiding_water(0.4));
@@ -3171,5 +3171,34 @@ mod hoglin_pacified_feeding_tests {
             assert_eq!(m.extra.in_love, 600);
         });
         assert!(ran, "vanilla data is missing");
+    }
+}
+
+#[cfg(test)]
+mod swim_tests {
+    use super::*;
+    use crate::mobs::sensor_scan_tests::kind;
+    use std::sync::Arc;
+
+    /// #18493: `PiglinAi`, `PiglinBruteAi`, `HoglinAi` and `Zoglin` give their brains no `Swim`
+    /// and their navigation no `setCanFloat`, so none of the four swims up in water or lava.
+    /// A hoglin farm's hoglins sink through the lava to the campfires below.
+    #[test]
+    fn the_piglin_family_has_no_float_goal_and_does_not_float() {
+        for (species, id) in [
+            (Species::Piglin, "minecraft:piglin"),
+            (Species::PiglinBrute, "minecraft:piglin_brute"),
+            (Species::Hoglin, "minecraft:hoglin"),
+            (Species::Zoglin, "minecraft:zoglin"),
+        ] {
+            let mut kind = kind();
+            let k = Arc::make_mut(&mut kind);
+            k.species = species;
+            k.id = id.into();
+            let mut m = Mob::new(1, kind, Vec3::new(0.5, 0.0, 0.5), 0.0);
+            crate::mobs::ai::register(&mut m);
+            assert!(!m.ai.goals.has("Float"), "{id} has a FloatGoal");
+            assert!(!m.ai.nav.can_float, "{id} floats");
+        }
     }
 }
