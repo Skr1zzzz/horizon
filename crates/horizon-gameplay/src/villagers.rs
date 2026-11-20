@@ -3,11 +3,15 @@
 //! babies, calling iron golems and the prices they ask.
 use crate::{item_areas::ItemAreas, mob_level::MobLevel, villager_level::VillagerLevel};
 use horizon_client::{
+    entities::ItemEntity,
     gossip::{self, GossipType},
     items::{ItemStack, Items},
     mobs::{Mob, Species, spawning, villager, villager_brain},
 };
-use horizon_core::{geometry::Vec3, position::BlockPos};
+use horizon_core::{
+    geometry::{Aabb, Vec3},
+    position::BlockPos,
+};
 
 fn block_of(p: Vec3) -> [i32; 3] {
     [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32]
@@ -313,6 +317,18 @@ pub fn villager_item_sense<L: VillagerLevel + ?Sized>(l: &mut L) {
     }
 }
 
+/// `Mob.getPickupReach` (`ITEM_PICKUP_REACH`): how far past its box a mob
+/// reaches for items.
+const PICKUP_REACH: Vec3 = Vec3::new(1.0, 0.0, 1.0);
+
+/// Whether `Mob.aiStep`'s looting finds `item` beside a mob whose box is
+/// `bounds`: `getEntitiesOfClass` keeps the items whose own box meets that
+/// box grown by [`PICKUP_REACH`] (`AABB.intersects`: one that only touches
+/// it stays out).
+fn in_pickup_reach(bounds: Aabb, item: &ItemEntity) -> bool {
+    bounds.inflate(PICKUP_REACH).intersects(item.bounds())
+}
+
 /// `Mob.aiStep` item pickup for villagers (`InventoryCarrier`): food,
 /// seeds and what their profession wants, from within a block.
 pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
@@ -332,15 +348,11 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
         if m.species() != Species::Villager || !m.alive() || !p.ticked.contains(&m.id) {
             continue;
         }
-        let (id, pos, half) = (m.id, m.position, f64::from(m.width()) / 2.0 + 1.0);
-        let top = f64::from(m.height());
+        let (id, bounds) = (m.id, m.bounds());
         if !l.entity_grief(id, griefing) {
             continue;
         }
-        let reach = horizon_core::geometry::Aabb::new(
-            Vec3::new(pos.x - half, pos.y - 0.25, pos.z - half),
-            Vec3::new(pos.x + half, pos.y + top, pos.z + half),
-        );
+        let reach = bounds.inflate(PICKUP_REACH);
         let next_entity = l.parts().next_entity;
         let mut scan = near_items.scan(l.dropped(), next_entity, reach);
         if scan.is_empty() {
@@ -354,11 +366,7 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
             let Some(e) = l.dropped().get(j) else {
                 break;
             };
-            let near = (e.position.x - pos.x).abs() <= half
-                && (e.position.z - pos.z).abs() <= half
-                && e.position.y >= pos.y - 0.25
-                && e.position.y <= pos.y + top;
-            if !near || e.pickup_delay > 0 {
+            if e.pickup_delay > 0 || !in_pickup_reach(bounds, e) {
                 j += 1;
                 continue;
             }
@@ -508,4 +516,43 @@ pub fn kick_villager_out_of_bed<L: VillagerLevel + ?Sized>(l: &mut L, head: [i32
     let id = l.mobs()[i].id;
     l.wake_villager(id);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item_areas::tests::item_at;
+
+    /// `Mob.aiStep`'s looting meets each item's own box, 0.25 wide and tall,
+    /// not its point. Beside a villager (0.6 by 1.95, its box made as
+    /// `EntityDimensions.makeBoundingBox` makes it) at (0.5, 64, 0.5), an item
+    /// 1.4 blocks out is past the reach by its point and inside it by its box;
+    /// an item whose box only touches the reach, at its side, under its feet
+    /// or over its head, stays where it is (`AABB.intersects` is strict).
+    #[test]
+    fn a_villager_reaches_for_an_items_box_not_its_point() {
+        let half = f64::from(0.6f32) / 2.0;
+        let height = f64::from(1.95f32);
+        let villager = Aabb::new(
+            Vec3::new(0.5 - half, 64.0, 0.5 - half),
+            Vec3::new(0.5 + half, 64.0 + height, 0.5 + half),
+        );
+        let side = 0.5 + half + 1.0 + ItemEntity::WIDTH / 2.0;
+        let cases = [
+            ((1.9, 64.0, 0.5), true),
+            ((0.5, 64.0, -0.9), true),
+            ((0.5, 63.8, 0.5), true),
+            ((side, 64.0, 0.5), false),
+            ((0.5, 63.75, 0.5), false),
+            ((0.5, 64.0 + height, 0.5), false),
+        ];
+        for ((x, y, z), picked) in cases {
+            let item = item_at(x, y, z);
+            assert_eq!(
+                in_pickup_reach(villager, &item),
+                picked,
+                "item at {x} {y} {z}"
+            );
+        }
+    }
 }

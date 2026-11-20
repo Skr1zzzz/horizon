@@ -182,11 +182,11 @@ fn cell(v: f64) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use horizon_core::geometry::Vec3;
 
-    fn item_at(x: f64, y: f64, z: f64) -> ItemEntity {
+    pub(crate) fn item_at(x: f64, y: f64, z: f64) -> ItemEntity {
         let p = Vec3::new(x, y, z);
         ItemEntity {
             attachment_lifetime: Default::default(),
