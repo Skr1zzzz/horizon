@@ -510,8 +510,8 @@ def bots_status(lines):
 
 def spread(server, bot_lines, bots, size, seed, wait, height=0):
     """Teleports Bot0, Bot1... to their spread points around the first bot's spawn, `height` blocks above it,
-    once horizon-bots says every bot is online or failed, or after `wait` seconds. A bot takes the teleport as
-    its position. Returns how many bots were online."""
+    once horizon-bots says every bot is online or failed, or after `wait` seconds. A bot takes a far teleport as
+    its position and the new centre of its walk, not as a pull-back. Returns how many bots were online."""
     deadline = time.time() + wait
     while True:
         spawn, online, failed = bots_status(list(bot_lines))
@@ -661,7 +661,7 @@ def run_once(kind, bots, behaviour, args, out):
             'chunks_per_second': mean([l['chunks_per_second'] for l in window]),
             # Over the measured window: different chunks reaching the bots, chunks they had dropped and got
             # again (walking back), ticks the bots stood still waiting for their own chunk, and moves the server
-            # refused (the bots count --spread's teleports as pull-backs too, but those come before the window).
+            # refused.
             **({k + '_per_second': round((window[-1][k] - window[0][k]) / max(len(window) - 1, 1), 2)
                 for k in ('unique', 'forgotten', 'waited_ticks', 'pulled_back')} if len(window) > 1 else {}),
             'chunks_total': summary.get('chunks'),
