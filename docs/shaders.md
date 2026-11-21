@@ -61,7 +61,11 @@ name>` runs a pack whatever the page says, for development. `HORIZON_SHADER_PACK
 bound on every loop, its guard on integer division), to measure what they cost: it is off by default, as a pack's
 out-of-bounds index or endless loop then becomes undefined behaviour. Vulkan and Metal drop all three, DX12 keeps its
 guard on integer division and OpenGL keeps every check; the log names the ones dropped when the first program
-compiles. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
+compiles. `HORIZON_SHADER_PACK_NO_FLIP_COPY=1` skips
+the copy that brings a buffer the pack doesn't clear to its other side as a frame starts, where the frame's first
+pass to show that side overwrites it whole; that holds only if the pass's vertex stage covers the buffer, as a
+composite's full-screen quad does, which nothing checks, so it is off by default: with a pass that draws less, the
+pixels it leaves would show an older frame. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
 own tint, directional shade, ambient occlusion and face beside its vertices while one of Horizon's packs
 runs, as a pack whose material or vertex stage reads `tint`, `shade`, `ao` or `face` does, for the engine's
 own tests: they take a third again the terrain's memory, and the world loads again when such a pack starts or stops. The game checks the pack first, and refuses one that

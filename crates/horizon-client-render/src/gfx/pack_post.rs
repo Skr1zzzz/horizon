@@ -34,6 +34,7 @@ mod blend_capability_tests;
 mod indirect;
 mod packed;
 
+mod carry;
 mod deep_reads;
 mod flip_carry;
 
@@ -112,6 +113,9 @@ mod noise_resolution_tests;
 
 #[cfg(test)]
 mod deep_reads_tests;
+
+#[cfg(test)]
+mod carry_tests;
 
 /// The texture behind a pack sampler name.
 #[derive(Clone, Copy, PartialEq)]
@@ -486,6 +490,9 @@ struct Pass {
     writes: Vec<(u32, usize)>,
     /// Buffers flipped after the pass.
     flip: u16,
+    /// Buffers it overwrites whole, if its vertex stage covers its target (`carry`): no blend
+    /// onto them, no `discard`, no `scale.<program>`.
+    whole: u16,
     /// `hz_depth_linear`: which of the depth samplers a plain sampler reads filter.
     depth_linear: [f32; 4],
     /// Buffers sampled, for the bind group cache key.
@@ -780,6 +787,9 @@ pub struct PackPost {
     copied: u16,
     /// Bit n set: B is buffer n's "main".
     main: u16,
+    /// `main` as the frame's passes started: with `main` at its end, the buffers flipped an odd
+    /// number of times (`HORIZON_SHADER_PACK_NO_FLIP_COPY`).
+    main_at_start: u16,
     targets: Option<Targets>,
     noise: wgpu::TextureView,
     dummy: wgpu::TextureView,
@@ -1987,6 +1997,8 @@ fn build_pass(
     // Each output's own `blend.<program>.<buffer>`, and whether its buffer blends at all: what
     // the sky's part pipelines keep (`PostProgram::vanilla_sky_blends`).
     let mut own_blends: Vec<(Option<wgpu::BlendState>, bool)> = Vec::new();
+    // Buffers blended onto.
+    let mut blended = 0u16;
     for &location in &interface.outputs {
         let l = location as usize;
         if targets.len() <= l {
@@ -2034,6 +2046,9 @@ fn build_pass(
             {
                 packed_outputs.push((location, bits));
             }
+            if state.as_ref().is_some_and(|t| t.blend.is_some()) {
+                blended |= 1 << buffer;
+            }
             targets[l] = state;
             writes.push((location, buffer as usize));
         }
@@ -2070,6 +2085,19 @@ fn build_pass(
         .filter(|f| !f.1)
         .fold(0u16, |m, f| m | 1 << f.0);
     let deep = deep_reads::deep_buffers(&samplers, [&program.vertex, &program.fragment]);
+    // Every channel is written, or a three-channel buffer's colour: its alpha is 1 on both
+    // sides, as it starts and as clears and copies leave it.
+    let viewport = (!final_pass && p.scale != [1.0, 0.0, 0.0]).then_some(p.scale);
+    let whole = if final_pass
+        || sink
+        || geometry.is_some()
+        || viewport.is_some()
+        || carry::discards(&program.fragment)
+    {
+        0
+    } else {
+        written & !blended
+    };
     // Gbuffers programs write in place (6.1.6). A forced flip of a buffer the program writes
     // cancels the write's own flip, as in Iris 1.11.7 (probed with packs of our own).
     let flip = if final_pass || geometry.is_some() {
@@ -2231,6 +2259,7 @@ fn build_pass(
         samplers,
         writes,
         flip,
+        whole,
         depth_linear: depth_linear(interface, pack.shadow_linear),
         shadow_reads: shadow_reads | shadow_images(&images),
         written,
@@ -2256,7 +2285,7 @@ fn build_pass(
         compute: Vec::new(),
         sink,
         geometry: p.geometry_triangles,
-        viewport: (!final_pass && p.scale != [1.0, 0.0, 0.0]).then_some(p.scale),
+        viewport,
         image_copies,
         snapshots: 0,
     })
@@ -2387,6 +2416,7 @@ fn build_compute(
         samplers,
         writes: Vec::new(),
         flip: 0,
+        whole: 0,
         depth_linear: depth_linear(interface, pack.shadow_linear),
         copies: written & reads | before_colors,
         reads: reads | written,
@@ -3490,6 +3520,7 @@ impl PackPost {
             other_clears,
             blit_group: None,
             main: 0,
+            main_at_start: 0,
             targets: None,
             noise: pack_textures::noise(&textures)
                 .cloned()
@@ -3625,6 +3656,7 @@ impl PackPost {
         self.center_depth = None;
         self.targets = None;
         self.main = 0;
+        self.main_at_start = 0;
         self.mips_valid = 0;
         self.rgb_unset = true;
         self.final_target = None;
@@ -4914,6 +4946,36 @@ impl PackPost {
         !pass.group.shadow() && pass.group != Group::Final && sizes.any(|s| Some(s) != first)
     }
 
+    /// For each pass this frame runs, in order, the buffers whose alt side it shows (it writes
+    /// or flips them) and those it overwrites whole (`carry`); a stage's flips (`deferred_pre`,
+    /// `composite_pre`) come as a pass of their own before its first pass. A compute pass
+    /// shows none: it writes images, which are main.
+    fn alt_shown(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        let mut seen = (false, false);
+        (self.passes.iter())
+            .filter(move |p| {
+                !(p.group == Group::Setup && !self.setup_pending) && !self.sizes_differ(p)
+            })
+            .flat_map(move |p| {
+                let stage = match p.group {
+                    Group::Deferred if !seen.0 => {
+                        seen.0 = true;
+                        self.deferred_pre
+                    }
+                    Group::Composite if !seen.1 => {
+                        seen.1 = true;
+                        self.composite_pre
+                    }
+                    _ => 0,
+                };
+                let shown = match p.pipeline {
+                    Pipeline::Compute { .. } => 0,
+                    Pipeline::Render(_) => p.written | p.flip,
+                };
+                [(stage, 0), (shown, p.whole)]
+            })
+    }
+
     /// Whether the pack draws terrain itself, or has nothing draw it.
     pub fn has_terrain(&self) -> bool {
         self.terrain.is_some() || self.terrain_cutout.is_some() || self.terrain_undrawn
@@ -5537,26 +5599,46 @@ impl PackPost {
         // values in probe packs of our own (#9009), not a documented Iris rule. colortex0's A is
         // overwritten by the world below. Timed as a span of its own where the device stamps
         // between passes: no pass's time holds them.
-        let carried = (1..BUFFERS).filter(|&b| self.main & 1 << b != 0 && self.clears[b].is_none());
+        let sides_stay = carry::no_flip_copy();
+        let uncleared = (1..BUFFERS)
+            .filter(|&b| self.clears[b].is_none())
+            .fold(0u16, |m, b| m | 1 << b);
+        // `HORIZON_SHADER_PACK_NO_FLIP_COPY` leaves those buffers' sides where they are instead:
+        // a buffer flipped an odd number of times in the last frame has its main side copied to
+        // alt, which leaves both sides holding what the copy back to A and the start on A do.
+        // Unless the frame's first pass to show alt overwrites it whole (`carry`): passes read,
+        // draw into and bind as images main alone, so every pixel comes out as with the copy,
+        // while what alt holds until then is never seen. Buffers bound as images always get the
+        // copy: an image may write a three-channel buffer's alpha, which passes keep.
+        let copied = if sides_stay {
+            let flipped = (self.main ^ self.main_at_start) & uncleared;
+            let whole = match flipped {
+                0 => 0,
+                _ => carry::first_shown(flipped & !self.storage, self.alt_shown()).0,
+            };
+            flipped & !whole
+        } else {
+            self.main & uncleared
+        };
         let span = match &mut self.timing {
-            Some(t) if carried.clone().next().is_some() => {
-                t.encoder_begin(encoder, "B to A copies")
-            }
+            Some(t) if copied != 0 => t.encoder_begin(encoder, "B to A copies"),
             _ => None,
         };
-        for b in carried {
-            if let Some([a, b_side]) = &targets.color[b] {
+        for b in (1..BUFFERS).filter(|b| copied & 1 << b != 0) {
+            if let Some(sides) = &targets.color[b] {
+                let main = usize::from(self.main & 1 << b != 0);
                 encoder.copy_texture_to_texture(
-                    b_side.texture().as_image_copy(),
-                    a.texture().as_image_copy(),
-                    a.texture().size(),
+                    sides[main].texture().as_image_copy(),
+                    sides[main ^ 1].texture().as_image_copy(),
+                    sides[main].texture().size(),
                 );
             }
         }
         if let Some(t) = &mut self.timing {
             t.encoder_end(encoder, span);
         }
-        self.main = 0;
+        self.main = if sides_stay { self.main & uncleared } else { 0 };
+        self.main_at_start = self.main;
         let main = |m: u16, i: usize| usize::from(m & 1 << i != 0);
         let view = |m: u16, i: usize, alt: bool| {
             targets.color[i]
