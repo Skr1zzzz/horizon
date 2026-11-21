@@ -1289,16 +1289,14 @@ impl Game<'_> {
                     pl.health.flash_health_change(p.health);
                 }
                 self.apply_remote_health();
-                // The death screen opens (or the respawn is asked for) with the
-                // death packet when the rule hides it.
+                // The death screen opens here at once. Hidden by the rule, the
+                // respawn is asked for by the death packet or by the next tick
+                // (`tick_remote_dead_player`, Gui.tick), which also opens the
+                // screen for a player that wasn't there yet.
                 let shown = self.remote.as_ref().is_none_or(|r| r.show_death_screen);
                 if p.health <= 0.0 && shown && self.screen != Screen::Dead && self.player.is_some()
                 {
-                    self.close_dialogs();
-                    self.set_screen(Screen::Dead);
-                    self.ui.death_time = 0;
-                    self.ui.death_confirm = None;
-                    self.capture(false);
+                    self.open_remote_death_screen();
                 }
             }
             C::PlayerCombatKill(p) => {
@@ -1315,11 +1313,7 @@ impl Game<'_> {
                 // once when it is hidden.
                 if me && self.screen != Screen::Dead && self.player.is_some() {
                     if self.remote.as_ref().is_none_or(|r| r.show_death_screen) {
-                        self.close_dialogs();
-                        self.set_screen(Screen::Dead);
-                        self.ui.death_time = 0;
-                        self.ui.death_confirm = None;
-                        self.capture(false);
+                        self.open_remote_death_screen();
                     } else {
                         self.respawn_player()?;
                     }

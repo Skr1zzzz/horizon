@@ -1,0 +1,2 @@
+# A player who joins dead gets the death screen or its respawn (#19556): the remote-client test reads the prepared 26.3 data.
+horizon-client game::remote::tests::a_player_who_joins_dead_gets_the_death_screen_or_asks_to_respawn lib daily resources

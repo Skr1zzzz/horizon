@@ -1132,6 +1132,72 @@ fn spawn_menu_test(game: &mut super::Game<'_>) -> horizon_protocol::packets::pla
     spawn
 }
 
+/// A player killed while away joins dead (#19556): the server sends its
+/// health, never the death packet (`handlePlayerCombatKill`). Once the level
+/// loading screen has closed, `Gui.tick` shows the death screen, or asks for
+/// the respawn when the server hides it, and the dead player doesn't fall.
+#[test]
+#[ignore = "daily"]
+fn a_player_who_joins_dead_gets_the_death_screen_or_asks_to_respawn() {
+    use super::super::{Screen, native_entity_refs::tests::with_game};
+    use horizon_client::chunk::Chunk;
+    use horizon_protocol::packets::play::{self, Clientbound as C, Serverbound as S};
+
+    with_game(|game| {
+        let (mut reader, _writer) = connect_menu_test(game);
+        spawn_menu_test(game);
+        // Its health can come before its new player (a level change on the way in).
+        game.handle_packet(C::SetHealth(play::SetHealth {
+            health: 0.0,
+            food: 20,
+            saturation: 5.0,
+        }))
+        .unwrap();
+        game.handle_packet(C::PlayerPosition(play::PlayerPosition {
+            teleport: 1,
+            position: [8.5, 70.0, 8.5],
+            delta: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            relatives: 0,
+        }))
+        .unwrap();
+        assert_eq!(game.player.as_ref().unwrap().health.health(), 0.0);
+        game.streaming
+            .insert_remote(&mut game.world, Chunk::empty(0, 0));
+        let remote = game.remote.as_mut().unwrap();
+        remote.level_load.finish();
+        remote.loaded_sent = true;
+        game.tick_remote_player(true, false).unwrap();
+        assert_eq!(game.screen, Screen::Dead);
+
+        // The server hides the death screen (`immediate_respawn`): the respawn
+        // is asked for instead, and the dead player stays in the air meanwhile.
+        game.handle_packet(C::GameEvent(play::GameEvent {
+            event: 11,
+            param: 1.0,
+        }))
+        .unwrap();
+        game.screen = Screen::Playing;
+        game.tick_remote_player(true, false).unwrap();
+        assert_eq!(game.screen, Screen::Playing);
+        assert_eq!(game.player.as_ref().unwrap().position.y, 70.0);
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        let respawns = std::iter::from_fn(|| reader.recv().ok())
+            .filter(|(id, body)| {
+                matches!(
+                    S::decode(*id, body),
+                    Ok(S::ClientCommand(play::ClientCommand { action: 0 }))
+                )
+            })
+            .count();
+        // One for the hidden screen; the death screen asked for none.
+        assert_eq!(respawns, 1);
+    });
+}
+
 #[test]
 #[ignore = "daily"]
 fn client_menu_reads_follow_packets_and_lifetimes() {

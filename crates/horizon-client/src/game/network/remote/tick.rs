@@ -142,6 +142,9 @@ impl Game<'_> {
         }
         self.tick_subtitles();
         self.tick_client_load();
+        // Gui.tick: a dead player with no screen open gets the death screen,
+        // or its respawn, also when the level loading screen has just closed.
+        self.tick_remote_dead_player()?;
         let entity_collisions = self.player_entity_collisions();
         // Those added before it tick before it: their pushes reach this move.
         let pushed = pushed_after.add_vector(self.remote_pushes(true));
@@ -301,7 +304,10 @@ impl Game<'_> {
             return Ok(());
         };
         let was_gliding = player.fall_flying;
-        let dead = self.screen == Screen::Dead;
+        // A dead player stays where it died, as on the death screen: also
+        // while the respawn it asked for is on its way, or while another
+        // screen is still open.
+        let dead = self.screen == Screen::Dead || player.health.health() <= 0.0;
         // LivingEntity.isImmobile: a sleeper lies still, even if its bed's
         // shape is unavailable here; only the server decides when to wake.
         if sleeping.is_some() {

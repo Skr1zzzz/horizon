@@ -1566,6 +1566,12 @@ impl Game<'_> {
     pub(super) fn remote_respawn(&mut self) {
         self.remote_respawn_body()
     }
+    fn open_remote_death_screen(&mut self) {
+        self.open_remote_death_screen_body()
+    }
+    fn tick_remote_dead_player(&mut self) -> Result<()> {
+        self.tick_remote_dead_player_body()
+    }
     pub(super) fn remote_screen_up(&self) -> bool {
         self.remote_screen_up_body()
     }

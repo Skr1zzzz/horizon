@@ -49,6 +49,44 @@ impl Game<'_> {
     pub(super) fn remote_respawn_body(&mut self) {
         self.send(S::ClientCommand(play::ClientCommand { action: 0 }));
     }
+    /// The death screen opens over the world (`DeathScreen`).
+    pub(super) fn open_remote_death_screen_body(&mut self) {
+        self.close_dialogs();
+        self.set_screen(Screen::Dead);
+        self.ui.death_time = 0;
+        self.ui.death_confirm = None;
+        self.capture(false);
+    }
+    /// `Gui.tick`: a dead local player with no screen open gets
+    /// `Gui.setScreen(null)`, which opens the death screen, or asks for the
+    /// respawn at once (`LocalPlayer.respawn`) when the server hides it. A
+    /// player who joins dead, killed while away, hears its health but no death
+    /// packet. The level loading screen, a dialog, a book, the sign editor and
+    /// the prompts are screens too: the death screen waits for them to close.
+    pub(super) fn tick_remote_dead_player_body(&mut self) -> Result<()> {
+        let dead = self
+            .player
+            .as_ref()
+            .is_some_and(|p| p.health.health() <= 0.0);
+        let screen_open = self.screen != Screen::Playing
+            || self.remote_screen_up()
+            || self.dialog_open()
+            || self.book.is_some()
+            || self.sign_edit.is_some()
+            || self.command_prompt.is_some()
+            || self.link_prompt.is_some()
+            || self.code_of_conduct.is_some()
+            || self.server_packs.prompt.is_some();
+        if !dead || screen_open || self.replay.playing() {
+            return Ok(());
+        }
+        if self.remote.as_ref().is_none_or(|r| r.show_death_screen) {
+            self.open_remote_death_screen();
+            Ok(())
+        } else {
+            self.respawn_player()
+        }
+    }
 
     /// A connection's screen is over the world: connecting, reconfiguring, or
     /// the level loading screen, a portal's included (`remote_overlay`).
