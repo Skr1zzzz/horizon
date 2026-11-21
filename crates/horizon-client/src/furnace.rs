@@ -8,6 +8,16 @@ use crate::{
 };
 use horizon_world::native_load_context::LoopContext;
 
+/// A cook a furnace finished this tick, before `AbstractFurnaceBlockEntity.burn` makes its
+/// result ([`FurnaceCooking::tick_to_burn`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cooked {
+    /// The recipe's id, as `RecipesUsed` keys it.
+    pub recipe: String,
+    /// What the recipe's `assemble` made.
+    pub result: ItemStack,
+}
+
 /// The furnace methods that read the recipes.
 pub trait FurnaceCooking {
     /// `AbstractFurnaceBlockEntity.setItem` on the input slot: anything but
@@ -38,6 +48,27 @@ pub trait FurnaceCooking {
         drops: &mut Vec<ItemStack>,
         remainder: &dyn Fn(&ItemStack) -> Option<ItemStack>,
     ) -> Option<bool>;
+    /// [`FurnaceCooking::tick`] up to `AbstractFurnaceBlockEntity.burn`: a cook that
+    /// finished is handed back instead of made, its timer already reset and its input
+    /// still in the slot, for [`FurnaceCooking::burn`] to make once the caller has settled
+    /// the result. Nothing in the tick after `burn` reads the slots, so the two together
+    /// are the tick.
+    fn tick_to_burn(
+        &mut self,
+        context: &LoopContext,
+        recipes: &Recipes,
+        items: &Items,
+        providers: &Providers,
+        drops: &mut Vec<ItemStack>,
+        remainder: &dyn Fn(&ItemStack) -> Option<ItemStack>,
+    ) -> (Option<bool>, Option<Cooked>);
+    /// `AbstractFurnaceBlockEntity.burn` and `setRecipeUsed` of a finished cook: `result`
+    /// goes into the empty output slot or onto the stack there, `recipe` is counted, a wet
+    /// sponge fills the bucket in the fuel slot and the input loses one. `None`, or a
+    /// result the output can't take (`canBurn`: another item or other components, or past
+    /// the item's stack size), makes nothing, as the tick does with an empty result: the
+    /// input stays and the recipe isn't counted. Whether the result was made.
+    fn burn(&mut self, items: &Items, recipe: String, result: Option<ItemStack>) -> bool;
     fn idle(&self) -> bool;
 }
 impl FurnaceCooking for Furnace {
@@ -81,6 +112,22 @@ impl FurnaceCooking for Furnace {
         drops: &mut Vec<ItemStack>,
         remainder: &dyn Fn(&ItemStack) -> Option<ItemStack>,
     ) -> Option<bool> {
+        let (lit, cooked) = self.tick_to_burn(context, recipes, items, providers, drops, remainder);
+        if let Some(Cooked { recipe, result }) = cooked {
+            self.burn(items, recipe, Some(result));
+        }
+        lit
+    }
+    fn tick_to_burn(
+        &mut self,
+        context: &LoopContext,
+        recipes: &Recipes,
+        items: &Items,
+        providers: &Providers,
+        drops: &mut Vec<ItemStack>,
+        remainder: &dyn Fn(&ItemStack) -> Option<ItemStack>,
+    ) -> (Option<bool>, Option<Cooked>) {
+        let mut cooked = None;
         let was_lit = self.lit_remaining > 0;
         let mut lit = false;
         if self.lit_remaining > 0 {
@@ -140,32 +187,10 @@ impl FurnaceCooking for Furnace {
                             if self.cooking_timer >= self.cooking_total {
                                 self.cooking_timer = 0;
                                 self.cooking_total = total_time(recipe.time, self.speed);
-                                match &mut self.items[2] {
-                                    Some(out) => out.count += recipe.result.count,
-                                    None => self.items[2] = Some(recipe.result.clone()),
-                                }
-                                *self
-                                    .recipes_used
-                                    .entry(recipe_used_key(&recipe.id))
-                                    .or_insert(0) += 1;
-                                // AbstractFurnaceBlockEntity.burn: drying a wet sponge fills
-                                // the bucket in the fuel slot.
-                                if self.items[0]
-                                    .as_ref()
-                                    .is_some_and(|i| &*i.item == "minecraft:wet_sponge")
-                                    && self.items[1]
-                                        .as_ref()
-                                        .is_some_and(|f| &*f.item == "minecraft:bucket")
-                                {
-                                    self.items[1] =
-                                        Some(ItemStack::new("minecraft:water_bucket", 1));
-                                }
-                                if let Some(i) = self.items[0].as_mut() {
-                                    i.count -= 1;
-                                    if i.count == 0 {
-                                        self.items[0] = None;
-                                    }
-                                }
+                                cooked = Some(Cooked {
+                                    recipe: recipe_used_key(&recipe.id),
+                                    result: recipe.result.clone(),
+                                });
                             }
                         } else {
                             self.cooking_timer = 0;
@@ -181,7 +206,43 @@ impl FurnaceCooking for Furnace {
             // Vanilla Mth.clamp is min(max(v, 0), max): saturates at a negative total instead of panicking.
             self.cooking_timer = (self.cooking_timer - 2).max(0).min(self.cooking_total);
         }
-        (was_lit != lit).then_some(lit)
+        ((was_lit != lit).then_some(lit), cooked)
+    }
+    fn burn(&mut self, items: &Items, recipe: String, result: Option<ItemStack>) -> bool {
+        let Some(result) = result else {
+            return false;
+        };
+        let max = items.get(&result.item).map_or(64, |i| i.max_stack);
+        let can_burn = match &self.items[2] {
+            None => true,
+            Some(out) => out.same_item_same_components(&result) && out.count + result.count <= max,
+        };
+        if !can_burn {
+            return false;
+        }
+        match &mut self.items[2] {
+            Some(out) => out.count += result.count,
+            None => self.items[2] = Some(result),
+        }
+        *self.recipes_used.entry(recipe).or_insert(0) += 1;
+        // AbstractFurnaceBlockEntity.burn: drying a wet sponge fills
+        // the bucket in the fuel slot.
+        if self.items[0]
+            .as_ref()
+            .is_some_and(|i| &*i.item == "minecraft:wet_sponge")
+            && self.items[1]
+                .as_ref()
+                .is_some_and(|f| &*f.item == "minecraft:bucket")
+        {
+            self.items[1] = Some(ItemStack::new("minecraft:water_bucket", 1));
+        }
+        if let Some(i) = self.items[0].as_mut() {
+            i.count -= 1;
+            if i.count == 0 {
+                self.items[0] = None;
+            }
+        }
+        true
     }
     fn idle(&self) -> bool {
         self.lit_remaining <= 0
@@ -520,6 +581,85 @@ mod tests {
         let (furnace, drops) = burn("test:coal", 2);
         assert_eq!(fuel_slot(&furnace), Some(("test:coal", 1)));
         assert!(drops.is_empty());
+    }
+
+    /// `tick_to_burn` stops where `AbstractFurnaceBlockEntity.burn` makes the result: the
+    /// finished cook comes back with its recipe and result, nothing made yet. `burn` then
+    /// makes the result the caller settled on (a mod's, through `prepare_block_craft`). No
+    /// result, or one the output can't take, makes nothing: the input stays and the recipe
+    /// isn't counted, as the tick does with an empty result.
+    #[test]
+    fn a_finished_cook_waits_for_burn_which_makes_the_settled_result() {
+        let (items, recipes, providers) = data("settled-result");
+        let finishing = |output: Option<ItemStack>| Furnace {
+            kind: FurnaceKind::Furnace,
+            items: [Some(ItemStack::new("test:ore", 2)), None, output],
+            lit_remaining: 20,
+            lit_total: 200,
+            cooking_timer: 199,
+            cooking_total: 200,
+            speed: 1.0,
+            recipes_used: HashMap::new(),
+        };
+        let mut ready = finishing(None);
+        let (lit, cooked) = ready.tick_to_burn(
+            crate::test_resources::server_loop_context(),
+            &recipes,
+            &items,
+            &providers,
+            &mut Vec::new(),
+            &|s| crate::crafting::CraftingRemainder::crafting_remainder(&items, s),
+        );
+        assert_eq!(lit, None);
+        let cooked = cooked.expect("the cook finished this tick");
+        assert_eq!(cooked.recipe, "minecraft:test_ingot");
+        assert_eq!(
+            (&*cooked.result.item, cooked.result.count),
+            ("test:ingot", 1)
+        );
+        assert_eq!(ready.items[0].as_ref().map(|s| s.count), Some(2));
+        assert!(ready.items[2].is_none());
+        assert_eq!((ready.cooking_timer, ready.cooking_total), (0, 200));
+        assert!(ready.recipes_used.is_empty());
+
+        // Taken away: nothing changes.
+        let mut kept = ready.clone();
+        assert!(!kept.burn(&items, cooked.recipe.clone(), None));
+        assert_eq!(format!("{kept:?}"), format!("{ready:?}"));
+
+        // Replaced: three ingots in the empty output, one ore used, the recipe counted.
+        let mut made = ready.clone();
+        assert!(made.burn(
+            &items,
+            cooked.recipe.clone(),
+            Some(ItemStack::new("test:ingot", 3))
+        ));
+        assert_eq!(made.items[0].as_ref().map(|s| s.count), Some(1));
+        assert_eq!(
+            made.items[2].as_ref().map(|s| (&*s.item, s.count)),
+            Some(("test:ingot", 3))
+        );
+        assert_eq!(made.recipes_used.get("minecraft:test_ingot"), Some(&1));
+
+        // `canBurn` on the settled result: another item on the ingots, or more ingots than
+        // the stack holds, is not made.
+        for (output, result) in [
+            (
+                ItemStack::new("test:ingot", 1),
+                ItemStack::new("test:husk", 1),
+            ),
+            (
+                ItemStack::new("test:ingot", 62),
+                ItemStack::new("test:ingot", 3),
+            ),
+        ] {
+            let mut full = finishing(Some(output.clone()));
+            full.cooking_timer = 0;
+            assert!(!full.burn(&items, cooked.recipe.clone(), Some(result)));
+            assert_eq!(full.items[0].as_ref().map(|s| s.count), Some(2));
+            assert_eq!(full.items[2], Some(output));
+            assert!(full.recipes_used.is_empty());
+        }
     }
 }
 

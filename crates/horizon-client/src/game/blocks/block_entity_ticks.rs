@@ -11,7 +11,7 @@ use horizon_client::{
     block_entities::{Pos, Ticking},
     block_entity_anim::Ticker,
     containers::{BlockEntity, FurnaceKind, HOPPER_SLOTS},
-    furnace::FurnaceCooking,
+    furnace::{Cooked, FurnaceCooking},
 };
 use horizon_core::position::BlockPos;
 use horizon_gameplay::block_entity_ticks::{block_ticking_at, ticker_name};
@@ -629,13 +629,13 @@ impl Game<'_> {
                 && matches!(self.world.block_entities.get(&pos), Some(BlockEntity::Furnace(f))
                     if f.lit_remaining <= 1 && f.items[1].as_ref().is_some_and(|s|
                         mod_api::__private::item_listens(mod_api::HookId::CraftingRemainder, &s.item)));
-            let lit = if needs_part {
+            let (lit, cooked) = if needs_part {
                 let Some(BlockEntity::Furnace(original)) = self.world.block_entities.get(&pos)
                 else {
                     return Ok(());
                 };
                 let mut furnace = original.clone();
-                let lit = furnace.tick(
+                let ticked = furnace.tick_to_burn(
                     &self.loop_context,
                     world_recipes!(self),
                     world_items!(self),
@@ -646,14 +646,14 @@ impl Game<'_> {
                 self.world
                     .block_entities
                     .insert(pos, BlockEntity::Furnace(furnace));
-                lit
+                ticked
             } else {
                 let Some(BlockEntity::Furnace(furnace)) = self.world.block_entities.get_mut(&pos)
                 else {
                     return Ok(());
                 };
                 let items = world_items!(self);
-                furnace.tick(
+                furnace.tick_to_burn(
                     &self.loop_context,
                     world_recipes!(self),
                     items,
@@ -662,7 +662,15 @@ impl Game<'_> {
                     &|s| crate::crafting::CraftingRemainder::crafting_remainder(items, s),
                 )
             };
+            if let Some(cooked) = cooked {
+                self.make_furnace_result(pos, cooked);
+            }
             let Some(BlockEntity::Furnace(f)) = self.world.block_entities.get(&pos) else {
+                // A mod's `prepare_block_craft` took the furnace away: what fell from it
+                // this tick still falls.
+                for stack in drops {
+                    self.campfire_drop(pos, stack);
+                }
                 return Ok(());
             };
             let burning = before.1.filter(|_| f.lit_remaining > 0);
@@ -714,6 +722,28 @@ impl Game<'_> {
             }
         }
         Ok(())
+    }
+    /// `AbstractFurnaceBlockEntity.burn` of the cook the furnace at `pos` finished this
+    /// tick, after the mods had their say on its result (`prepare_block_craft`). With no
+    /// result left, or one the output can't take, nothing is made: the input stays, as in
+    /// vanilla's tick when the recipe's result is empty, and the cook starts again.
+    fn make_furnace_result(&mut self, pos: Pos, cooked: Cooked) {
+        let Cooked { recipe, result } = cooked;
+        let mut result = Some(result);
+        if mod_api::__private::listened(mod_api::HookId::PrepareBlockCraft) {
+            let state = self.world.block(pos.0, pos.1, pos.2);
+            let kind = self.res.facts().get(state).name.clone();
+            self.native_prepare_block_craft(
+                [pos.0, pos.1, pos.2],
+                &kind,
+                Some(recipe.as_str()),
+                &mut result,
+            );
+        }
+        let items = world_items!(self);
+        if let Some(BlockEntity::Furnace(furnace)) = self.world.block_entities.get_mut(&pos) {
+            furnace.burn(items, recipe, result);
+        }
     }
 }
 

@@ -102,7 +102,25 @@ impl Game<'_> {
             })
             .map(|(name, result)| (name.to_owned(), result))
             .filter(|(_, result)| result.count > 0);
-        let Some((recipe, mut result)) = found else {
+        let Some((recipe, result)) = found else {
+            self.dispenser_event(1050, key, 0);
+            return Ok(());
+        };
+        // The mods may replace the result `assemble` made or take it away
+        // (`prepare_block_craft`); with none left, the crafter fails as for an
+        // empty result: the fail event, nothing used.
+        let mut result = Some(result);
+        if mod_api::__private::listened(mod_api::HookId::PrepareBlockCraft) {
+            let kind = self.res.facts().get(state).name.clone();
+            let id = horizon_client::crafting::qualified(&recipe);
+            self.native_prepare_block_craft(
+                [key.0, key.1, key.2],
+                &kind,
+                Some(id.as_str()),
+                &mut result,
+            );
+        }
+        let Some(mut result) = result else {
             self.dispenser_event(1050, key, 0);
             return Ok(());
         };

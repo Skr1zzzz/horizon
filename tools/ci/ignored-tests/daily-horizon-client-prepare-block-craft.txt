@@ -1,0 +1,3 @@
+# horizon-rust/horizon#16679: these mod-API tests read the prepared 26.3 data.
+horizon-client game::machines::prepare_block_craft_tests::each_block_makes_the_result_prepare_block_craft_leaves lib daily resources
+horizon-client game::machines::prepare_block_craft_tests::without_a_listener_each_block_makes_the_recipes_result lib daily resources

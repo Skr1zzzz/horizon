@@ -117,11 +117,42 @@ impl Game<'_> {
             return Ok(());
         };
         let done = c.cook_tick();
-        for (_, item) in done {
+        let asking = mod_api::__private::listened(mod_api::HookId::PrepareBlockCraft);
+        for (slot, item) in done {
             // The world's table, as placing the item (`self.recipes()`) asked.
-            let result = world_recipes!(self)
-                .cook(&self.loop_context, KIND, &item)
-                .map_or_else(|| item.clone(), |r| r.result.clone());
+            let (result, recipe) = {
+                let cooking = world_recipes!(self).cook(&self.loop_context, KIND, &item);
+                (
+                    cooking.map_or_else(|| item.clone(), |r| r.result.clone()),
+                    cooking
+                        .filter(|_| asking)
+                        .map(|r| horizon_client::crafting::qualified(&r.id)),
+                )
+            };
+            let mut result = Some(result);
+            if asking {
+                let kind = self.res.facts().get(state).name.clone();
+                self.native_prepare_block_craft(
+                    [pos.0, pos.1, pos.2],
+                    &kind,
+                    recipe.as_deref(),
+                    &mut result,
+                );
+            }
+            // No result: the item stays on the fire with its time up, where `cookTick`
+            // keeps one whose result it can't make (`isItemEnabled`), and is asked about
+            // again next tick. A slot a mod filled meanwhile, or a campfire it took away,
+            // lets the item drop as it is.
+            let Some(result) = result else {
+                if let Some(BlockEntity::Campfire(c)) = self.world.block_entities.get_mut(&pos)
+                    && c.items[slot].is_none()
+                {
+                    c.items[slot] = Some(item);
+                } else {
+                    self.campfire_drop(pos, item);
+                }
+                continue;
+            };
             self.native_block_cook([pos.0, pos.1, pos.2], &item.item, &result.item);
             self.campfire_drop(pos, result);
             self.mark_block_entity_updated(pos);

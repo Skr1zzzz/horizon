@@ -14,6 +14,8 @@ mod crafter;
 pub(in crate::game) mod native_energy;
 pub(in crate::game) mod native_fluids;
 pub(in crate::game) mod native_items;
+#[cfg(test)]
+mod prepare_block_craft_tests;
 mod screen;
 #[cfg(test)]
 mod tank_reopen_tests;
