@@ -1,0 +1,2 @@
+# Each served player's own warden spawn tracker, through real guest turns.
+horizon-client game::sculk::tests::a_shriek_warns_only_the_served_players_near_it lib daily resources

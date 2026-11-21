@@ -274,6 +274,11 @@ impl GuestList {
         Some(&mut self.rows.get_mut(index)?.ender_items)
     }
 
+    /// Borrow only the player's warden spawn tracker at this collection index.
+    pub fn warden_mut(&mut self, index: usize) -> Option<&mut crate::sculk::WardenSpawnTracker> {
+        Some(&mut self.rows.get_mut(index)?.warden)
+    }
+
     /// Borrow only the stored menu items at this collection index.
     pub fn craft_grid_mut(
         &mut self,

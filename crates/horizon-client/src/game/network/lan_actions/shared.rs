@@ -138,6 +138,8 @@ pub(super) struct GuestSwap {
     play: GuestPlay,
     player: Option<PlayerMotion>,
     player_save_projection: (Option<i32>, Option<bool>),
+    /// Whether the game's own warden spawn tracker was loaded (`sculk.tracker_loaded`).
+    warden_loaded: bool,
     /// The guest's eye height and the game's.
     eye: (f32, f32),
     yaw: f32,

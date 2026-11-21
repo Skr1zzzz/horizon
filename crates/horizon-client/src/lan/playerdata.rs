@@ -56,24 +56,6 @@ pub fn exists(world: &Path, uuid: u128) -> bool {
 /// The key `ServerPlayer.addAdditionalSaveData` stores the `WardenSpawnTracker` under.
 pub const WARDEN_TRACKER_KEY: &str = "warden_spawn_tracker";
 
-/// Put a player's `warden_spawn_tracker` into the compound `store` writes from
-/// (`guest.saved`), so a save keeps it rather than the older one loaded with
-/// the file (the LAN owner's tracker lives in `Game`, `save_warden_tracker`).
-/// Other saved keys are left as they are; no tracker (not loaded yet) changes
-/// nothing.
-pub fn with_warden(guest: &mut Guest, tracker: Option<Tag>) -> &mut Guest {
-    let Some(tracker) = tracker else {
-        return guest;
-    };
-    let saved = guest
-        .saved
-        .get_or_insert_with(|| Tag::Compound(Default::default()));
-    if let Tag::Compound(map) = saved {
-        map.insert(WARDEN_TRACKER_KEY.into(), tracker);
-    }
-    guest
-}
-
 /// `PlayerDataStorage.load`: a guest's saved state, if they have been here
 /// before. The player's file, else its `.dat_old` (what a save cut off
 /// between its two renames leaves, `write_dat`).
@@ -272,6 +254,12 @@ pub fn apply(guest: &mut Guest, level: &Level) {
         .map(|s| [s[0] + 0.5, s[1], s[2] + 0.5]);
     guest.respawn_elsewhere = level.respawn_elsewhere.clone();
     guest.saved = level.player_extra.clone();
+    // ServerPlayer.readAdditionalSaveData: the saved tracker, else a new one.
+    guest.warden = guest
+        .saved
+        .as_ref()
+        .and_then(|tag| tag.get(WARDEN_TRACKER_KEY))
+        .map_or_else(Default::default, crate::sculk::WardenSpawnTracker::from_nbt);
     let attachments = match attachment_compound(
         guest
             .saved
@@ -568,6 +556,8 @@ pub fn store(guest: &Guest, level: &mut Level, vehicle: Option<Tag>) {
     let extra = level
         .player_extra
         .get_or_insert_with(|| Tag::Compound(Default::default()));
+    // ServerPlayer.addAdditionalSaveData: the player's own tracker, always.
+    put(extra, WARDEN_TRACKER_KEY, guest.warden.to_nbt());
     if let Tag::Compound(map) = extra
         && attachment_compound(map.get(&ATTACHMENTS_KEY.into())).is_ok()
     {
@@ -713,8 +703,9 @@ mod tests {
         )
     }
 
-    /// #9965: the owner's warden warning level and cooldown reach the file on
-    /// a save, instead of the ones the file was loaded with.
+    /// #9965: a player's own warden warning level and cooldown reach their file
+    /// on a save, instead of the ones the file was loaded with, and come back
+    /// as theirs when it loads.
     #[test]
     fn a_stored_warden_tracker_replaces_the_loaded_one() {
         let mut g = guest();
@@ -734,18 +725,18 @@ mod tests {
             warning_level: 3,
             cooldown_ticks: 200,
         };
-        with_warden(&mut g, Some(tracker.to_nbt()));
+        g.warden = tracker;
         let (tag, _) = round_trip(&g);
         let mut back = guest();
         let mut level = Level::default();
         level.read_player(&tag);
         level.player_extra = Some(tag);
         apply(&mut back, &level);
+        assert_eq!(back.warden, tracker);
         let saved = back.saved.as_ref().unwrap();
         let read =
             crate::sculk::WardenSpawnTracker::from_nbt(saved.get("warden_spawn_tracker").unwrap());
-        assert_eq!((read.warning_level, read.cooldown_ticks), (3, 200));
-        assert_eq!(read.ticks_since_last_warning, 0);
+        assert_eq!(read, tracker);
         assert!(matches!(saved.get("unrelated_key"), Some(Tag::Int(9))));
     }
 

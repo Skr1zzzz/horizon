@@ -878,10 +878,8 @@ pub trait PlayersBackendMut {
     fn player_set_exp_cooldown(&mut self, player: PlayerRef, ticks: u32) -> bool;
     /// Side: server.
     /// Sets the player's `WardenSpawnTracker.cooldownTicks`: sculk shriekers
-    /// they set off don't warn for `ticks` ticks. The level's players share
-    /// one tracker here, the integrated server owner's (the shriekers read it
-    /// for whoever sets them off), so this is every player's.
-    /// False, changing nothing, for anyone but the tracker's owner until each player has their own.
+    /// they set off, or set off near them, don't warn for `ticks` ticks. Each
+    /// player has a tracker of their own; the others' are unchanged.
     #[access(WorldOnly)]
     fn player_set_warden_warning_cooldown(&mut self, player: PlayerRef, ticks: u32) -> bool;
     /// Side: server.

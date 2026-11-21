@@ -646,6 +646,48 @@ impl WardenSpawnTracker {
     }
 }
 
+/// A player of the level a shrieker warns from (`WardenSpawnTracker.tryWarn`):
+/// what `getNearbyPlayers` asks of them, and their own tracker.
+#[derive(Clone, Copy, Debug)]
+pub struct WarnedPlayer {
+    /// Where their feet are (`player.position()`).
+    pub position: [f64; 3],
+    pub spectator: bool,
+    pub alive: bool,
+    /// The player who set the shrieker off: warned wherever they are.
+    pub trigger: bool,
+    pub tracker: WardenSpawnTracker,
+}
+
+/// `WardenSpawnTracker.tryWarn(level, pos, triggerPlayer)` over the level's
+/// players: the living non-spectators closer than 16 blocks to `origin`, the
+/// shrieker's centre (`getNearbyPlayers`), and the trigger take the highest of
+/// their trackers, raised once ([`WardenSpawnTracker::try_warn`]). Everyone
+/// else keeps their own. The new warning level, or None (nothing changed)
+/// when a warden is near or one of them is cooling down.
+pub fn try_warn_nearby(
+    origin: [f64; 3],
+    players: &mut [WarnedPlayer],
+    warden_nearby: bool,
+) -> Option<i32> {
+    // `PLAYER_SEARCH_RADIUS`, through `Vec3.closerThan`: strictly closer.
+    const RADIUS: f64 = 16.0;
+    let near = |p: &WarnedPlayer| {
+        let d: f64 = (0..3).map(|i| (p.position[i] - origin[i]).powi(2)).sum();
+        !p.spectator && p.alive && d < RADIUS * RADIUS
+    };
+    let warned: Vec<usize> = (0..players.len())
+        .filter(|&i| players[i].trigger || near(&players[i]))
+        .collect();
+    let mut trackers: Vec<WardenSpawnTracker> =
+        warned.iter().map(|&i| players[i].tracker).collect();
+    let level = WardenSpawnTracker::try_warn(&mut trackers, warden_nearby)?;
+    for (&i, tracker) in warned.iter().zip(trackers) {
+        players[i].tracker = tracker;
+    }
+    Some(level)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -977,6 +1019,76 @@ mod tests {
         assert_eq!(trackers[0].cooldown_ticks, 200);
         // Everyone is cooling down now.
         assert_eq!(WardenSpawnTracker::try_warn(&mut trackers, false), None);
+    }
+
+    /// Each served player has a tracker of their own (`ServerPlayer.wardenSpawnTracker`):
+    /// a shriek near A raises A and whoever stands within 16 blocks, never a player
+    /// across the map, a spectator or the dead, whose level and cooldown stay theirs.
+    #[test]
+    fn a_shriek_warns_only_the_players_near_it() {
+        let level = |warning_level: i32| WardenSpawnTracker {
+            warning_level,
+            ..Default::default()
+        };
+        let player = |position: [f64; 3], tracker: WardenSpawnTracker| WarnedPlayer {
+            position,
+            spectator: false,
+            alive: true,
+            trigger: false,
+            tracker,
+        };
+        let origin = [0.5, 64.5, 0.5];
+        let mut players = [
+            // A set it off, two blocks away.
+            WarnedPlayer {
+                trigger: true,
+                ..player([2.5, 64.0, 0.5], level(1))
+            },
+            // B is a hundred blocks away, at a higher level.
+            player([100.5, 64.0, 0.5], level(3)),
+            // C stands just inside 16 blocks, D on it (closerThan is strict).
+            player([16.4, 64.5, 0.5], level(2)),
+            player([16.5, 64.5, 0.5], level(0)),
+            // A spectator and a dead player beside the shrieker are no one's.
+            WarnedPlayer {
+                spectator: true,
+                ..player([1.5, 64.0, 0.5], level(4))
+            },
+            WarnedPlayer {
+                alive: false,
+                ..player([1.5, 64.0, 0.5], level(4))
+            },
+        ];
+        // The highest near the shrieker is C's 2: A and C both go to 3.
+        assert_eq!(try_warn_nearby(origin, &mut players, false), Some(3));
+        let raised = WardenSpawnTracker {
+            ticks_since_last_warning: 0,
+            warning_level: 3,
+            cooldown_ticks: 200,
+        };
+        assert_eq!(players[0].tracker, raised);
+        assert_eq!(players[2].tracker, raised);
+        assert_eq!(players[1].tracker, level(3), "B is far away");
+        assert_eq!(players[3].tracker, level(0));
+        assert_eq!(players[4].tracker, level(4));
+        assert_eq!(players[5].tracker, level(4));
+        // B's next shriek, far from A and C, is not held by their cooldown.
+        players[1].trigger = true;
+        players[0].trigger = false;
+        assert_eq!(
+            try_warn_nearby([100.5, 64.5, 0.5], &mut players, false),
+            Some(4)
+        );
+        assert_eq!(players[0].tracker, raised);
+        // The trigger counts wherever it stands: A cooling down holds A's own shriek
+        // from across the map.
+        players[1].trigger = false;
+        players[0].trigger = true;
+        assert_eq!(
+            try_warn_nearby([100.5, 64.5, 0.5], &mut players, false),
+            None
+        );
+        assert_eq!(players[1].tracker.warning_level, 4);
     }
 
     #[test]

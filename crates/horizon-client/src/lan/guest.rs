@@ -541,6 +541,10 @@ pub struct Guest {
     pub drag: Option<(u8, Vec<usize>)>,
     /// The compound this player was loaded from, for fields Horizon does not model.
     pub saved: Option<horizon_core::nbt::Tag>,
+    /// `ServerPlayer.wardenSpawnTracker`: the player's own warning level toward
+    /// a warden, saved with them as `warden_spawn_tracker`. The game holds it
+    /// in `sculk.tracker` for the player's turn, as it holds `saved`.
+    pub warden: crate::sculk::WardenSpawnTracker,
     /// Server-owned attachment data for this player.
     pub attachments: horizon_mod_runtime::attachments::ResidentAttachments,
     /// `ServerPlayer.seenCredits`: the end poem has been shown.
@@ -877,6 +881,7 @@ impl Guest {
             menu_generation: menu_generation(),
             drag: None,
             saved: None,
+            warden: Default::default(),
             attachments: Default::default(),
             seen_credits: false,
             post_effects: Vec::new(),

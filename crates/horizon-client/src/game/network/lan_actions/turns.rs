@@ -357,8 +357,12 @@ impl Game<'_> {
             std::mem::swap(&mut self.adv.unlocked, &mut g.recipes_unlocked);
             std::mem::swap(&mut self.level.recipe_book, &mut g.recipe_book);
             std::mem::swap(&mut self.level.player_extra, &mut g.saved);
+            // `ServerPlayer.wardenSpawnTracker`: the guest's own for the turn.
+            std::mem::swap(&mut self.sculk.tracker, &mut g.warden);
             std::mem::swap(&mut self.level.last_death, &mut g.last_death);
         });
+        // Loaded already: `load_warden_tracker` would read `saved` over it.
+        let warden_loaded = std::mem::replace(&mut self.sculk.tracker_loaded, true);
         let player_save_projection = (
             self.level.player_impulse_grace.take(),
             self.level.player_fall_particles.take(),
@@ -428,6 +432,7 @@ impl Game<'_> {
             play,
             player,
             player_save_projection,
+            warden_loaded,
             eye,
             yaw,
             pitch,
@@ -568,6 +573,7 @@ impl Game<'_> {
             mut play,
             mut player,
             player_save_projection,
+            warden_loaded,
             eye,
             yaw,
             pitch,
@@ -848,6 +854,8 @@ impl Game<'_> {
             std::mem::swap(&mut self.adv.unlocked, &mut g.recipes_unlocked);
             std::mem::swap(&mut self.level.recipe_book, &mut g.recipe_book);
             std::mem::swap(&mut self.level.player_extra, &mut g.saved);
+            std::mem::swap(&mut self.sculk.tracker, &mut g.warden);
+            self.sculk.tracker_loaded = warden_loaded;
             std::mem::swap(&mut self.level.last_death, &mut g.last_death);
             self.level.player_impulse_grace = player_save_projection.0;
             self.level.player_fall_particles = player_save_projection.1;

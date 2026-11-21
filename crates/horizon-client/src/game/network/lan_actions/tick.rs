@@ -25,12 +25,17 @@ impl Game<'_> {
         // Entity.commonTick belongs to each player, including spectators and
         // players whose client has not loaded yet, not to the server clock.
         if let Some(host) = self.lan.as_mut() {
-            for g in &host.hub.guests {
+            for i in 0..host.hub.guests.len() {
+                let g = &host.hub.guests[i];
                 if g.participates_in_player_simulation()
                     && host.hub.here(g)
                     && !self.server_trips.iter().any(|t| t.is(g.conn))
                 {
                     host.play.entry(g.conn).or_default().level_up_sound.tick();
+                    // ServerPlayer.tick: each player's own warden spawn tracker.
+                    if let Some(tracker) = host.hub.guests.warden_mut(i) {
+                        tracker.tick();
+                    }
                 }
             }
         }

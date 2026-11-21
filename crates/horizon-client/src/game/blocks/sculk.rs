@@ -85,7 +85,8 @@ pub(super) struct PlayerEvents {
 
 #[derive(Default)]
 pub(super) struct SculkState {
-    /// The player's warning level toward a warden.
+    /// The warning level toward a warden of the player in place: the game's
+    /// own, or a served player's own (`Guest::warden`) for their turn.
     pub tracker: WardenSpawnTracker,
     tables: Tables,
     /// The sculk block entities in the order they were added.
@@ -109,10 +110,35 @@ pub(super) struct SculkState {
     pub actor: Option<Who>,
     ticks: u32,
     pub tracker_loaded: bool,
+    /// Who sets off the shrieker `try_shriek` is trying, whose tracker
+    /// `try_to_warn` warns with (`try_shriek_by`).
+    shrieker: ShriekPlayer,
     /// The wardens' and allays' slots in the mob list, and the list they were
     /// read from: see `listener_slots`.
     listeners: Vec<u32>,
     listeners_of: Option<ListStamp>,
+}
+
+/// The player who set a shrieker off, as far as their warden spawn tracker
+/// goes (`SculkShriekerBlockEntity.tryShriek`'s `player`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ShriekPlayer {
+    /// The player in place: a served player in their turn, else the game's own.
+    #[default]
+    InPlace,
+    /// A served player outside their turn, by connection.
+    Guest(u32),
+    /// A player whose tracker is out of reach: one who left since, or the
+    /// player in place on a server, which has none of its own.
+    Gone,
+}
+
+/// Where a warned player's tracker is kept while `try_to_warn` reads it.
+#[derive(Clone, Copy)]
+enum Kept {
+    InPlace,
+    Guest(usize),
+    Gone,
 }
 
 /// How far from a warden's or an allay's feet an event may be heard: their
@@ -364,12 +390,14 @@ impl Game<'_> {
             .then(|| self.sculk.tracker.to_nbt())
     }
     /// Write the tracker into the player data being saved. With a LAN owner,
-    /// `store_owner` rewrites that from the owner's guest, so it puts the
-    /// tracker there as well (`playerdata::with_warden`).
+    /// `store_owner` rewrites that from the owner's guest, whose own tracker
+    /// (`Guest::warden`) `playerdata::store` writes.
     pub(super) fn save_warden_tracker(&mut self) {
         // Vanilla always stores it: read the saved one before writing.
         self.load_warden_tracker();
-        let tag = self.sculk.tracker.to_nbt();
+        let Some(tag) = self.warden_tracker_tag() else {
+            return;
+        };
         let extra = self
             .level
             .player_extra
@@ -844,12 +872,16 @@ impl Game<'_> {
         ctx
     }
     /// The saved UUID of a vibration's mob through the save layer's
-    /// `save_who_uuid`. `Who::Player` stays `None`: on a server it can be the
-    /// acting guest as well as the host, so it names no single entity here.
+    /// `save_who_uuid`, and a served player's own in their turn, which tells
+    /// the shrieker whose tracker to warn (`shriek_player`). The game's own
+    /// player stays `None`.
     fn vibration_uuid(&self, who: Option<Who>) -> Option<[i32; 4]> {
         match who {
             Some(who @ Who::Mob(_)) => self.save_who_uuid(who),
-            _ => None,
+            Some(Who::Player) => self
+                .lan_acting_uuid
+                .map(horizon_client::lan::playerdata::uuid_ints),
+            None => None,
         }
     }
     /// The mob at `index` hears a game event, if it is a warden or an allay.
@@ -1077,9 +1109,10 @@ impl Game<'_> {
 
     // ---- ticking ----
 
-    /// The entity phase of a tick for sculk: the player's warden spawn
-    /// tracker (`ServerPlayer.tick`), and the events of entities standing on
-    /// and moving over blocks.
+    /// The entity phase of a tick for sculk: the game's own player's warden
+    /// spawn tracker (`ServerPlayer.tick`; served players tick theirs in
+    /// `tick_guests`), and the events of entities standing on and moving over
+    /// blocks.
     pub(super) fn tick_sculk_entities(&mut self) {
         self.sculk.ticks = self.sculk.ticks.wrapping_add(1);
         // Its steps as spans for `horizon-report` (nothing is read while spans are off).
@@ -1248,11 +1281,15 @@ impl Game<'_> {
                 }
             }
             SculkKind::Shrieker => {
-                let by_player = info.owner.or(info.source.and_then(EventSource::actor));
-                self.try_shriek(
-                    key,
-                    by_player == Some(Who::Player) || self.rides_player(by_player),
-                )?;
+                // tryGetPlayer: the projectile's owner, else the source.
+                let player = match info.owner {
+                    Some(owner) => self.shriek_player(owner, info.owner_uuid),
+                    None => info
+                        .source
+                        .and_then(EventSource::actor)
+                        .and_then(|source| self.shriek_player(source, info.source_uuid)),
+                };
+                self.try_shriek_by(key, player)?;
             }
             SculkKind::Catalyst => {}
         }
@@ -1260,6 +1297,33 @@ impl Game<'_> {
     }
     fn rides_player(&self, who: Option<Who>) -> bool {
         matches!(who, Some(Who::Mob(id)) if self.mobs.iter().any(|m| m.id == id && m.rider.is_some()))
+    }
+    /// `SculkShriekerBlockEntity.tryGetPlayer(entity)`: the player `who` is,
+    /// or rides, by whose tracker the shriek warns. A served player's events
+    /// keep their UUID (`vibration_uuid`); a ridden mob's rider is the player
+    /// in place or the served player on it.
+    fn shriek_player(&self, who: Who, uuid: Option<[i32; 4]>) -> Option<ShriekPlayer> {
+        let guests = self
+            .lan
+            .as_ref()
+            .map_or(&[][..], |host| host.hub.guests.as_slice());
+        match who {
+            Who::Player => Some(match uuid.map(horizon_client::lan::playerdata::ints_uuid) {
+                Some(uuid) if self.lan_acting_uuid != Some(uuid) => guests
+                    .iter()
+                    .find(|g| g.uuid == uuid)
+                    .map_or(ShriekPlayer::Gone, |g| ShriekPlayer::Guest(g.conn)),
+                _ => ShriekPlayer::InPlace,
+            }),
+            Who::Mob(id) if self.rides_player(Some(who)) => Some(
+                guests
+                    .iter()
+                    .find(|g| g.vehicle == Some(id))
+                    .filter(|_| self.riding != Some(id))
+                    .map_or(ShriekPlayer::InPlace, |g| ShriekPlayer::Guest(g.conn)),
+            ),
+            Who::Mob(_) => None,
+        }
     }
     /// `SculkSensorBlock.activate`.
     fn activate_sensor(
@@ -1368,10 +1432,8 @@ impl Game<'_> {
                     }
                 }
                 KIND_SHRIEKER => {
-                    let by_player = who == Who::Player || self.rides_player(Some(who));
-                    if by_player {
-                        let _ = self.try_shriek(key, true);
-                    }
+                    let player = self.shriek_player(who, None);
+                    let _ = self.try_shriek_by(key, player);
                 }
                 _ => {}
             }
@@ -1388,6 +1450,14 @@ impl Game<'_> {
                 .ui
                 .rules
                 .bool_at(horizon_client::gamerules::vanilla::SPAWN_WARDENS)
+    }
+    /// `tryShriek(level, player)`: [`Self::try_shriek`], warning with the
+    /// tracker of `player` (none: not a player, and nothing happens).
+    fn try_shriek_by(&mut self, key: (i32, i32, i32), player: Option<ShriekPlayer>) -> Result<()> {
+        self.sculk.shrieker = player.unwrap_or_default();
+        let shrieked = self.try_shriek(key, player.is_some());
+        self.sculk.shrieker = ShriekPlayer::InPlace;
+        shrieked
     }
     /// `SculkShriekerBlockEntity.tryShriek`.
     fn try_shriek(&mut self, key: (i32, i32, i32), by_player: bool) -> Result<()> {
@@ -1406,7 +1476,60 @@ impl Game<'_> {
         }
         Ok(())
     }
-    /// `WardenSpawnTracker.tryWarn` for the one player.
+    /// The level's players a shriek may warn (`level.getPlayers`), each with
+    /// the tracker of their own and where it is kept: the player in place,
+    /// the served players resting in this level, and the trigger wherever
+    /// they are (a new tracker for one out of reach).
+    fn warned_players(&self, trigger: ShriekPlayer) -> (Vec<sculk::WarnedPlayer>, Vec<Kept>) {
+        let mut players = Vec::new();
+        let mut kept = Vec::new();
+        if let Some(p) = self.player.as_ref()
+            && (!self.lan_acting_fake || trigger == ShriekPlayer::InPlace)
+        {
+            players.push(sculk::WarnedPlayer {
+                position: [p.position.x, p.position.y, p.position.z],
+                spectator: self.spectator(),
+                alive: !p.health.dead_or_dying(),
+                trigger: trigger == ShriekPlayer::InPlace,
+                tracker: self.sculk.tracker,
+            });
+            kept.push(Kept::InPlace);
+        }
+        if let Some(host) = self.lan.as_ref() {
+            for (i, g) in host.hub.guests.iter().enumerate() {
+                // A record whose turn is running holds another player's tracker.
+                if self.lan_guest_swaps.contains(&g.conn) {
+                    continue;
+                }
+                let triggered = trigger == ShriekPlayer::Guest(g.conn);
+                if triggered || (g.participates_in_player_simulation() && host.hub.here(g)) {
+                    players.push(sculk::WarnedPlayer {
+                        position: g.position,
+                        spectator: g.spectator(),
+                        alive: !g.dead && g.health > 0.0,
+                        trigger: triggered,
+                        tracker: g.warden,
+                    });
+                    kept.push(Kept::Guest(i));
+                }
+            }
+        }
+        if !players.iter().any(|p| p.trigger) {
+            players.push(sculk::WarnedPlayer {
+                position: [0.0; 3],
+                spectator: false,
+                alive: false,
+                trigger: true,
+                tracker: WardenSpawnTracker::default(),
+            });
+            kept.push(Kept::Gone);
+        }
+        (players, kept)
+    }
+    /// `WardenSpawnTracker.tryWarn(level, pos, player)`: the players near the
+    /// shrieker and the one who set it off (`sculk.shrieker`) share the highest
+    /// of their own trackers, raised once (`sculk::try_warn_nearby`); the
+    /// others keep theirs.
     fn try_to_warn(&mut self, key: (i32, i32, i32)) -> bool {
         let c = center(key);
         let warden_nearby = self.mobs.iter().any(|m| {
@@ -1416,10 +1539,32 @@ impl Game<'_> {
                 && (m.position.y + f64::from(m.height()) / 2.0 - c[1]).abs() < 24.0
                 && (m.position.z - c[2]).abs() < 24.0
         });
-        // The only player is the one who set it off.
-        let mut trackers = [self.sculk.tracker];
-        let level = WardenSpawnTracker::try_warn(&mut trackers, warden_nearby);
-        self.sculk.tracker = trackers[0];
+        let trigger = match self.sculk.shrieker {
+            // The acting guest's tracker is the one in place, not in their record.
+            ShriekPlayer::Guest(conn) if self.lan_acting == Some(conn) => ShriekPlayer::InPlace,
+            // A server has no player of its own.
+            ShriekPlayer::InPlace if self.player.is_none() => ShriekPlayer::Gone,
+            other => other,
+        };
+        let (mut players, kept) = self.warned_players(trigger);
+        let level = sculk::try_warn_nearby(c, &mut players, warden_nearby);
+        if level.is_some() {
+            for (player, place) in players.iter().zip(kept) {
+                match place {
+                    Kept::InPlace => self.sculk.tracker = player.tracker,
+                    Kept::Guest(i) => {
+                        if let Some(tracker) = self
+                            .lan
+                            .as_mut()
+                            .and_then(|host| host.hub.guests.warden_mut(i))
+                        {
+                            *tracker = player.tracker;
+                        }
+                    }
+                    Kept::Gone => {}
+                }
+            }
+        }
         match level {
             Some(level) => {
                 if let Some(e) = self.sculk_entity(key) {
@@ -2799,6 +2944,55 @@ mod tests {
             });
         });
         assert_eq!(*heard.lock().unwrap(), vec![Some(BlockStateId(3)), None]);
+    }
+
+    /// Each served player keeps a warden spawn tracker of their own
+    /// (`ServerPlayer.wardenSpawnTracker`): A setting a shrieker off raises
+    /// A's, never B's across the map, and B's own shriek isn't held by A's
+    /// cooldown. Each one's tracker ticks once a tick (`ServerPlayer.tick`).
+    #[test]
+    #[ignore = "daily"]
+    fn a_shriek_warns_only_the_served_players_near_it() {
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let tracker = |game: &Game<'_>, conn: u32| {
+                let guests = &game.lan.as_ref().unwrap().hub.guests;
+                guests[guests.connection_index(conn).unwrap()].warden
+            };
+            let raised = |warning_level: i32| WardenSpawnTracker {
+                ticks_since_last_warning: 0,
+                warning_level,
+                cooldown_ticks: 200,
+            };
+            // A (12) stays by the shrieker; B (13) stands a hundred blocks off.
+            let guests = &mut game.lan.as_mut().unwrap().hub.guests;
+            let b = guests.connection_index(13).unwrap();
+            guests.update(b, |g| {
+                g.position = [103.0, 64.0, 5.0];
+                g.warden.set_warning_level(2);
+            });
+            let warned = game
+                .as_guest(12, |game| game.try_to_warn((3, 63, 5)))
+                .unwrap();
+            assert!(warned);
+            assert_eq!(tracker(game, 12), raised(1));
+            let b_before = WardenSpawnTracker {
+                warning_level: 2,
+                ..Default::default()
+            };
+            assert_eq!(tracker(game, 13), b_before, "B is far away");
+            // A vibration of B's sets one off by B after B's turn: A's cooldown
+            // holds nothing there.
+            game.sculk.shrieker = ShriekPlayer::Guest(13);
+            assert!(game.try_to_warn((103, 63, 5)));
+            game.sculk.shrieker = ShriekPlayer::InPlace;
+            assert_eq!(tracker(game, 13), raised(3));
+            assert_eq!(tracker(game, 12), raised(1));
+            game.tick_guests();
+            for conn in [12, 13] {
+                let t = tracker(game, conn);
+                assert_eq!((t.ticks_since_last_warning, t.cooldown_ticks), (1, 199));
+            }
+        });
     }
 
     /// The wardens that hear an event are those in the list when it is

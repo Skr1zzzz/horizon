@@ -113,31 +113,15 @@ impl Game<'_> {
         self.native_as_player_handle(player, |game| game.xp_delay = ticks)
     }
     /// Sets the player's `WardenSpawnTracker.cooldownTicks`: sculk shriekers
-    /// they set off don't warn for `ticks` ticks. The level's players share
-    /// one tracker here, the integrated server owner's (the shriekers read it
-    /// for whoever sets them off), so this is every player's.
-    /// False, changing nothing, for anyone but the tracker's owner until each player has their own.
+    /// they set off, or set off near them, don't warn for `ticks` ticks. Each
+    /// player has a tracker of their own, in place for their turn.
     pub(super) fn player_set_warden_warning_cooldown(
         &mut self,
         player: PlayerRef,
         ticks: u32,
     ) -> bool {
-        // The tracker loads from and saves to the level's player data, the
-        // owner's: in another player's turn theirs is in its place.
-        let owner = self
-            .lan
-            .as_ref()
-            .and_then(|host| host.owner.as_ref())
-            .map(|owner| owner.uuid);
-        if owner != Some(player.uuid())
-            || self
-                .lan_acting_uuid
-                .is_some_and(|acting| Some(acting) != owner)
-        {
-            return false;
-        }
         self.native_as_player_handle(player, |game| {
-            // Loaded first, or the next tick's load would overwrite it.
+            // Loaded first, or the next tick's load would overwrite the game's own.
             game.load_warden_tracker();
             game.sculk.tracker.cooldown_ticks = i32::try_from(ticks).unwrap_or(i32::MAX);
         })
@@ -220,74 +204,45 @@ mod tests {
     #[ignore = "daily"]
     fn the_warden_warning_cooldown_is_its_trackers_owners() {
         use horizon_client::sculk::WardenSpawnTracker;
-        let tracker = |warning_level: i32| {
-            Some(Tag::compound([(
-                "warden_spawn_tracker",
-                Tag::compound([
-                    ("ticks_since_last_warning", Tag::Int(0)),
-                    ("warning_level", Tag::Int(warning_level)),
-                    ("cooldown_ticks", Tag::Int(0)),
-                ]),
-            )]))
+        let level = |warning_level: i32| WardenSpawnTracker {
+            warning_level,
+            ..Default::default()
         };
-        let warns = |game: &mut super::super::Game<'_>| {
-            WardenSpawnTracker::try_warn(&mut [game.sculk.tracker], false)
+        let tracker = |game: &super::super::Game<'_>, conn: u32| {
+            let guests = &game.lan.as_ref().unwrap().hub.guests;
+            guests[guests.connection_index(conn).unwrap()].warden
         };
         super::super::native_guest_turn_tests::with_guests(|game| {
-            // Guest 12 owns the world: their data is the level's, and 13 has
-            // their own saved tracker (as `lan_guest_joined` loads them).
-            game.lan.as_mut().unwrap().owner = Some(super::super::lan::Owner {
-                uuid: 12,
-                saved: None,
-            });
-            game.level.player_extra = tracker(2);
+            // Each player's own saved tracker, as `playerdata::apply` loads it.
             game.lan.as_mut().unwrap().hub.guests.update_all(|guest| {
-                guest.saved = if guest.uuid == 12 {
-                    tracker(2)
-                } else {
-                    tracker(4)
-                };
+                guest.warden = level(if guest.uuid == 12 { 2 } else { 4 });
             });
             let (a, b) = (game.player(12).unwrap(), game.player(13).unwrap());
 
-            // Anyone else's write is refused and loads nothing, in or out of
-            // their turn; so is the owner's while another turn is in place.
-            assert!(!game.player_set_warden_warning_cooldown(b, 40));
-            game.as_guest(13, |game| {
-                assert!(!game.player_set_warden_warning_cooldown(b, 40));
-                assert!(!game.player_set_warden_warning_cooldown(a, 40));
-            })
-            .unwrap();
+            // A write reaches that player's tracker alone, out of their turn
+            // or inside another player's.
+            assert!(game.player_set_warden_warning_cooldown(b, 40));
+            assert_eq!(tracker(game, 13).cooldown_ticks, 40);
+            assert_eq!(tracker(game, 12), level(2));
             game.as_guest(12, |game| {
+                assert!(game.player_set_warden_warning_cooldown(a, 5));
+                assert_eq!(game.sculk.tracker.cooldown_ticks, 5);
+                assert!(game.player_set_warden_warning_cooldown(b, 30));
+                assert_eq!(game.sculk.tracker.cooldown_ticks, 5);
+                // A's state is displaced while B's turn runs inside A's.
                 game.as_guest(13, |game| {
-                    assert!(!game.player_set_warden_warning_cooldown(a, 40));
+                    assert!(!game.player_set_warden_warning_cooldown(a, 1));
                 })
                 .unwrap();
             })
             .unwrap();
             assert!(!game.player_set_warden_warning_cooldown(stale(a), 40));
+            let (a_now, b_now) = (tracker(game, 12), tracker(game, 13));
+            assert_eq!((a_now.warning_level, a_now.cooldown_ticks), (2, 5));
+            assert_eq!((b_now.warning_level, b_now.cooldown_ticks), (4, 30));
+            // The game's own tracker, a server's no one's, is left as it was.
             assert!(!game.sculk.tracker_loaded);
             assert_eq!(game.sculk.tracker, WardenSpawnTracker::default());
-            game.tick_sculk_entities();
-            assert_eq!(game.sculk.tracker.warning_level, 2);
-
-            // The owner's write keeps the shrieker from warning until it has
-            // run out, over the level's saved tracker.
-            game.sculk.tracker = WardenSpawnTracker::default();
-            game.sculk.tracker_loaded = false;
-            assert!(game.player_set_warden_warning_cooldown(a, 40));
-            for _ in 0..39 {
-                game.tick_sculk_entities();
-            }
-            assert_eq!(warns(game), None);
-            game.tick_sculk_entities();
-            assert_eq!(warns(game), Some(3));
-            // Also from the owner's own turn.
-            game.as_guest(12, |game| {
-                assert!(game.player_set_warden_warning_cooldown(a, 5));
-            })
-            .unwrap();
-            assert_eq!(game.sculk.tracker.cooldown_ticks, 5);
         });
     }
 }
