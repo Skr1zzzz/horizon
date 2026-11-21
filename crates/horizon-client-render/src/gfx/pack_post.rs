@@ -1078,6 +1078,70 @@ fn checked<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> Result<T, St
     }
 }
 
+/// The runtime checks `HORIZON_SHADER_PACK_UNCHECKED` (`value`) takes off a pack's programs, to
+/// measure what they cost: comma-separated `bounds` (wgpu's clamp on every index), `loops` (its
+/// bound on every loop), `div` (its guard on integer division), or `all` (or `1`) for the three.
+/// `None` keeps wgpu's checks: unset, empty, `0` or words it doesn't know. Off by default, as a
+/// pack's out-of-bounds index or endless loop is then undefined behaviour.
+fn runtime_checks(value: Option<&str>) -> Option<wgpu::ShaderRuntimeChecks> {
+    let (mut bounds, mut loops, mut div) = (true, true, true);
+    for word in value.unwrap_or_default().split(',') {
+        match word.trim() {
+            "1" | "all" => (bounds, loops, div) = (false, false, false),
+            "bounds" => bounds = false,
+            "loops" => loops = false,
+            "div" => div = false,
+            _ => {}
+        }
+    }
+    if bounds && loops && div {
+        return None;
+    }
+    Some(wgpu::ShaderRuntimeChecks {
+        bounds_checks: bounds,
+        force_loop_bounding: loops,
+        int_div_checks: div,
+        ..wgpu::ShaderRuntimeChecks::checked()
+    })
+}
+
+/// [`runtime_checks`] of the environment, read and logged once.
+fn pack_runtime_checks() -> Option<wgpu::ShaderRuntimeChecks> {
+    static CHECKS: std::sync::OnceLock<Option<wgpu::ShaderRuntimeChecks>> =
+        std::sync::OnceLock::new();
+    *CHECKS.get_or_init(|| {
+        let checks = runtime_checks(
+            std::env::var("HORIZON_SHADER_PACK_UNCHECKED")
+                .ok()
+                .as_deref(),
+        );
+        if let Some(c) = checks {
+            let on = |checked: bool| if checked { "on" } else { "off" };
+            log::info!(
+                "shader pack: HORIZON_SHADER_PACK_UNCHECKED: the pack's programs compile with \
+                 wgpu's bounds checks {}, loop bounding {}, integer division checks {}",
+                on(c.bounds_checks),
+                on(c.force_loop_bounding),
+                on(c.int_div_checks)
+            );
+        }
+        checks
+    })
+}
+
+/// The shader module of a pack's program, named `label`: without the runtime checks
+/// [`pack_runtime_checks`] takes off, else as any other module.
+fn pack_module(device: &wgpu::Device, label: &str, module: naga::Module) -> wgpu::ShaderModule {
+    let desc = wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
+    };
+    match pack_runtime_checks() {
+        Some(checks) => horizon_hdr::create_shader_module_trusted(device, desc, checks),
+        None => device.create_shader_module(desc),
+    }
+}
+
 /// A full-screen helper pipeline of ours (`pack_post.wgsl`).
 fn helper(
     device: &wgpu::Device,
@@ -2076,10 +2140,7 @@ fn build_pass(
         let module = |mut m: naga::Module| {
             share_samplers(&mut m, &slots);
             storage_formats_of(&mut m, &entries);
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&p.name),
-                source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(m)),
-            })
+            pack_module(device, &p.name, m)
         };
         let mut fragment = program.fragment;
         packed::quantise_outputs(&mut fragment, &packed_outputs);
@@ -2319,10 +2380,7 @@ fn build_compute(
         let mut module = c.module;
         share_samplers(&mut module, &slots);
         storage_formats_of(&mut module, &entries);
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&name),
-            source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
-        });
+        let module = pack_module(device, &name, module);
         let job = ComputeJob {
             label: name.clone(),
             layout: pipeline_layout,
@@ -4828,9 +4886,14 @@ impl PackPost {
         };
         let Some(mips) = &targets.mips[b] else { return };
         let side = &mips[usize::from(self.main & 1 << b != 0)];
-        // Timed as one pass per buffer (its first level), so the pass timer shows the chains.
+        // Timed as one pass per buffer, so the pass timer shows the chains: the whole chain where
+        // the device stamps between passes, else its first level.
         let label = format!("mipmaps colortex{b}");
-        let mut first = true;
+        let chain = self
+            .timing
+            .as_mut()
+            .and_then(|t| t.encoder_begin(encoder, &label));
+        let mut first = chain.is_none();
         for (attachment, group) in &side.levels {
             let timestamp_writes = if std::mem::take(&mut first) {
                 self.timing.as_mut().and_then(|t| t.writes(&label))
@@ -4852,6 +4915,9 @@ impl PackPost {
             rp.set_pipeline(pipeline);
             rp.set_bind_group(0, group, &[]);
             rp.draw(0..3, 0..1);
+        }
+        if let Some(t) = &mut self.timing {
+            t.encoder_end(encoder, chain);
         }
     }
 
@@ -5509,8 +5575,16 @@ impl PackPost {
         // Every frame starts on A. A buffer that isn't cleared and ended the last frame on B has B
         // copied back to A, and B keeps what was last written into it: a model that fits Iris 1.11.7's
         // values in probe packs of our own (#9009), not a documented Iris rule. colortex0's A is
-        // overwritten by the world below.
-        for b in (1..BUFFERS).filter(|&b| self.main & 1 << b != 0 && self.clears[b].is_none()) {
+        // overwritten by the world below. Timed as a span of its own where the device stamps
+        // between passes: no pass's time holds them.
+        let carried = (1..BUFFERS).filter(|&b| self.main & 1 << b != 0 && self.clears[b].is_none());
+        let span = match &mut self.timing {
+            Some(t) if carried.clone().next().is_some() => {
+                t.encoder_begin(encoder, "B to A copies")
+            }
+            _ => None,
+        };
+        for b in carried {
             if let Some([a, b_side]) = &targets.color[b] {
                 encoder.copy_texture_to_texture(
                     b_side.texture().as_image_copy(),
@@ -5518,6 +5592,9 @@ impl PackPost {
                     a.texture().size(),
                 );
             }
+        }
+        if let Some(t) = &mut self.timing {
+            t.encoder_end(encoder, span);
         }
         self.main = 0;
         let main = |m: u16, i: usize| usize::from(m & 1 << i != 0);
@@ -6540,6 +6617,35 @@ mod tests {
         let g = |name| texture_format(Format::parse(name).unwrap(), all);
         assert_eq!(g("RGBA16"), T::Rgba16Unorm);
         assert_eq!(g("R11F_G11F_B10F"), T::Rg11b10Ufloat);
+    }
+
+    /// `HORIZON_SHADER_PACK_UNCHECKED` takes off the checks it names and keeps the others (ray
+    /// query tracking too, under `all`); unset, `0` or a word it doesn't know keeps them all.
+    #[test]
+    fn unchecked_switch_takes_off_only_the_checks_it_names() {
+        // Whether bounds, loops and integer division stay checked, and ray queries tracked.
+        let kept = |value| {
+            runtime_checks(value).map(|c| {
+                (
+                    c.bounds_checks,
+                    c.force_loop_bounding,
+                    c.int_div_checks,
+                    c.ray_query_initialization_tracking,
+                )
+            })
+        };
+        for value in [None, Some(""), Some("0"), Some("fast")] {
+            assert_eq!(kept(value), None, "{value:?}");
+        }
+        assert_eq!(kept(Some("bounds")), Some((false, true, true, true)));
+        assert_eq!(kept(Some("loops")), Some((true, false, true, true)));
+        assert_eq!(kept(Some("div")), Some((true, true, false, true)));
+        assert_eq!(
+            kept(Some("bounds, loops")),
+            Some((false, false, true, true))
+        );
+        assert_eq!(kept(Some("all")), Some((false, false, false, true)));
+        assert_eq!(kept(Some("1")), Some((false, false, false, true)));
     }
 
     #[test]

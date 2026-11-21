@@ -56,7 +56,10 @@ my_pack 0.1.0 (shader API 0.2): FAILED
 Put the pack folder (or its `.hshader`) in `shaderpacks/` beside `options.txt` (Open Pack Folder opens it) and pick
 it on Options > Video Settings > Shaders > Shader Packs..., which lists Horizon's packs, marked (Horizon), beside packs in the
 `shaders/` format; one runs at a time, and clicking it again turns it off. `HORIZON_SHADER_PACK=<its folder or file
-name>` runs a pack whatever the page says, for development. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
+name>` runs a pack whatever the page says, for development. `HORIZON_SHADER_PACK_UNCHECKED=bounds,loops,div` (or
+`all`) compiles a `shaders/` pack's programs without those of wgpu's runtime checks (its clamp on every index, its
+bound on every loop, its guard on integer division), to measure what they cost: it is off by default, as a pack's
+out-of-bounds index or endless loop then becomes undefined behaviour. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
 own tint, directional shade, ambient occlusion and face beside its vertices while one of Horizon's packs
 runs, as a pack whose material or vertex stage reads `tint`, `shade`, `ao` or `face` does, for the engine's
 own tests: they take a third again the terrain's memory, and the world loads again when such a pack starts or stops. The game checks the pack first, and refuses one that
