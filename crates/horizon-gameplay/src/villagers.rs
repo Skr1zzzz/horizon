@@ -330,7 +330,8 @@ fn in_pickup_reach(bounds: Aabb, item: &ItemEntity) -> bool {
 }
 
 /// `Mob.aiStep` item pickup for villagers (`InventoryCarrier`): food,
-/// seeds and what their profession wants, from within a block.
+/// seeds and what their profession wants, from within a block, by a villager
+/// that `canPickUpLoot` (a command or its data may have turned it off).
 pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
     let griefing = l.mob_griefing();
     if l.dropped().is_empty() || (!griefing && !l.grief_hooked()) {
@@ -345,7 +346,11 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
     for i in 0..l.mobs().len() {
         let p = l.parts();
         let m = &p.mobs[i];
-        if m.species() != Species::Villager || !m.alive() || !p.ticked.contains(&m.id) {
+        if m.species() != Species::Villager
+            || !m.can_pick_up_loot()
+            || !m.alive()
+            || !p.ticked.contains(&m.id)
+        {
             continue;
         }
         let (id, bounds) = (m.id, m.bounds());

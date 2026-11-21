@@ -1,0 +1,2 @@
+# Prepared-resource daily test: PACKAGE TEST TARGET daily REASON; exact logical libtest identities, sorted.
+horizon-client game::villagers::pickup_tests::a_villager_that_cannot_pick_up_loot_takes_nothing lib daily resources

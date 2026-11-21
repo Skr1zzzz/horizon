@@ -644,3 +644,62 @@ mod birth_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod pickup_tests {
+    use super::*;
+    use crate::game::game_tests::tests::server_game;
+
+    /// A villager at (4.5, 100, 6.5) that ticked this tick, its
+    /// `canPickUpLoot` set to `loot`, with three loaves of bread at its feet
+    /// that can be picked up at once. Returns the villager's id.
+    fn villager_beside_bread(game: &mut Game<'_>, loot: bool) -> u32 {
+        let kind = game
+            .res
+            .mob_types()
+            .get("minecraft:villager")
+            .unwrap()
+            .clone();
+        let id = game.next_entity + 1;
+        game.next_entity = id;
+        let mut villager = Mob::new(id, kind, Vec3::new(4.5, 100.0, 6.5), 0.0);
+        villager.extra.pick_up_loot = loot;
+        game.mobs.push(villager);
+        game.creatures.ticked.insert(id);
+        let bread = ItemStack::new("minecraft:bread", 3);
+        game.spawn_item(bread, [4.5, 100.0, 6.5], [0.0; 3], 0);
+        id
+    }
+
+    /// The loaves the villager `id` carries, and those still on the ground.
+    fn loaves(game: &Game<'_>, id: u32) -> (u32, u32) {
+        let bread = |s: &ItemStack| {
+            if &*s.item == "minecraft:bread" {
+                s.count
+            } else {
+                0
+            }
+        };
+        let m = game.mobs.iter().find(|m| m.id == id).unwrap();
+        let carried = villager::ext(m).map_or(0, |x| x.inventory.iter().map(bread).sum());
+        let lying = game.dropped.iter().map(|e| bread(&e.stack)).sum();
+        (carried, lying)
+    }
+
+    /// `Mob.aiStep` loots only `if (this.canPickUpLoot() && ...)`: a villager
+    /// whose `CanPickUpLoot` a command or its data turned off leaves the bread
+    /// it wants where it lies, and takes it once the flag is back on.
+    #[test]
+    #[ignore = "daily"]
+    fn a_villager_that_cannot_pick_up_loot_takes_nothing() {
+        let mut resources = None;
+        let mut game = server_game(&mut resources);
+        let id = villager_beside_bread(&mut game, false);
+        game.villager_pickups();
+        assert_eq!(loaves(&game, id), (0, 3), "loot pickup off");
+        let m = game.mobs.iter_mut().find(|m| m.id == id).unwrap();
+        m.extra.pick_up_loot = true;
+        game.villager_pickups();
+        assert_eq!(loaves(&game, id), (3, 0), "loot pickup on");
+    }
+}

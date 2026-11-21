@@ -259,8 +259,9 @@ impl Game<'_> {
     }
 }
 
-/// `Mob.convertTo` (`ConversionType.SINGLE`, keeping equipment and the
-/// pick-up-loot flag): what any converted mob carries over.
+/// `Mob.convertTo` (`ConversionType.SINGLE`, keeping equipment): what both
+/// conversions carry over. The pick-up-loot flag is not here: only the
+/// infection's `ConversionParams` preserve it.
 fn carry_over(from: &Mob, to: &mut Mob) {
     to.position = from.position;
     to.previous = from.position;
@@ -282,7 +283,6 @@ fn carry_over(from: &Mob, to: &mut Mob) {
     to.custom_name_text = from.custom_name_text.clone();
     to.name_visible = from.name_visible;
     to.invisible = from.invisible;
-    to.extra.pick_up_loot = from.extra.pick_up_loot;
     // ConversionType.convertCommon: the flags a converted mob keeps.
     to.extra.left_handed = from.extra.left_handed;
     to.no_ai = from.no_ai;
@@ -316,13 +316,19 @@ fn carry_over(from: &Mob, to: &mut Mob) {
     }
 }
 /// A villager rises as a zombie villager (never as an adult-age baby: a baby
-/// stays a baby for good).
+/// stays a baby for good), keeping its `canPickUpLoot`:
+/// `Zombie.convertVillagerToZombieVillager` converts with
+/// `ConversionParams.single(villager, true, true)`.
 pub(super) fn convert_to_zombie_villager(from: &Mob, to: &mut Mob) {
     carry_over(from, to);
+    to.extra.pick_up_loot = from.extra.pick_up_loot;
     to.extra.age = if from.is_baby() { i32::MIN / 2 } else { 0 };
 }
 /// A cured zombie villager becomes a villager again, queasy for 10 seconds
 /// when `nausea` (the `canBeAffected` ask on the fresh villager) allows it.
+/// It keeps its own `canPickUpLoot`, the `Villager` constructor's true:
+/// `ZombieVillager.finishConversion` converts with
+/// `ConversionParams.single(this, false, false)`.
 pub(super) fn convert_to_villager(from: &Mob, to: &mut Mob, nausea: bool) -> Vec<ItemStack> {
     carry_over(from, to);
     let mut drops_out = Vec::new();
@@ -412,7 +418,8 @@ mod tests {
     }
 
     /// `ConversionType.convertCommon` copies Silent, NoAI, LeftHanded,
-    /// NoGravity and Invulnerable onto the mob that replaces the old one.
+    /// NoGravity and Invulnerable onto the mob that replaces the old one, and
+    /// CanPickUpLoot only when the conversion preserves it.
     #[test]
     fn infection_and_the_cure_keep_the_common_flags() {
         use horizon_client::mobs::{Anim, Brain, MobType, Part};
@@ -500,6 +507,20 @@ mod tests {
         assert!(cured.extra.left_handed);
         assert_eq!(cured.extra.mount, Some(99));
         assert!(cured.extra.passenger);
+        // `preserveCanPickUpLoot`: the infection keeps the villager's
+        // `canPickUpLoot` (`single(villager, true, true)`); the cure keeps the
+        // fresh villager's own true, whatever the zombie villager had
+        // (`ZombieVillager.finishConversion`: `single(this, false, false)`).
+        for had in [false, true] {
+            villager.extra.pick_up_loot = had;
+            let mut zombie = mob(6, Species::ZombieVillager, "minecraft:zombie_villager");
+            zombie.extra.pick_up_loot = !had;
+            convert_to_zombie_villager(&villager, &mut zombie);
+            assert_eq!(zombie.can_pick_up_loot(), had, "infected");
+            let mut cured = mob(7, Species::Villager, "minecraft:villager");
+            convert_to_villager(&zombie, &mut cured, true);
+            assert!(cured.can_pick_up_loot(), "cured from one with {had}");
+        }
         // The cure keeps no equipment: picked-up gear drops, cursed gear goes
         // to the inventory, the rest vanishes.
         use horizon_client::mobs::finalize::{
