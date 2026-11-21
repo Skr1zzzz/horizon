@@ -1,6 +1,5 @@
 //! Where the HUD's layers drew, read by client mods.
 #![allow(unused_variables)]
-use crate::*;
 
 /// The client host's reads of the HUD's layers, implemented by the game and reached through [`crate::ClientHost`].
 #[horizon_mod_api_macros::host_area]
