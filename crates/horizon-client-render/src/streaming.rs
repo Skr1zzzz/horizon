@@ -541,6 +541,10 @@ pub struct Streaming {
     jobs: Registration,
     /// The workers its in-flight work is sized for.
     workers: usize,
+    /// When the last update scheduled jobs: the next one keeps as many
+    /// update periods' worth in flight as passed since (`in_flight_scale`).
+    /// `None` before the first update and while paused.
+    scheduled_at: Option<std::time::Instant>,
     order: u64,
     /// Ticks since the columns and protos that fell out of range were swept.
     scan_age: u8,
@@ -1192,6 +1196,7 @@ impl Streaming {
             caches,
             jobs,
             workers,
+            scheduled_at: None,
             order: 0,
             scan_age: 0,
             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
@@ -2009,6 +2014,9 @@ impl Streaming {
             paused,
         } = commit;
         if paused {
+            // Nothing is scheduled meanwhile: the first update after a pause
+            // counts as a first one, not as a long gap.
+            self.scheduled_at = None;
             return (uploads, removed);
         }
         let mut light = std::mem::take(&mut self.light_scratch);
@@ -2052,6 +2060,15 @@ impl Streaming {
             }
         }
         hz_laps.lap("st_finalize");
+        // The jobs kept in flight per worker last until the next update when
+        // updates come once a period or faster. A tick over 50 ms leaves
+        // `pump_chunks` no slack, so the next update is a whole tick away:
+        // as many periods' worth keep the workers busy until then (#11755).
+        let now = std::time::Instant::now();
+        let scale = self.scheduled_at.map_or(1, |at| {
+            in_flight_scale(now.saturating_duration_since(at), UPDATE_PERIOD)
+        });
+        self.scheduled_at = Some(now);
         // Decorate chunks whose 3x3 proto neighbourhood is available, in
         // vanilla's order: decoration is order dependent where write regions
         // overlap (see `DecorationOrder`).
@@ -2081,7 +2098,7 @@ impl Streaming {
                     || generating.contains(&(x, z))
             });
         }
-        if self.decorates && self.decorating < workers * 2 {
+        if self.decorates && self.decorating < workers * 2 * scale {
             let wants = |s: &Self, x: i32, z: i32| {
                 !s.decorated.contains(&(x, z))
                     && !world.chunks.contains_key(&(x, z))
@@ -2120,7 +2137,7 @@ impl Streaming {
             // took most of the thread that runs it while the world loaded.
             let waiting: std::cell::RefCell<FxHashMap<(i32, i32), bool>> = Default::default();
             while let Some(std::cmp::Reverse((_, x, z))) = wanted.pop() {
-                if self.decorating >= workers * 2 {
+                if self.decorating >= workers * 2 * scale {
                     break;
                 }
                 if self.decoration_order.blocked(x, z, |nx, nz| {
@@ -2177,7 +2194,7 @@ impl Streaming {
             }
         }
         hz_laps.lap("st_decorate");
-        self.schedule_generation(world, workers);
+        self.schedule_generation(world, workers * 3 * scale);
         hz_laps.lap("st_generate");
         // Lighting once all neighbours exist, nearest first and only as
         // much of it as the workers can chew. Vanilla's light engine also
@@ -2197,7 +2214,7 @@ impl Streaming {
         for key in gone.drain(..) {
             world.dirty_light.remove(&key);
         }
-        let room = (self.workers * 4).saturating_sub(self.lighting.len());
+        let room = (workers * 4 * scale).saturating_sub(self.lighting.len());
         nearest_first(&mut light, room);
         for (_, x, z) in light.drain(..) {
             let Some(region) = self.light_region(world, x, z) else {
@@ -2326,7 +2343,8 @@ impl Streaming {
         self.mesh_columns_scratch = columns;
         (uploads, removed)
     }
-    fn schedule_generation(&mut self, world: &World, workers: usize) {
+    /// Generation, closest first, up to `capacity` jobs in flight.
+    fn schedule_generation(&mut self, world: &World, capacity: usize) {
         let input = GenerationInputs {
             ranges: Ranges {
                 center: self.center,
@@ -2344,7 +2362,7 @@ impl Streaming {
             decorates: self.decorates,
             remote: self.remote,
         };
-        if let Some(wanted) = self.generation_scan.candidates(input, workers * 3) {
+        if let Some(wanted) = self.generation_scan.candidates(input, capacity) {
             for (_, x, z) in wanted {
                 self.generating.insert((x, z));
                 self.submit(Some((x, z)), 0, Job::Generate(x, z));
@@ -3462,6 +3480,35 @@ fn same_values(
 /// section's worth. Past it, the columns are lit again whole on the workers.
 const INLINE_RELIGHT_MAX: usize = 4096;
 
+/// The slowest rate `Streaming::update` comes at while the game keeps up, which
+/// the generation, decoration and light jobs kept in flight per worker are
+/// sized for: a server updates each level once a tick (`MinecraftServer`'s
+/// 50 ms), and more often while `pump_chunks` fills the tick's slack (each time
+/// a job finishes, 5 ms apart at most); a window updates once a frame.
+const UPDATE_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The most update periods' worth of jobs one update keeps in flight
+/// (`in_flight_scale`). Ticks up to 400 ms (2.5 a second; the spread bench of
+/// #11755 warmed up at 195 ms) keep their workers fed, and the update after a
+/// long stall (an autosave, a level that was not ticked) queues no more than
+/// eight times the usual jobs. A job holds little beside what the area keeps
+/// anyway: a generation its column, until its proto chunk comes back for
+/// `protos`; a decoration the nine proto chunks it takes out of `protos`, moved,
+/// not copied; a light job its 3x3 snapshot of shared columns (one the world
+/// changes meanwhile is copied, its sections only as they change), then its
+/// column's light layers, 100 KiB at most.
+const MAX_IN_FLIGHT_SCALE: usize = 8;
+
+/// How many update periods' worth of generation, decoration and light jobs to
+/// keep in flight after `gap` since the previous update: whole periods, rounded,
+/// from 1 to [`MAX_IN_FLIGHT_SCALE`]. Updates up to half a period late keep the
+/// usual caps.
+fn in_flight_scale(gap: std::time::Duration, period: std::time::Duration) -> usize {
+    let period = period.as_nanos().max(1);
+    let periods = (gap.as_nanos() + period / 2) / period;
+    periods.clamp(1, MAX_IN_FLIGHT_SCALE as u128) as usize
+}
+
 /// Splits edits at `positions` into the columns to light again whole and the
 /// edits to relight in place. An edited column is lit whole with its
 /// neighbours (light reaches 15 blocks, never past the next column) when all
@@ -3991,6 +4038,26 @@ mod tests {
         // Negative coordinates floor to their column.
         let (west, _) = whole_relight_columns(vec![(-1, 64, -17)], |_, _| true);
         assert!(west.contains(&(-2, -3)) && west.contains(&(0, -1)) && west.len() == 9);
+    }
+
+    /// Updates at the usual rate keep the usual jobs in flight; a tick that
+    /// left no slack gets as many periods' worth; a stall no more than the most.
+    #[test]
+    fn jobs_in_flight_scale_with_the_gap_since_the_last_update() {
+        let ms = std::time::Duration::from_millis;
+        // Pumped in a tick's slack, a frame at 60 a second, a tick on time, a
+        // frame at 14 a second, a tick 24 ms late.
+        for gap in [ms(0), ms(5), ms(16), ms(50), ms(71), ms(74)] {
+            assert_eq!(in_flight_scale(gap, UPDATE_PERIOD), 1, "{gap:?}");
+        }
+        assert_eq!(in_flight_scale(ms(100), UPDATE_PERIOD), 2);
+        // The spread bench's warm-up ticks (#11755).
+        assert_eq!(in_flight_scale(ms(195), UPDATE_PERIOD), 4);
+        assert_eq!(in_flight_scale(ms(400), UPDATE_PERIOD), 8);
+        // An autosave, a level not ticked for an hour.
+        for gap in [ms(2_000), std::time::Duration::from_secs(3_600)] {
+            assert_eq!(in_flight_scale(gap, UPDATE_PERIOD), 8, "{gap:?}");
+        }
     }
 
     #[test]
