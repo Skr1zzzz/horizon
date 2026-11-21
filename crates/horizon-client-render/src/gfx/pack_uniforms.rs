@@ -1169,9 +1169,16 @@ pub fn zero(name: &str) -> Option<horizon_shaders::Val> {
     Some(horizon_shaders::Val::vector(&[0.0; 16][..components(name)]))
 }
 
-/// The position of `name` in [`NAMES`].
+/// The position of `name` in [`NAMES`]. Found by hash: every frame looks names up (the fog, each
+/// built-in the custom uniforms name), and a scan of the list compared about half of its names
+/// each time.
 pub fn index(name: &str) -> Option<usize> {
-    NAMES.iter().position(|n| *n == name)
+    static POSITIONS: std::sync::OnceLock<std::collections::HashMap<&'static str, usize>> =
+        std::sync::OnceLock::new();
+    POSITIONS
+        .get_or_init(|| NAMES.iter().enumerate().map(|(i, &n)| (n, i)).collect())
+        .get(name)
+        .copied()
 }
 
 /// The position in [`NAMES`] of the value a program reads as `name`; `geometry`: the program
@@ -1252,6 +1259,18 @@ mod tests {
             (&Value::i(&[1]), "horizonWaterPatchCount", "int", true),
         ] {
             assert_eq!(value.read_as(name, ty), kept, "{ty} {name}");
+        }
+    }
+
+    /// Each built-in is found at its own position of `NAMES`, one position a name, and other
+    /// names aren't found.
+    #[test]
+    fn names_are_found_at_their_own_position() {
+        for (i, name) in NAMES.iter().enumerate() {
+            assert_eq!(index(name), Some(i), "{name}");
+        }
+        for name in ["", "colortex0", "cameraPositio", "cameraPosition "] {
+            assert_eq!(index(name), None, "{name:?}");
         }
     }
 
