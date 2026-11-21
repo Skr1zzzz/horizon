@@ -350,26 +350,34 @@ impl Game<'_> {
     /// minutes per level, with Trial Omen's sound when it is new. `uuid` is
     /// the player found: the one in the game's frame, else a guest.
     fn bad_omen_to_trial_omen(&mut self, uuid: Uuid) {
+        // The player in place, whose effects are the game's. A spawner ticks
+        // outside any turn: on a server nobody is in place, and `acting_uuid`
+        // still names the world's owner, who is one of its guests.
+        let in_place = self.player.as_ref().map(|_| self.acting_uuid());
+        let guests = self.lan.iter().flat_map(|host| {
+            host.hub
+                .guests
+                .iter()
+                .map(|g| (g.conn, horizon_client::lan::playerdata::uuid_ints(g.uuid)))
+        });
         // MobEffect.onEffectAdded plays at the player's feet.
-        let feet = if self.acting_uuid() == uuid {
-            let added = transform_bad_omen(&mut self.potions.effects);
-            self.player
-                .as_ref()
-                .filter(|_| added)
-                .map(|p| [p.position.x, p.position.y, p.position.z])
-        } else {
-            let acting = self.lan_acting;
-            let Some(host) = self.lan.as_mut() else {
-                return;
-            };
-            let Some(index) = host.hub.guests.iter().position(|g| {
-                horizon_client::lan::playerdata::uuid_ints(g.uuid) == uuid && Some(g.conn) != acting
-            }) else {
-                return;
-            };
-            host.hub.guests.update(index, |guest| {
-                transform_bad_omen(&mut guest.effects).then_some(guest.position)
-            })
+        let feet = match omen_holder(uuid, in_place, self.lan_acting, guests) {
+            Some(OmenHolder::InPlace) => {
+                let added = transform_bad_omen(&mut self.potions.effects);
+                self.player
+                    .as_ref()
+                    .filter(|_| added)
+                    .map(|p| [p.position.x, p.position.y, p.position.z])
+            }
+            Some(OmenHolder::Guest(index)) => {
+                let Some(host) = self.lan.as_mut() else {
+                    return;
+                };
+                host.hub.guests.update(index, |guest| {
+                    transform_bad_omen(&mut guest.effects).then_some(guest.position)
+                })
+            }
+            None => return,
         };
         if let Some(at) = feet {
             self.audio
@@ -385,6 +393,37 @@ impl Game<'_> {
         }
         self.world.modified.insert((key.0 >> 4, key.2 >> 4));
     }
+}
+
+/// Whose effects `transformBadOmenIntoTrialOmen` changes.
+#[derive(Debug, PartialEq)]
+enum OmenHolder {
+    /// The game's own: the player found is the one in place.
+    InPlace,
+    /// The record of the guest at this index of the hub's list.
+    Guest(usize),
+}
+
+/// Whose effects hold the omen of the player `uuid` a trial spawner found:
+/// the game's own while that player is in place (`in_place`: the UUID of the
+/// guest whose turn runs, or of the window's player; none when nobody is in
+/// place), else the record of the guest with that UUID among `guests` (each
+/// one's connection and UUID), past the acting one (`acting`), whose record
+/// lags behind the game's. A server has no player of its own: outside a turn,
+/// its world's owner is a guest like any other.
+fn omen_holder(
+    uuid: Uuid,
+    in_place: Option<Uuid>,
+    acting: Option<u32>,
+    guests: impl IntoIterator<Item = (u32, Uuid)>,
+) -> Option<OmenHolder> {
+    if in_place == Some(uuid) {
+        return Some(OmenHolder::InPlace);
+    }
+    guests
+        .into_iter()
+        .position(|(conn, g)| g == uuid && Some(conn) != acting)
+        .map(OmenHolder::Guest)
 }
 
 /// Swap Bad Omen for Trial Omen on `effects`; true when Trial Omen is new.
@@ -425,5 +464,34 @@ mod omen_tests {
         );
         assert_eq!(omen_of(&e), Some(Omen::Trial));
         assert!(!transform_bad_omen(&mut e));
+    }
+
+    /// `transformBadOmenIntoTrialOmen` changes the found player's own
+    /// effects. A spawner ticks outside any turn, and a server has no player
+    /// of its own: single player's owner (`level.player_uuid`, which
+    /// `acting_uuid` still answers there) is one of its guests, so their
+    /// record must change, or their Bad Omen stays and Trial Omen never
+    /// comes. Only a player in place has their effects on the game.
+    #[test]
+    fn a_trial_spawner_turns_the_omen_of_the_guest_it_found() {
+        const OWNER: Uuid = [0, 0, 0, 1];
+        const OTHER: Uuid = [0, 0, 0, 2];
+        let guests = [(7, OTHER), (9, OWNER)];
+        // Outside any turn nobody is in place: the owner's record.
+        assert_eq!(
+            omen_holder(OWNER, None, None, guests),
+            Some(OmenHolder::Guest(1))
+        );
+        // The owner's own turn: their effects are on the game.
+        assert_eq!(
+            omen_holder(OWNER, Some(OWNER), Some(9), guests),
+            Some(OmenHolder::InPlace)
+        );
+        // Another guest's turn: still the owner's record.
+        assert_eq!(
+            omen_holder(OWNER, Some(OTHER), Some(7), guests),
+            Some(OmenHolder::Guest(1))
+        );
+        assert_eq!(omen_holder([0, 0, 0, 3], None, None, guests), None);
     }
 }
