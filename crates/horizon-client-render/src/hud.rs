@@ -18,6 +18,7 @@ use model_reducing::{full_size_sprites, mod_namespaces, reducible_model_sprites}
 mod animate;
 pub mod cit_glint;
 mod clip_corner;
+pub mod dynamic_textures;
 mod gui_sprite;
 mod menu_pictures;
 mod model_reducing;
@@ -126,6 +127,9 @@ pub struct HudAtlas {
     pub material_maps: std::sync::Arc<[Option<crate::paged_maps::PagedMap>; 2]>,
     /// The white texel flat fills sample (also `hud_kit::shapes`).
     pub(crate) white: Rect,
+    /// Where client mods' dynamic textures go (`dynamic_textures`): packed only with a client
+    /// mod loaded, and out of `sprites`, which name each image instead.
+    pub dynamic_texture_page: Option<dynamic_textures::Page>,
 }
 /// Atlas rows reserved for glyphs rasterized at run time.
 pub const GLYPH_ROWS: u32 = 512;
@@ -965,15 +969,18 @@ impl HudAtlas {
         Self::build_over_with_image(root, defaults, false)
     }
     /// The atlas above, with a slot for a client mod's own image
-    /// (`horizon/modimage`) only when `mod_image` says a client mod is loaded,
-    /// native or wasm: the slot costs 4 MiB of pixels, so a game without
-    /// mods holds none of them.
+    /// (`horizon/modimage`) and the page of client mods' dynamic textures
+    /// (`dynamic_texture_page`) only when `mod_image` says a client mod is
+    /// loaded, native or wasm: the slot costs 4 MiB of pixels and the page 8,
+    /// so a game without mods holds none of them.
     pub fn build_over_with_image(
         root: &ResourceSource,
         defaults: &ResourceSource,
         mod_image: bool,
     ) -> Result<Self> {
         let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, mod_image)?;
+        atlas.dynamic_texture_page =
+            dynamic_textures::Page::take(&mut atlas.sprites, atlas.width, atlas.height);
         pack_text::load_shaders(&mut atlas, root, defaults);
         atlas.sprite_modifiers = std::sync::Arc::new(sprite_modifiers::SpriteModifiers::read(
             root,
@@ -998,12 +1005,20 @@ impl HudAtlas {
             crate::minimap::SIZE as u32,
             Vec::new(),
         ));
-        // A mod's own image (`mod_image`), only when a client mod is loaded.
+        // A mod's own image (`mod_image`) and the mods' dynamic textures, only when a client
+        // mod is loaded.
         if mod_image {
             images.push((
                 MOD_IMAGE_SPRITE.into(),
                 MOD_IMAGE_SIZE,
                 MOD_IMAGE_SIZE,
+                Vec::new(),
+            ));
+            let [width, height] = dynamic_textures::PAGE;
+            images.push((
+                dynamic_textures::PAGE_SPRITE.into(),
+                width,
+                height,
                 Vec::new(),
             ));
         }
@@ -1067,6 +1082,7 @@ impl HudAtlas {
             emissive: Arc::default(),
             blinks: Default::default(),
             white,
+            dynamic_texture_page: None,
         })
     }
     /// The boot screen's atlas, before any pack loads: the theme's run-time
@@ -1135,6 +1151,7 @@ impl HudAtlas {
             random_textures: Default::default(),
             emissive: Default::default(),
             blinks: Default::default(),
+            dynamic_texture_page: None,
         }
     }
     /// Shelf placements of `images` (tallest first) in the narrowest atlas
@@ -1699,6 +1716,7 @@ impl HudAtlas {
             blinks,
             font,
             white,
+            dynamic_texture_page: None,
         })
     }
     /// `misc/<name>.png` on its own, or a transparent texel if the resource
@@ -3269,7 +3287,8 @@ mod tests {
         assert!(atlas.object_skins.is_empty());
     }
 
-    /// The mod image slot is paid only by a game with a client mod loaded.
+    /// The mod image slot and the dynamic texture page are paid only by a game with a client
+    /// mod loaded; no sprite name reaches the page.
     #[test]
     fn the_mod_image_slot_exists_only_when_a_mod_is_loaded() {
         let root = Path::new("/nonexistent/horizon-test-assets");
@@ -3278,6 +3297,7 @@ mod tests {
         ))
         .unwrap();
         assert!(!plain.sprites.contains_key(MOD_IMAGE_SPRITE));
+        assert_eq!(plain.dynamic_texture_page, None);
         let with_mod = HudAtlas::build_over_with_image(
             &horizon_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
             &horizon_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
@@ -3285,6 +3305,10 @@ mod tests {
         )
         .unwrap();
         assert!(with_mod.sprites.contains_key(MOD_IMAGE_SPRITE));
+        let page = with_mod.dynamic_texture_page.expect("a page");
+        assert_eq!(page.size, dynamic_textures::PAGE);
+        assert_eq!(page.atlas, [with_mod.width, with_mod.height]);
+        assert!(!with_mod.sprites.contains_key(dynamic_textures::PAGE_SPRITE));
     }
 
     #[test]

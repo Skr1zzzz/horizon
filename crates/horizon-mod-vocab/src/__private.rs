@@ -198,6 +198,11 @@ pub mod built {
             biome,
         }
     }
+    /// What a mod may still create of its dynamic textures, constructed by the game and only read
+    /// by mods.
+    pub fn dynamic_texture_budget(images: u32, bytes: u64) -> crate::DynamicTextureBudget {
+        crate::DynamicTextureBudget { images, bytes }
+    }
     /// The replay this window plays, constructed by the game and only read by mods.
     pub fn replay_state(
         recording: String,
