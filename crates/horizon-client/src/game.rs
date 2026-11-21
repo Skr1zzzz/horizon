@@ -5977,10 +5977,13 @@ impl Game<'_> {
         let world = &self.world;
         let particle_mode = self.settings.horizon.particle_culling;
         if particle_mode == horizon_client::graphics::ParticleCullingMode::Off {
-            self.particles.render(
+            // Vanilla's own test, whatever the setting says: no quad for a particle outside the
+            // camera's frustum pulled back 3 blocks (`ParticleEngine.extract`, #7255).
+            self.particles.render_in_view(
                 camera,
                 self.particle_rotation(),
                 alpha as f32,
+                self.view_frustum.as_ref(),
                 &|b| world.light(b[0], b[1], b[2]),
                 out,
             );
