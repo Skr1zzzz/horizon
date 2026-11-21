@@ -1094,6 +1094,7 @@ one of these moments has to move that logic into a client native mod.
 | `render_hand.rs` | `render_hand` |
 | `render_item_in_frame.rs` | `render_item_in_frame` |
 | `render_level_stage.rs` | `render_level_stage` |
+| `render_living_equipment.rs` | `render_living_equipment` |
 | `render_living_post.rs` | `render_living_post` |
 | `render_living_pre.rs` | `render_living_pre` |
 | `render_name_tag.rs` | `render_name_tag` |

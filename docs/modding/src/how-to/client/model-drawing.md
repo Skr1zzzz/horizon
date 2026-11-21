@@ -154,11 +154,13 @@ Each mob and player in view gets the render hook pair once a frame, NeoForge's
 1. `render_player_pre(player, who, draw, hidden, canceled)`, for a player only (`who` is its
    profile name and whether it is this window's own);
 2. `render_living_pre(entity, draw, hidden, canceled)`, before the entity's model;
-3. the model and its vanilla layers, or in their place the renderer a mod registered for its type
+3. `render_living_equipment(entity, equipment)`, when neither pre hook canceled
+   ([below](#a-living-entitys-armour-and-held-items));
+4. the model and its vanilla layers, or in their place the renderer a mod registered for its type
    ([entity renderers](entity-renderers.md)), then the layers mods added to its type
    ([entity layers](entity-layers.md));
-4. `render_living_post(entity, parts, draw)`;
-5. `render_player_post(player, who, parts, draw)`, for a player only.
+5. `render_living_post(entity, parts, draw)`;
+6. `render_player_post(player, who, parts, draw)`, for a player only.
 
 The order today: the model and the layers are drawn before the post hooks; the entity's name tag, leash, flames
 and shadow are drawn in the frame's later passes, after them. The reference draws the leash and the name tag
@@ -172,8 +174,8 @@ shadow, flames, leash and glowing outline, and the post hooks. A mod that draws 
 its own draws it in `render_living_pre` and cancels; one that draws every entity of a type registers
 a renderer for the type instead; one that wants the name tag or the shadow then draws them itself, or doesn't cancel.
 Canceling only `render_living_pre` of a player still asks its `render_player_post`. An entity the
-frame culls gets neither hook. The game asks once a frame whether any mod listens to the four, and
-with none builds nothing for them.
+frame culls gets neither hook. The game asks once a frame whether any mod listens to the four (and
+to `render_living_equipment`), and with none builds nothing for them.
 
 ## A player's or humanoid's parts
 
@@ -197,6 +199,40 @@ Typed humanoid parts have separate storage, so all twelve fit alongside the eigh
 - The body loses the part, and so do the layers drawn on the body's own model, as vanilla's
   `getParentModel()` layers do: a villager's type, profession and level, a spider's eyes. The
   armour, held items and other layers keep every part, and the cape, a layer of its own, stays.
+
+## A living entity's armour and held items
+
+`render_living_equipment(entity, equipment)` comes right after `render_living_pre` for every mob
+and player in view whose pre hooks didn't cancel, this window's own player included. `equipment`
+(`EquipmentRender`) starts with everything shown and untinted; it changes what the entity wears and
+holds this frame without replacing its model, as a mod that hides armour or colours a shield by
+its state does:
+
+```rust,ignore
+fn render_living_equipment(&self, _: &dyn ClientHost, event: &mut RenderLivingEquipmentEvent<'_>) {
+    use mod_api::{EquipmentRenderPart as Part, EquipmentRenderSlot as Slot};
+    event.equipment.hide(Slot::Head, Part::Base);
+    event.equipment.tint(Slot::OffHand, 0xFF_4040);
+}
+```
+
+- The slots (`EquipmentRenderSlot`) are `Head`, `Chest`, `Legs` and `Feet`; `Body` (a wolf's,
+  horse's or nautilus's armour, a llama's carpet, a happy ghast's harness); `Elytra`, the wings,
+  a slot of its own though worn in the chest slot; and `MainHand` and `OffHand`. `Head` also
+  covers the item `CustomHeadLayer` draws on the head (a carved pumpkin, a skull).
+- `hide(slot, part)` leaves out `Part::Base`, the piece with all that is drawn over it (its dyed
+  and emissive layers, its glint and trim), or only its `Part::Glint` or its `Part::Trim`.
+- `tint(slot, rgb)` multiplies the colour the slot draws in by `0xRRGGBB`, channel by channel; the
+  high byte is ignored. It reaches the piece, its dyed and emissive layers and its trim, not its
+  glint. A second tint, from the same mod or the next, multiplies the first.
+- Only what Horizon draws for a slot changes: a mob's armour has no trim drawn and a body armour no
+  glint, so hiding those does nothing. The body, its other layers, the cape and the mods' layers
+  stay; hide model parts with `render_living_pre`.
+- It holds for this frame and this entity only. The screens' previews of the player (the
+  inventory's) are drawn as vanilla draws them.
+
+It is a hook of its own rather than a field of `RenderLivingPreEvent` so that wasm mods built
+before it keep loading.
 
 ## Text and animation in block entities
 
