@@ -257,7 +257,7 @@ mod inter_stage_tests;
 mod look_pack_tests;
 mod msaa;
 mod particle_expand;
-pub use particle_expand::ParticleQuad;
+pub use particle_expand::{ParticleQuad, ParticleQuads};
 mod section_fade;
 #[cfg(test)]
 mod sprite_arrays_tests;
@@ -1731,6 +1731,8 @@ pub struct Renderer {
     entity_batch: EntityBatch,
     /// Ordinary entity models posed on the GPU; `None` without compute shaders.
     entity_skin: Option<entity_skin::EntitySkin>,
+    /// This frame's particle quads as records (`stage_particle_quads`), and where they go.
+    particle_quads: ParticleQuads,
     group: wgpu::BindGroup,
     fluid_group: wgpu::BindGroup,
     fluid_sampler: wgpu::Sampler,
@@ -4725,6 +4727,7 @@ impl Renderer {
             static_entity_index_quads,
             entity_batch: EntityBatch::default(),
             entity_skin,
+            particle_quads: ParticleQuads::default(),
             group,
             fluid_group,
             fluid_sampler,
@@ -6603,6 +6606,30 @@ impl Renderer {
             )
     }
 
+    /// Whether this frame's particle quads may come as records (`stage_particle_quads`) instead
+    /// of vertices in `Frame::entities`: `HORIZON_PARTICLES_GPU=1`, and nothing reads the stream
+    /// they then stay out of. A shader pack's `gbuffers_particles` and `gbuffers_textured` draw
+    /// its PARTICLES runs (and Horizon's own packs their entity stages), frame generation follows
+    /// its motion, the ray scene's entity layer is built from its vertices, and a mod may read
+    /// its spans or `world_drawn`'s entities: each keeps the vertices.
+    pub fn expands_particles(&self) -> bool {
+        particle_expand::wanted()
+            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
+            && self.executor.is_none()
+            && !self.frame_gen.on
+            && !self.traces_entities()
+            && !native_render::needs().entity_spans
+            && !native_render::world_drawn_hooked()
+    }
+
+    /// This frame's particle quads as records (`ParticleEngine::render_quads_in_view`), for
+    /// `render` to put where their `cut` says in the entity stream. They are swapped for the
+    /// renderer's last ones, handed back empty.
+    pub fn stage_particle_quads(&mut self, quads: &mut ParticleQuads) {
+        std::mem::swap(&mut self.particle_quads, quads);
+        quads.clear();
+    }
+
     /// Whether the layers tagged `OIT_ENTITY` (the eyes render type's, horse
     /// markings, a slime's outer cube) may be posed on the GPU too
     /// (`mobs::skin::SkinModels::tagged`): only with improved transparency off,
@@ -7536,6 +7563,8 @@ impl Renderer {
         let refusal = self.refusal.take();
         self.not_drawn = NotDrawn::settle(self.not_drawn, refusal, &rendered, scaled.is_some());
         self.finish_prepared_frame();
+        // The staged particle quads were this frame's.
+        self.particle_quads.clear();
         // A frame that was not drawn still submits the section copies and
         // atlas patches (glyphs, skins, maps), which the caller already took.
         if self.device_lost() {
@@ -9272,6 +9301,16 @@ impl Renderer {
             oit.let_go();
         }
         self.cracks_transparent = oit_on && !hdr_gain;
+        // The particle quads the game handed over as records (`stage_particle_quads`) go where
+        // their vertices would have been. `expands_particles` kept them vertices where a pack or a
+        // native pack's entity runs read the stream; a frame where one started since leaves them
+        // out rather than put them anywhere else.
+        let particles_placed =
+            !self.particle_quads.is_empty() && !pack_entities && self.entity_batch.kinds.is_empty();
+        let particle_room = particles_placed.then_some(entity_batch::ParticleRoom {
+            quads: &self.particle_quads,
+            expand: true,
+        });
         let [
             entity_quads,
             text_quads,
@@ -9289,12 +9328,13 @@ impl Renderer {
             native_solid_quads,
             native_cutout_quads,
             native_cutout_mipped_quads,
-        ] = self.entity_batch.update(
+        ] = self.entity_batch.update_with_particles(
             entities,
             frame.additive,
             frame.hand,
             frame.see_through,
             oit_on,
+            particle_room,
         );
         self.entity_batch.append_shadow_only(frame.shadow_only);
         // The posed models' vertices come first: the ordinary entities' draw takes them in.
@@ -9480,6 +9520,13 @@ impl Renderer {
                 oit_on,
                 &mut self.prepared_cuts,
             );
+            // A copy drawn after the particles comes after their opaque quads' room too.
+            if particles_placed {
+                self.particle_quads.shift_cuts(
+                    self.prepared_draws.iter().map(|draw| draw.cpu_vertices),
+                    &mut self.prepared_cuts,
+                );
+            }
             prepared_model::fill_instance_ranges(
                 entity_quads * 4,
                 &self.prepared_draws,

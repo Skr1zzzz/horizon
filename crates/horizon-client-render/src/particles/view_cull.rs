@@ -1,7 +1,7 @@
 //! The camera's view frustum for particles: vanilla's always-on point test, and the section
 //! cache behind the opt-in Particle Culling setting.
 
-use super::{Particle, ParticleEngine, Vertex};
+use super::{Particle, ParticleEngine, ParticleQuads, Vertex};
 use glam::{DVec3, Quat, Vec3 as FVec3};
 use std::array;
 
@@ -124,6 +124,22 @@ impl ParticleEngine {
         light_at: &dyn Fn([i32; 3]) -> u8,
         out: &mut Vec<Vertex>,
     ) {
+        self.render_quads_in_view(camera, base, partial, view, light_at, out, None);
+    }
+
+    /// [`Self::render_in_view`], with `quads` (when given) taking the frame's quads that are not
+    /// additive as records instead of `out` their vertices, for the renderer to expand
+    /// (`Renderer::stage_particle_quads`). `quads.cut` is `out`'s length before: where they go.
+    pub fn render_quads_in_view(
+        &self,
+        camera: DVec3,
+        base: Quat,
+        partial: f32,
+        view: Option<&crate::gfx::JoinedFrusta>,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+        out: &mut Vec<Vertex>,
+        quads: Option<&mut ParticleQuads>,
+    ) {
         self.render_inner::<false>(
             camera,
             base,
@@ -133,6 +149,7 @@ impl ParticleEngine {
             &mut |_, _| false,
             light_at,
             out,
+            quads,
         );
     }
 }

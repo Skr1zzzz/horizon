@@ -1208,6 +1208,9 @@ struct Game<'a> {
     text_patches: std::cell::RefCell<Vec<horizon_client::font::Patch>>,
     /// Prepared block-entity copies for this frame, in entity-stream order.
     prepared_model_draws: std::cell::RefCell<Vec<horizon_client::gfx::PreparedModelDraw>>,
+    /// This frame's particle quads as records, when the renderer expands them
+    /// (`Renderer::expands_particles`); empty otherwise.
+    particle_quads: horizon_client::gfx::ParticleQuads,
     world_geometry: Option<horizon_client::world_geometry::WorldGeometry>,
     /// `DebugRenderer.renderers`: the ids `debug_renderer_draw` is asked about.
     debug_renderers: Vec<String>,
@@ -5960,6 +5963,8 @@ impl Game<'_> {
         fov_degrees: f32,
         out: &mut Vec<Vertex>,
     ) {
+        // Records no renderer took (`stage_particle_quads`) were an earlier frame's.
+        self.particle_quads.clear();
         self.apply_mod_particle_clear();
         if self.client_particle_count() == 0 {
             return;
@@ -5976,16 +5981,25 @@ impl Game<'_> {
         self.mark_stage(out.len(), "PARTICLES");
         let world = &self.world;
         let particle_mode = self.settings.horizon.particle_culling;
+        // Where the renderer expands them (`HORIZON_PARTICLES_GPU`, `Renderer::expands_particles`),
+        // the camera-facing quads go to it as records instead of into `out`.
+        let mut quads = std::mem::take(&mut self.particle_quads);
+        let records = self
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.expands_particles())
+            .then_some(&mut quads);
         if particle_mode == horizon_client::graphics::ParticleCullingMode::Off {
             // Vanilla's own test, whatever the setting says: no quad for a particle outside the
             // camera's frustum pulled back 3 blocks (`ParticleEngine.extract`, #7255).
-            self.particles.render_in_view(
+            self.particles.render_quads_in_view(
                 camera,
                 self.particle_rotation(),
                 alpha as f32,
                 self.view_frustum.as_ref(),
                 &|b| world.light(b[0], b[1], b[2]),
                 out,
+                records,
             );
         } else {
             let frustum = self.view_frustum;
@@ -5999,7 +6013,7 @@ impl Game<'_> {
             });
             {
                 let mut particle_culling = self.particle_occlusion_context(camera);
-                self.particles.render_culled(
+                self.particles.render_quads_culled(
                     camera,
                     self.particle_rotation(),
                     alpha as f32,
@@ -6009,10 +6023,14 @@ impl Game<'_> {
                     &mut |min, max| particle_culling.hidden(min, max),
                     &|b| world.light(b[0], b[1], b[2]),
                     out,
+                    records,
                 );
             }
             self.finish_async_particle_culling();
         }
+        // Prepared copies staged from here on draw after the particles.
+        quads.draws_before = self.prepared_model_draws.borrow().len() as u32;
+        self.particle_quads = quads;
         self.mark_entity(out.len(), "minecraft:item");
         self.pickup_item_geometry(camera, alpha, out);
         self.mark_motion(out.len(), 0);
@@ -6032,6 +6050,7 @@ impl Game<'_> {
         if self.mod_clear_particles.get() {
             self.apply_mod_particle_clear();
             out.truncate(first);
+            self.particle_quads.clear();
             {
                 let mut frame = self.skin_frame.borrow_mut();
                 frame.truncate(skin);
@@ -8831,6 +8850,7 @@ impl Game<'_> {
                 });
                 self.native_shaders.hand_over(renderer);
                 renderer.stage_prepared_draws(&prepared_draws);
+                renderer.stage_particle_quads(&mut self.particle_quads);
                 consume(renderer, &frame)
             }
             None => Err("renderer".into()),
@@ -10641,6 +10661,7 @@ impl<'a> Game<'a> {
             live_scenes: Default::default(),
             text_patches: Default::default(),
             prepared_model_draws: Default::default(),
+            particle_quads: Default::default(),
             world_geometry: Some(Default::default()),
             debug_renderers: Vec::new(),
             debug_renderers_version: None,

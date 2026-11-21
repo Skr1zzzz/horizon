@@ -1,6 +1,7 @@
 //! Stable entity material grouping with renderer-owned, reusable CPU scratch.
 use super::Vertex;
 use super::native_entity::EntityRuns;
+use super::particle_expand::ParticleQuads;
 use super::rt::scene::GEOMETRIES;
 use horizon_shader_api::stages::RAY_ENTITY_QUAD;
 
@@ -20,6 +21,10 @@ use horizon_shader_api::stages::RAY_ENTITY_QUAD;
 /// Sorted still-fluid geometry follows, then the two native world-canvas text materials,
 /// NORMAL and POLYGON_OFFSET. Material storage order is independent of their draw stages.
 const MATERIALS: usize = 16;
+/// The materials particle quads take: the ordinary entities' (the opaque particle layer) and the
+/// translucent particle layer's.
+pub(super) const ORDINARY: usize = 0;
+pub(super) const TRANSLUCENT_PARTICLES: usize = 7;
 pub const TERRAIN_MODEL_SOLID_OVERLAY: u32 = 42;
 pub const TERRAIN_MODEL_CUTOUT_OVERLAY: u32 = 43;
 pub const TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY: u32 = 44;
@@ -138,6 +143,19 @@ const OVERLAY_MATERIAL: [u8; 45] = {
     table[TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY as usize] = 15;
     table
 };
+const _: () = assert!(
+    OVERLAY_MATERIAL[TRANSLUCENT_PARTICLE_OVERLAY as usize] as usize == TRANSLUCENT_PARTICLES
+);
+
+/// The particle quads a frame handed over as records (`Renderer::stage_particle_quads`), for
+/// `EntityBatch::update_with_particles` to put where the engine would have pushed their vertices.
+#[derive(Clone, Copy)]
+pub(super) struct ParticleRoom<'a> {
+    pub(super) quads: &'a ParticleQuads,
+    /// Write their vertices into `combined`; otherwise leave zeros there, for the GPU to write
+    /// (`particle_expand.wgsl`).
+    pub(super) expand: bool,
+}
 
 #[inline]
 fn quad_distance_sq(q: &[Vertex; 4]) -> f32 {
@@ -191,6 +209,9 @@ pub(super) struct EntityBatch {
     /// takes of them.
     pub(super) ray_only: Vec<Vertex>,
     pub(super) ray_kinds: EntityRuns,
+    /// Where the last `update` put the handed-over particle quads in `combined` ([`ParticleRoom`]):
+    /// the opaque layer's and the translucent layer's, as (first vertex, vertices).
+    pub(super) particle_room: [(u32, u32); 2],
     /// The last `update`'s `oit`.
     oit: bool,
 }
@@ -231,6 +252,8 @@ impl EntityBatch {
         self.ray_kinds.clear();
     }
 
+    /// [`Self::update_with_particles`] with no particle quads handed over.
+    #[cfg(test)]
     pub(super) fn update(
         &mut self,
         entities: &[Vertex],
@@ -239,6 +262,25 @@ impl EntityBatch {
         see_through: &[Vertex],
         oit: bool,
     ) -> [u32; MATERIALS] {
+        self.update_with_particles(entities, additive, hand, see_through, oit, None)
+    }
+
+    /// Sorts `entities` into `combined` by material, `particles`' quads (when the frame handed any
+    /// over as records) where the engine would have pushed their vertices, then appends `additive`,
+    /// `hand` and `see_through`. Returns each material's quads.
+    pub(super) fn update_with_particles(
+        &mut self,
+        entities: &[Vertex],
+        additive: &[Vertex],
+        hand: &[Vertex],
+        see_through: &[Vertex],
+        oit: bool,
+        particles: Option<ParticleRoom<'_>>,
+    ) -> [u32; MATERIALS] {
+        debug_assert!(
+            particles.is_none() || self.kinds.is_empty(),
+            "a native pack's entity runs count the stream the particle quads stay out of"
+        );
         let quads = entities.as_chunks::<4>().0;
         for runs in &mut self.runs {
             runs.clear();
@@ -269,19 +311,47 @@ impl EntityBatch {
             counts[kind] += len;
         }
         let entity_vertices = quads.len() * 4;
+        // The handed-over particle quads go before the stream's quad `cut`, in their materials.
+        let cut = particles.map_or(quads.len(), |p| (p.quads.cut as usize / 4).min(quads.len()));
+        let particle_vertices = particles.map_or(0, |p| p.quads.len() * 4);
         self.combined.clear();
-        self.combined
-            .reserve(entity_vertices + additive.len() + hand.len() + see_through.len());
+        self.combined.reserve(
+            entity_vertices + particle_vertices + additive.len() + hand.len() + see_through.len(),
+        );
+        self.particle_room = [(0, 0); 2];
         let all_ordinary = counts[0] == quads.len();
-        if all_ordinary {
+        if all_ordinary && particles.is_none() {
             self.combined
                 .extend_from_slice(&entities[..entity_vertices]);
         } else {
-            for runs in &self.runs[..10] {
-                for &(first, count) in runs {
-                    self.combined
-                        .extend_from_slice(&entities[first * 4..(first + count) * 4]);
+            for (kind, runs) in self.runs[..10].iter().enumerate() {
+                let slot = match kind {
+                    ORDINARY => Some(0),
+                    TRANSLUCENT_PARTICLES => Some(1),
+                    _ => None,
+                };
+                match slot {
+                    Some(slot) => {
+                        self.particle_room[slot] = copy_runs_with_room(
+                            &mut self.combined,
+                            entities,
+                            runs,
+                            cut,
+                            particles,
+                            slot,
+                        );
+                    }
+                    None => {
+                        for &(first, count) in runs {
+                            self.combined
+                                .extend_from_slice(&entities[first * 4..(first + count) * 4]);
+                        }
+                    }
                 }
+            }
+            if let Some(p) = particles {
+                counts[ORDINARY] += p.quads.opaque.len();
+                counts[TRANSLUCENT_PARTICLES] += p.quads.translucent.len();
             }
         }
         // `RenderTypes.eyes` is blended like the other entities, not added: with
@@ -389,6 +459,57 @@ impl EntityBatch {
         }
         self.kinds.clear();
     }
+}
+
+/// Copies one material's `runs` of `entities` onto `combined`, with the room of `particles`' list
+/// `slot` (0 the opaque particle layer's, 1 the translucent's) before the first of them at or past
+/// the stream's quad `cut`. Returns where the room is in `combined`, as (first vertex, vertices).
+fn copy_runs_with_room(
+    combined: &mut Vec<Vertex>,
+    entities: &[Vertex],
+    runs: &[(usize, usize)],
+    cut: usize,
+    particles: Option<ParticleRoom<'_>>,
+    slot: usize,
+) -> (u32, u32) {
+    let mut room = None;
+    for &(first, count) in runs {
+        let end = first + count;
+        if room.is_none() && end > cut {
+            let split = cut.max(first);
+            combined.extend_from_slice(&entities[first * 4..split * 4]);
+            room = Some(push_room(combined, particles, slot));
+            combined.extend_from_slice(&entities[split * 4..end * 4]);
+        } else {
+            combined.extend_from_slice(&entities[first * 4..end * 4]);
+        }
+    }
+    room.unwrap_or_else(|| push_room(combined, particles, slot))
+}
+
+/// Pushes the room of `particles`' list `slot` onto `combined`: the records' vertices, or zeros
+/// for the GPU to write. Returns it as (first vertex, vertices).
+fn push_room(
+    combined: &mut Vec<Vertex>,
+    particles: Option<ParticleRoom<'_>>,
+    slot: usize,
+) -> (u32, u32) {
+    let first = combined.len();
+    if let Some(p) = particles {
+        let list = if slot == 0 {
+            &p.quads.opaque
+        } else {
+            &p.quads.translucent
+        };
+        if p.expand {
+            for quad in list {
+                combined.extend_from_slice(&quad.vertices());
+            }
+        } else {
+            combined.resize(first + list.len() * 4, bytemuck::Zeroable::zeroed());
+        }
+    }
+    (first as u32, (combined.len() - first) as u32)
 }
 
 /// One cut, walked from the start of the stream. Tests compare the linear pass with this.
@@ -935,6 +1056,113 @@ mod tests {
                         .map(|b| b.capacity() * std::mem::size_of::<(usize, usize)>())
                         .sum::<usize>()
             );
+        }
+    }
+
+    /// The particle quads a frame hands over as records land in `combined` where the vertices
+    /// the engine would have pushed at the cut land, written by the batch or left as zeros the
+    /// GPU writes, among every other material, with improved transparency on and off.
+    #[test]
+    fn handed_over_particle_quads_land_where_their_vertices_would() {
+        use crate::gfx::ParticleQuad;
+        let layers = [
+            0,
+            SHADOW_OVERLAY,
+            TRANSLUCENT_PARTICLE_OVERLAY,
+            TRANSLUCENT_ITEM_OVERLAY,
+            TEXT_POLYGON_OFFSET_OVERLAY,
+            11,
+            OIT_ENTITY,
+            2 << 16,
+            FLUID_OVERLAY,
+            WORLD_TEXT_OVERLAY,
+            TERRAIN_MODEL_SOLID_OVERLAY,
+        ];
+        let mut state = 0x9e37_79b9u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state >> 8
+        };
+        for oit in [false, true] {
+            for _trial in 0..24 {
+                let quads_in_stream = next() % 40;
+                let stream: Vec<Vertex> = (0..quads_in_stream)
+                    .flat_map(|q| {
+                        let layer = layers[next() as usize % layers.len()];
+                        std::array::from_fn::<_, 4, _>(|corner| Vertex {
+                            layer,
+                            pos: [q as f32, corner as f32, -1.0],
+                            ..geometry(1, false)[0]
+                        })
+                    })
+                    .collect();
+                let cut = (next() as usize % (stream.len() / 4 + 1)) * 4;
+                let mut quads = ParticleQuads {
+                    cut: cut as u32,
+                    ..Default::default()
+                };
+                // What the engine would have pushed there, in its order.
+                let mut pushed = Vec::new();
+                for i in 0..next() % 12 {
+                    let overlay = if next() % 3 == 0 {
+                        TRANSLUCENT_PARTICLE_OVERLAY
+                    } else {
+                        0
+                    };
+                    let quad = ParticleQuad {
+                        center: [i as f32, 0.5, -2.0],
+                        layer: overlay | ((next() % 3) << 16),
+                        d0: [0.25, -0.25, 0.0],
+                        color: next(),
+                        d1: [0.25, 0.25, 0.0],
+                        light: 0xf0,
+                        uv: [0.0, 0.0, 0.5, 0.5],
+                    };
+                    pushed.extend_from_slice(&quad.vertices());
+                    quads.list(quad.layer).expect("a particle layer").push(quad);
+                }
+                let with_vertices: Vec<Vertex> = stream[..cut]
+                    .iter()
+                    .chain(&pushed)
+                    .chain(&stream[cut..])
+                    .copied()
+                    .collect();
+                let mut cpu = EntityBatch::default();
+                let counts = cpu.update(&with_vertices, &[], &[], &[], oit);
+                for expand in [true, false] {
+                    let mut batch = EntityBatch::default();
+                    let room = ParticleRoom {
+                        quads: &quads,
+                        expand,
+                    };
+                    let got = batch.update_with_particles(&stream, &[], &[], &[], oit, Some(room));
+                    assert_eq!(got, counts, "oit {oit}");
+                    for (list, (first, vertices)) in [&quads.opaque, &quads.translucent]
+                        .into_iter()
+                        .zip(batch.particle_room)
+                    {
+                        assert_eq!(vertices as usize, list.len() * 4);
+                        for (i, quad) in list.iter().enumerate() {
+                            let at = first as usize + i * 4;
+                            let written = &mut batch.combined[at..at + 4];
+                            if !expand {
+                                // Zeros, which the GPU overwrites with the same vertices.
+                                assert!(
+                                    bytemuck::cast_slice::<_, u8>(&*written)
+                                        .iter()
+                                        .all(|&b| b == 0)
+                                );
+                                written.copy_from_slice(&quad.vertices());
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        bytemuck::cast_slice::<_, u8>(&batch.combined),
+                        bytemuck::cast_slice::<_, u8>(&cpu.combined),
+                        "oit {oit}, expand {expand}"
+                    );
+                }
+            }
         }
     }
 }

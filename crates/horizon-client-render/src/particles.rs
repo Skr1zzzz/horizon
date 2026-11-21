@@ -8,7 +8,7 @@
 use crate::{
     blocks::{BlockFacts, Fluid},
     fast_hash::FxHashMap,
-    gfx::ParticleQuad,
+    gfx::{ParticleQuad, ParticleQuads},
     hud::Rect,
     mesher::Vertex,
     world::World,
@@ -4634,12 +4634,42 @@ impl ParticleEngine {
         pixel_focal_length: f32,
         culling_enabled: bool,
         frustum: Option<&crate::gfx::JoinedFrusta>,
-        mut occluded: impl FnMut([f64; 3], [f64; 3]) -> bool,
+        occluded: impl FnMut([f64; 3], [f64; 3]) -> bool,
         light_at: &dyn Fn([i32; 3]) -> u8,
         out: &mut Vec<Vertex>,
     ) {
+        self.render_quads_culled(
+            camera,
+            base,
+            partial,
+            pixel_focal_length,
+            culling_enabled,
+            frustum,
+            occluded,
+            light_at,
+            out,
+            None,
+        );
+    }
+
+    /// [`Self::render_culled`], with `quads` (when given) taking the frame's quads that are not
+    /// additive as records instead of `out` their vertices, for the renderer to expand
+    /// (`Renderer::stage_particle_quads`). `quads.cut` is `out`'s length before: where they go.
+    pub fn render_quads_culled(
+        &self,
+        camera: DVec3,
+        base: Quat,
+        partial: f32,
+        pixel_focal_length: f32,
+        culling_enabled: bool,
+        frustum: Option<&crate::gfx::JoinedFrusta>,
+        mut occluded: impl FnMut([f64; 3], [f64; 3]) -> bool,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+        out: &mut Vec<Vertex>,
+        quads: Option<&mut ParticleQuads>,
+    ) {
         if !culling_enabled {
-            self.render_in_view(camera, base, partial, frustum, light_at, out);
+            self.render_quads_in_view(camera, base, partial, frustum, light_at, out, quads);
             return;
         }
         self.render_inner::<true>(
@@ -4651,6 +4681,7 @@ impl ParticleEngine {
             &mut occluded,
             light_at,
             out,
+            quads,
         );
     }
 
@@ -4684,6 +4715,7 @@ impl ParticleEngine {
         out: &mut Vec<Vertex>,
         additive_guard: &mut Option<MutexGuard<'s, Vec<Vertex>>>,
         additive_cleared: &mut bool,
+        quads: &mut Option<&mut ParticleQuads>,
     ) {
         let partial_f64 = f64::from(partial);
         let mut last_named: Option<(&'s str, Option<(Rect, bool)>)> = None;
@@ -4842,6 +4874,15 @@ impl ParticleEngine {
                 }
             };
             let layer_hdr = overlay | (u32::from(hdr_tier(p.ty)) << 16);
+            // A Polytone model's faces have corners of their own, which no record holds: from the
+            // first one on, the frame's quads are vertices again, those recorded so far first, so
+            // the stream keeps its order.
+            if p.model.is_some()
+                && !p.additive
+                && let Some(records) = quads.take()
+            {
+                records.expand_into(out);
+            }
             let target: &mut Vec<Vertex> = if p.additive {
                 additive_guard.get_or_insert_with(|| {
                     let mut guard = self.additive.lock().unwrap_or_else(|e| e.into_inner());
@@ -4887,6 +4928,16 @@ impl ParticleEngine {
                 }
                 continue;
             }
+            // A quad that is not additive goes to the renderer as a record while it takes them.
+            let mut target = QuadTarget {
+                vertices: target,
+                records: if p.additive {
+                    None
+                } else {
+                    quads.as_deref_mut()
+                },
+            };
+            let target = &mut target;
             let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
             let uv = [
                 r.u0 + du * p.uv[0],
@@ -4999,7 +5050,12 @@ impl ParticleEngine {
         occluded: &mut dyn FnMut([f64; 3], [f64; 3]) -> bool,
         light_at: &dyn Fn([i32; 3]) -> u8,
         out: &mut Vec<Vertex>,
+        mut quads: Option<&mut ParticleQuads>,
     ) {
+        if let Some(records) = quads.as_deref_mut() {
+            records.clear();
+            records.cut = out.len() as u32;
+        }
         let live_count = self.len();
         let has_gpu = self.polytone_gpu.iter().any(|store| store.len() > 0);
         if live_count == 0 && !has_gpu {
@@ -5054,6 +5110,7 @@ impl ParticleEngine {
                     out,
                     &mut additive_guard,
                     &mut additive_cleared,
+                    &mut quads,
                 );
             }
             for group in &self.groups {
@@ -5075,6 +5132,7 @@ impl ParticleEngine {
                         out,
                         &mut additive_guard,
                         &mut additive_cleared,
+                        &mut quads,
                     );
                 }
             }
@@ -5194,10 +5252,17 @@ fn particle_light(
     }
 }
 
-/// One quad with corners `center ± d0` and `center ± d1` ([`ParticleQuad`]).
+/// Where a particle's quads go: its vertices, or records for the renderer to expand.
+struct QuadTarget<'a> {
+    vertices: &'a mut Vec<Vertex>,
+    records: Option<&'a mut ParticleQuads>,
+}
+
+/// One quad with corners `center ± d0` and `center ± d1` ([`ParticleQuad`]): a record where the
+/// target takes them for its layer, its vertices otherwise.
 #[inline(always)]
 fn emit_quad(
-    target: &mut Vec<Vertex>,
+    target: &mut QuadTarget<'_>,
     center: FVec3,
     d0: FVec3,
     d1: FVec3,
@@ -5215,12 +5280,19 @@ fn emit_quad(
         light,
         uv,
     };
-    target.extend_from_slice(&quad.vertices());
+    match target
+        .records
+        .as_deref_mut()
+        .and_then(|records| records.list(layer))
+    {
+        Some(list) => list.push(quad),
+        None => target.vertices.extend_from_slice(&quad.vertices()),
+    }
 }
 
 #[inline]
 fn emit_rotated_quad(
-    target: &mut Vec<Vertex>,
+    target: &mut QuadTarget<'_>,
     center: FVec3,
     rotation: Quat,
     size: f32,
@@ -5873,6 +5945,139 @@ mod tests {
         let turned = draw(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
         assert_eq!(ahead.len(), 4);
         assert_ne!(ahead, turned);
+    }
+
+    /// With the renderer taking records (`render_quads_in_view`), each layer's records expand to
+    /// the vertices the engine pushes without it, in their order: plain, rolled, shrieking and
+    /// turned quads on the opaque and the translucent layer. Additive quads stay vertices, and a
+    /// Polytone model particle turns the rest of the frame back into vertices, those recorded
+    /// before it first.
+    #[test]
+    fn records_expand_to_the_vertices_the_engine_would_push() {
+        let mut engine = ParticleEngine::new(
+            &ResourceSource::indexed(Default::default()),
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        let rect = Rect {
+            u0: 0.0,
+            v0: 0.0,
+            u1: 0.5,
+            v1: 0.5,
+            w: 16,
+            h: 16,
+        };
+        engine.atlas.insert("test:opaque".to_owned(), (rect, false));
+        let glass = Rect {
+            u0: 0.5,
+            u1: 1.0,
+            ..rect
+        };
+        engine.atlas.insert("test:glass".to_owned(), (glass, true));
+        let tweaks: [fn(&mut Particle); 5] = [
+            |_| {},
+            |p| {
+                p.roll = 0.7;
+                p.o_roll = 0.2;
+            },
+            |p| p.behaviour = Behaviour::Shriek { delay: 0 },
+            |p| p.orientation = polytone_gpu::Orientation::Flat,
+            |p| p.additive = true,
+        ];
+        let mut random = LegacyRandom::new(3);
+        for i in 0..20 {
+            let at = [
+                i as f64 * 0.37 - 3.0,
+                0.5 * (i % 3) as f64,
+                -4.0 - i as f64 * 0.2,
+            ];
+            let mut particle =
+                Particle::moving(&mut random, ParticleType::Smoke, at, [0.01, 0.02, -0.03]);
+            let sprite = if i % 2 == 0 {
+                "test:opaque"
+            } else {
+                "test:glass"
+            };
+            particle.sprite = Sprite::Named(sprite.to_owned());
+            tweaks[i % tweaks.len()](&mut particle);
+            engine.particles.push(particle);
+        }
+        let base = Quat::from_euler(glam::EulerRot::YXZ, 0.4, -0.3, 0.0);
+        let light = |_: [i32; 3]| 0xa5;
+        let layer = |vertices: &[Vertex], translucent: bool| -> Vec<u8> {
+            vertices
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|q| {
+                    (q[0].layer & 0xffff == crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY) == translucent
+                })
+                .flat_map(|q| bytemuck::cast_slice::<Vertex, u8>(q).to_vec())
+                .collect()
+        };
+        let expanded = |records: &[ParticleQuad]| -> Vec<u8> {
+            records
+                .iter()
+                .flat_map(|q| bytemuck::cast_slice::<Vertex, u8>(&q.vertices()).to_vec())
+                .collect()
+        };
+        let mut vertices = Vec::new();
+        engine.render_in_view(DVec3::ZERO, base, 0.25, None, &light, &mut vertices);
+        let additive = engine.take_additive();
+        assert!(!additive.is_empty());
+        assert!(!layer(&vertices, false).is_empty() && !layer(&vertices, true).is_empty());
+        // The stream holds something before the particles: their cut lies past it.
+        let before: Vec<Vertex> = vec![bytemuck::Zeroable::zeroed(); 8];
+        let mut out = before.clone();
+        let mut quads = ParticleQuads::default();
+        engine.render_quads_in_view(
+            DVec3::ZERO,
+            base,
+            0.25,
+            None,
+            &light,
+            &mut out,
+            Some(&mut quads),
+        );
+        assert_eq!(quads.cut, 8);
+        assert_eq!(out.len(), 8, "every quad that isn't additive is a record");
+        assert_eq!(expanded(&quads.opaque), layer(&vertices, false));
+        assert_eq!(expanded(&quads.translucent), layer(&vertices, true));
+        assert_eq!(
+            bytemuck::cast_slice::<Vertex, u8>(&engine.take_additive()),
+            bytemuck::cast_slice::<Vertex, u8>(&additive)
+        );
+
+        // A (rolled, translucent) model particle half way: the frame's quads are vertices again,
+        // in each layer's order.
+        assert!(!engine.particles[11].additive);
+        engine.particles[11].model = Some(Arc::new(polytone_model::ParticleModel {
+            quads: vec![polytone_model::ModelQuad {
+                corners: [
+                    FVec3::new(-0.5, 0.0, 0.0),
+                    FVec3::new(0.5, 0.0, 0.0),
+                    FVec3::new(0.5, 1.0, 0.25),
+                    FVec3::new(-0.5, 1.0, 0.0),
+                ],
+                uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+                sprite: "test:opaque".to_owned(),
+            }],
+        }));
+        let mut vertices = Vec::new();
+        engine.render_in_view(DVec3::ZERO, base, 0.25, None, &light, &mut vertices);
+        let mut out = before.clone();
+        engine.render_quads_in_view(
+            DVec3::ZERO,
+            base,
+            0.25,
+            None,
+            &light,
+            &mut out,
+            Some(&mut quads),
+        );
+        assert!(quads.is_empty());
+        assert_eq!(layer(&out[8..], false), layer(&vertices, false));
+        assert_eq!(layer(&out[8..], true), layer(&vertices, true));
     }
 
     #[test]
