@@ -7,11 +7,23 @@
 //! entity stream they then stay out of (`Renderer::expands_particles`).
 //! `EntityBatch::update_with_particles` puts their vertices where the engine would have pushed
 //! them, in the ordinary material and the translucent particle layer's, so every pass draws them
-//! as before: one copy of each quad instead of two.
+//! as before.
+//!
+//! Where compute shaders run, [`ParticleExpand`] writes those vertices on the GPU: the batch
+//! leaves their room, the frame's upload skips it, and `particle_expand.wgsl` fills it from the
+//! records, 64 bytes a quad uploaded instead of 176. Otherwise the batch writes them, one copy
+//! of each quad instead of two.
 
 use super::entity_batch::{OIT_ENTITY, ORDINARY, TRANSLUCENT_PARTICLES, material};
+use super::upload::Uploads;
 use crate::mesher::Vertex;
 use glam::Vec3;
+
+/// Workgroups in a row of a dispatch (at most 65535 per dimension), of 64 records each.
+const ROW: u32 = 32_768;
+/// The words before the records: each layer's records, each layer's first vertex, a zero the
+/// shader cannot fold away (`keep`), 3 spare.
+const HEAD_WORDS: usize = 8;
 
 /// `HORIZON_PARTICLES_GPU=1`: a frame's particle quads come to the renderer as records where they
 /// may (`Renderer::expands_particles`). Off by default, for A/B runs against the vertices.
@@ -147,6 +159,141 @@ impl ParticleQuads {
     }
 }
 
+/// The compute pass that writes the records' vertices into the entity vertex buffer.
+pub(super) struct ParticleExpand {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    /// The head and the records, growing to the next power of two.
+    records: Option<wgpu::Buffer>,
+    /// The bind group and the buffers it binds (buffers compare by identity).
+    group: Option<(wgpu::BindGroup, [wgpu::Buffer; 2])>,
+}
+
+impl ParticleExpand {
+    /// The pass with `HORIZON_PARTICLES_GPU=1` and compute shaders, else `None` (the batch then
+    /// writes the records' vertices itself).
+    pub(super) fn new(device: &wgpu::Device, compute: bool) -> Option<Self> {
+        if !wanted() || !compute {
+            return None;
+        }
+        Self::compile(device)
+    }
+
+    fn compile(device: &wgpu::Device) -> Option<Self> {
+        if device.limits().max_storage_buffers_per_shader_stage < 2 {
+            return None;
+        }
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Particle quads"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("particle_expand.wgsl").into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Particle quads"),
+            layout: None,
+            module: &module,
+            entry_point: Some("expand_quads"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let layout = pipeline.get_bind_group_layout(0);
+        let internal = pollster::block_on(internal.pop());
+        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
+            log::warn!("Horizon renderer: particle quads expanded on the CPU ({e})");
+            return None;
+        }
+        Some(Self {
+            pipeline,
+            layout,
+            records: None,
+            group: None,
+        })
+    }
+
+    /// Records the frame's expansion: `quads`' opaque records write their vertices into `out`
+    /// from vertex `rooms[0]` on, the translucent ones from `rooms[1]` on. Call after the entity
+    /// stream's upload, which leaves those rooms out.
+    pub(super) fn dispatch(
+        &mut self,
+        device: &wgpu::Device,
+        uploads: &mut Uploads,
+        encoder: &mut wgpu::CommandEncoder,
+        quads: &ParticleQuads,
+        rooms: [u32; 2],
+        out: &wgpu::Buffer,
+    ) {
+        let count = quads.len() as u32;
+        if count == 0 {
+            return;
+        }
+        let quad = std::mem::size_of::<ParticleQuad>() as u64;
+        let head = (HEAD_WORDS * 4) as u64;
+        let bytes = (head + u64::from(count) * quad)
+            .max(256)
+            .next_power_of_two();
+        if self.records.as_ref().is_none_or(|b| b.size() < bytes) {
+            self.records = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Particle quads"),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let Some(records) = &self.records else {
+            return;
+        };
+        let opaque = quads.opaque.len() as u32;
+        let words: [u32; HEAD_WORDS] = [
+            opaque,
+            quads.translucent.len() as u32,
+            rooms[0],
+            rooms[1],
+            0,
+            0,
+            0,
+            0,
+        ];
+        uploads.buffer(encoder, records, 0, bytemuck::cast_slice(&words));
+        uploads.buffer(encoder, records, head, bytemuck::cast_slice(&quads.opaque));
+        uploads.buffer(
+            encoder,
+            records,
+            head + u64::from(opaque) * quad,
+            bytemuck::cast_slice(&quads.translucent),
+        );
+        let key = [records.clone(), out.clone()];
+        if self.group.as_ref().is_none_or(|(_, k)| *k != key) {
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Particle quads"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: key[0].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: key[1].as_entire_binding(),
+                    },
+                ],
+            });
+            self.group = Some((group, key));
+        }
+        let Some((group, _)) = &self.group else {
+            return;
+        };
+        let workgroups = count.div_ceil(64);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Particle quads"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, group, &[]);
+        pass.dispatch_workgroups(workgroups.min(ROW), workgroups.div_ceil(ROW), 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +351,95 @@ mod tests {
         let mut ordinary = [4, 20, 20, 28, 4];
         quads.shift_cuts(cuts.into_iter(), &mut ordinary);
         assert_eq!(ordinary, [4, 20, 32, 40, 4]);
+    }
+
+    #[test]
+    fn the_shader_validates() {
+        let source = include_str!("particle_expand.wgsl");
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    }
+
+    /// The shader writes into each layer's room what `ParticleQuad::vertices` makes on the CPU,
+    /// to the bit (signed zeros, large and tiny offsets, more records than a workgroup), and
+    /// leaves the vertices around the rooms alone.
+    #[test]
+    fn the_shader_writes_what_the_cpu_makes() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((_adapter, device, queue)) = crate::gfx::test_gpu::optional_device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let Some(mut expand) = ParticleExpand::compile(&device) else {
+            eprintln!("no compute shaders: skipped");
+            return;
+        };
+        let quad = |i: u32, layer: u32| ParticleQuad {
+            center: [1.5 + i as f32, -0.0, 1.0e-3 * i as f32 - 2.0],
+            layer,
+            d0: [0.3, -0.7 * i as f32, 1.0e7],
+            color: 0x8040_20ff ^ i,
+            d1: [-0.1, 0.2, f32::MIN_POSITIVE],
+            light: 0xf000 | i,
+            uv: [0.25, 0.5 + i as f32 / 64.0, 0.375, 0.625],
+        };
+        let quads = ParticleQuads {
+            opaque: (0..70).map(|i| quad(i, 2 << 16)).collect(),
+            translucent: (0..5)
+                .map(|i| quad(100 + i, crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY))
+                .collect(),
+            ..Default::default()
+        };
+        // Each room between other vertices, which stay as they were.
+        let rooms = [7u32, 7 + 70 * 4 + 9];
+        let vertices = rooms[1] + 5 * 4 + 3;
+        let vertex = std::mem::size_of::<Vertex>();
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (vertices as usize * vertex) as u64,
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&out, 0, &vec![0xab; out.size() as usize]);
+        let mut uploads = Uploads::new(&device);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        expand.dispatch(&device, &mut uploads, &mut encoder, &quads, rooms, &out);
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: out.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&out, 0, &read, 0, out.size());
+        uploads.finish(&encoder);
+        queue.submit([encoder.finish()]);
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = read.slice(..).get_mapped_range().unwrap();
+        let mut expected = vec![0xabu8; data.len()];
+        for (list, first) in [(&quads.opaque, rooms[0]), (&quads.translucent, rooms[1])] {
+            for (i, quad) in list.iter().enumerate() {
+                let at = (first as usize + i * 4) * vertex;
+                expected[at..at + 4 * vertex]
+                    .copy_from_slice(bytemuck::cast_slice::<Vertex, u8>(&quad.vertices()));
+            }
+        }
+        for (i, (got, want)) in data
+            .chunks_exact(vertex)
+            .zip(expected.chunks_exact(vertex))
+            .enumerate()
+        {
+            assert_eq!(got, want, "vertex {i}");
+        }
     }
 }

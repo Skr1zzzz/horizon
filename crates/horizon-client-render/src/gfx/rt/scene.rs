@@ -247,7 +247,9 @@ impl Renderer {
 
     /// The entity vertex buffer's usages, `ENTITY_INPUT` among them with the entity layer.
     pub(in crate::gfx) fn entity_usage(&self) -> wgpu::BufferUsages {
-        let usage = crate::gfx::entity_skin::EntitySkin::usage(self.entity_skin.is_some());
+        let usage = crate::gfx::entity_skin::EntitySkin::usage(
+            self.entity_skin.is_some() || self.particle_expand.is_some(),
+        );
         match self.traces_entities() {
             true => usage | ENTITY_INPUT,
             false => usage,

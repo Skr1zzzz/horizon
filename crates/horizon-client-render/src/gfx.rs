@@ -1233,7 +1233,8 @@ pub struct Frame<'a> {
     pub glint_ticks: f32,
     /// CardinalLighting.Type.NETHER, otherwise DEFAULT.
     pub nether_lighting: bool,
-    /// Camera-relative entity geometry textured from the shared atlas.
+    /// Camera-relative entity geometry textured from the shared atlas. Particle quads the game
+    /// handed over as records (`Renderer::stage_particle_quads`) are not in it.
     pub entities: &'a [Vertex],
     /// Per-section cacheable block-entity models. Positions are section-local.
     pub static_block_entities: &'a [StaticSectionSnapshot],
@@ -1733,6 +1734,9 @@ pub struct Renderer {
     entity_skin: Option<entity_skin::EntitySkin>,
     /// This frame's particle quads as records (`stage_particle_quads`), and where they go.
     particle_quads: ParticleQuads,
+    /// Writes the records' vertices on the GPU; `None` without `HORIZON_PARTICLES_GPU` or
+    /// compute shaders (`EntityBatch` writes them then).
+    particle_expand: Option<particle_expand::ParticleExpand>,
     group: wgpu::BindGroup,
     fluid_group: wgpu::BindGroup,
     fluid_sampler: wgpu::Sampler,
@@ -4300,14 +4304,15 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let entity_capacity = 1 << 14;
-        let entity_skin = entity_skin::EntitySkin::new(
-            &device,
-            animate::SpriteAnimator::compute(&adapter, &device),
-        );
+        let compute = animate::SpriteAnimator::compute(&adapter, &device);
+        let entity_skin = entity_skin::EntitySkin::new(&device, compute);
+        let particle_expand = particle_expand::ParticleExpand::new(&device, compute);
         let entity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Entity vertices"),
             size: entity_capacity * std::mem::size_of::<Vertex>() as u64,
-            usage: entity_skin::EntitySkin::usage(entity_skin.is_some()),
+            usage: entity_skin::EntitySkin::usage(
+                entity_skin.is_some() || particle_expand.is_some(),
+            ),
             mapped_at_creation: false,
         });
         let static_entity_index_quads = 1 << 14;
@@ -4728,6 +4733,7 @@ impl Renderer {
             entity_batch: EntityBatch::default(),
             entity_skin,
             particle_quads: ParticleQuads::default(),
+            particle_expand,
             group,
             fluid_group,
             fluid_sampler,
@@ -9307,9 +9313,14 @@ impl Renderer {
         // out rather than put them anywhere else.
         let particles_placed =
             !self.particle_quads.is_empty() && !pack_entities && self.entity_batch.kinds.is_empty();
+        // Their vertices are written on the GPU after the upload (`ParticleExpand`), or by the
+        // batch: without the pass, and while the ray scene's entity layer uploads the batch
+        // again (`ray_prepare`).
+        let particles_on_gpu =
+            particles_placed && self.particle_expand.is_some() && !self.traces_entities();
         let particle_room = particles_placed.then_some(entity_batch::ParticleRoom {
             quads: &self.particle_quads,
-            expand: true,
+            expand: !particles_on_gpu,
         });
         let [
             entity_quads,
@@ -9462,11 +9473,50 @@ impl Renderer {
             self.entity_buffer = buffer;
         }
         if !all_entities.is_empty() {
-            self.uploads.buffer(
+            // The particles' room is left out: the GPU writes it (below).
+            let rooms = match particles_on_gpu {
+                true => self.entity_batch.particle_room,
+                false => [(0, 0); 2],
+            };
+            let vertex = std::mem::size_of::<Vertex>() as u64;
+            let mut from = 0;
+            for (first, vertices) in
+                rooms.map(|(first, vertices)| (first as usize, vertices as usize))
+            {
+                if vertices == 0 {
+                    continue;
+                }
+                if first > from {
+                    self.uploads.buffer(
+                        &mut encoder,
+                        &self.entity_buffer,
+                        (u64::from(posed) + from as u64) * vertex,
+                        bytemuck::cast_slice(&all_entities[from..first]),
+                    );
+                }
+                from = from.max(first + vertices);
+            }
+            if all_entities.len() > from {
+                self.uploads.buffer(
+                    &mut encoder,
+                    &self.entity_buffer,
+                    (u64::from(posed) + from as u64) * vertex,
+                    bytemuck::cast_slice(&all_entities[from..]),
+                );
+            }
+        }
+        if particles_on_gpu && let Some(expand) = &mut self.particle_expand {
+            let rooms = self
+                .entity_batch
+                .particle_room
+                .map(|(first, _)| posed + first);
+            expand.dispatch(
+                &self.device,
+                &mut self.uploads,
                 &mut encoder,
+                &self.particle_quads,
+                rooms,
                 &self.entity_buffer,
-                u64::from(posed) * std::mem::size_of::<Vertex>() as u64,
-                bytemuck::cast_slice(all_entities),
             );
         }
         if pack_entities {
