@@ -29,6 +29,8 @@ enum State {
     Playing,
     Paused,
     Stopped,
+    /// Initial, held for a source a client mod paused (`Backend::hold`): it starts paused.
+    Held,
 }
 /// An OpenAL source.
 struct Channel {
@@ -501,16 +503,20 @@ struct Decode {
 }
 /// Give a channel waiting on its sound the decoded samples and start it, as
 /// the buffer future attaching and playing the source. A source stopped or
-/// released meanwhile stays so.
+/// released meanwhile stays so, and a held one starts paused.
 fn attach(mixer: &Mutex<Mixer>, channel: ChannelId, samples: Samples, looping: bool) {
     if let Some(samples) = samples
         && let Ok(mut m) = mixer.lock()
         && let Some(c) = m.channels.get_mut(&channel)
-        && c.state == State::Initial
+        && matches!(c.state, State::Initial | State::Held)
     {
         c.samples = Some(samples);
         c.position = 0.0;
-        c.state = State::Playing;
+        c.state = if c.state == State::Held {
+            State::Paused
+        } else {
+            State::Playing
+        };
         c.looping |= looping;
     }
 }
@@ -966,10 +972,18 @@ impl Backend for MixerBackend {
         });
     }
     fn unpause(&mut self, channel: ChannelId) {
-        self.with(channel, |c| {
-            if c.state == State::Paused {
-                c.state = State::Playing;
-            }
+        self.with(channel, |c| match c.state {
+            State::Paused => c.state = State::Playing,
+            // Let go before its sound arrived: it plays when it does.
+            State::Held => c.state = State::Initial,
+            _ => {}
+        });
+    }
+    fn hold(&mut self, channel: ChannelId) {
+        self.with(channel, |c| match c.state {
+            State::Playing => c.state = State::Paused,
+            State::Initial => c.state = State::Held,
+            _ => {}
         });
     }
     fn stopped(&mut self, channel: ChannelId) -> bool {
@@ -2295,9 +2309,14 @@ impl Audio {
             &mut self.backend,
         );
     }
-    /// `SoundManager.resume`.
+    /// `SoundManager.resume`: a source a client mod paused stays paused.
     pub fn resume(&mut self) {
         self.engine.resume(&mut self.backend);
+    }
+    /// A client mod's `sound_source_pause` (`SoundEngine::pause_source`): the sounds of one
+    /// `SoundSource` index pause, or carry on.
+    pub fn pause_source(&mut self, source: usize, paused: bool) {
+        self.engine.pause_source(source, paused, &mut self.backend);
     }
     /// `SoundManager.stop()`: every sound.
     pub fn stop_all(&mut self) {
@@ -3887,6 +3906,100 @@ mod tests {
         audio.tick(false, &ctx);
         assert_eq!(volume_of(&audio, sound), Some(1.0));
         assert_eq!(audio.mod_sound_state(sound), Playing);
+    }
+
+    /// A source a client mod paused (`pause_source`) stays paused through the game's own pause
+    /// and resume. A sound of it that starts meanwhile starts paused and keeps its channel, one
+    /// still loading too, so the music manager keeps its track. A source carried on while the
+    /// game is paused waits for the game; carried on, each sound plays, a held one from its start.
+    #[test]
+    fn a_paused_source_stays_paused_through_the_games_pause_and_holds_new_sounds() {
+        use crate::sound_engine::{BLOCKS, MUSIC};
+        let mut audio = live_audio();
+        audio.engine.registry.add_file(
+            "minecraft",
+            br#"{"music.game": {"sounds": [{"name": "music/game/calm1"}]},
+                 "music.menu": {"sounds": [{"name": "music/menu/menu1"}]},
+                 "block.stone.break": {"sounds": ["dig/stone1"]}}"#,
+            &|_, _| true,
+        );
+        // Decoded already, so these start at once; the menu track's file is still loading.
+        for key in ["minecraft:music/game/calm1", "minecraft:dig/stone1"] {
+            audio.insert_cached_sound(key, vec![0.1; 4800], 48_000, 1);
+        }
+        let state = |audio: &Audio, id: InstanceId| -> Option<State> {
+            let channel = audio.engine.channel(id)?;
+            let mixer = audio.backend.mixer.lock().unwrap();
+            mixer.channels.get(&channel).map(|c| c.state)
+        };
+        let music = |audio: &mut Audio, event: &str| {
+            let instance = SoundInstance::for_music(event, LegacyRandom::new(1));
+            audio.play_instance(instance, true).0
+        };
+        let track = music(&mut audio, "minecraft:music.game");
+        let stone = mod_api::SoundPlay::at(
+            "minecraft:block.stone.break",
+            mod_api::SoundSource::Blocks,
+            [0.0; 3],
+        );
+        let block = audio.play_mod_sound(&stone, 0);
+        assert_eq!(state(&audio, track), Some(State::Playing));
+        assert_eq!(state(&audio, block), Some(State::Playing));
+
+        audio.pause_source(MUSIC, true);
+        assert_eq!(state(&audio, track), Some(State::Paused));
+        assert_eq!(
+            state(&audio, block),
+            Some(State::Playing),
+            "that source only"
+        );
+        audio.pause();
+        audio.resume();
+        assert_eq!(
+            state(&audio, track),
+            Some(State::Paused),
+            "the game's resume"
+        );
+        assert_eq!(state(&audio, block), Some(State::Playing));
+
+        // Tracks started meanwhile start paused: a decoded one at once, a loading one when its
+        // sound arrives.
+        let next = music(&mut audio, "minecraft:music.game");
+        let arrives = music(&mut audio, "minecraft:music.menu");
+        let late = music(&mut audio, "minecraft:music.menu");
+        assert_eq!(state(&audio, next), Some(State::Paused));
+        assert_eq!(state(&audio, late), Some(State::Held));
+        let channel = audio.engine.channel(arrives).unwrap();
+        let samples = Some((Arc::new(vec![0.1; 4800]), 48_000, 1));
+        attach(&audio.backend.mixer, channel, samples, false);
+        assert_eq!(state(&audio, arrives), Some(State::Paused));
+        // Their channels are kept: the music manager's track stays active and no other starts.
+        let ctx = TickContext::default();
+        for _ in 0..40 {
+            audio.tick(false, &ctx);
+        }
+        for id in [track, next, arrives, late] {
+            assert!(audio.engine.is_active(id), "{id}");
+        }
+
+        // Carried on while the game is paused, a source waits for the game's resume.
+        audio.pause_source(BLOCKS, true);
+        audio.pause();
+        audio.pause_source(BLOCKS, false);
+        assert_eq!(state(&audio, block), Some(State::Paused));
+        audio.resume();
+        assert_eq!(state(&audio, block), Some(State::Playing));
+
+        audio.pause_source(MUSIC, false);
+        for id in [track, next, arrives] {
+            assert_eq!(state(&audio, id), Some(State::Playing), "{id}");
+        }
+        assert_eq!(
+            state(&audio, late),
+            Some(State::Initial),
+            "it plays on arrival"
+        );
+        audio.stop_all();
     }
 
     fn volume_of(audio: &Audio, id: InstanceId) -> Option<f32> {

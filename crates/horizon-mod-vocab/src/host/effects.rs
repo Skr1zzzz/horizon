@@ -37,6 +37,27 @@ pub trait EffectsClientHost {
     #[access(ClientSetup)]
     fn play_local_sound(&self, sound: &SoundPlay, after: u32) -> Option<SoundRef>;
     /// Side: client.
+    /// Pauses every sound of `source` (`paused` true) or carries them on (false), as the pause
+    /// menu pauses the world's sounds (`SoundEngine.pauseAllExcept`) but for one source and for
+    /// as long as the mod asks: the game's own pause and resume, and a level change, leave a
+    /// paused source paused. A sound of it that starts meanwhile starts paused, so paused
+    /// `Music` keeps its track and the music manager starts no other; carried on, each plays from
+    /// where it was, one that started paused from its start. Only sounds played on that very
+    /// source: `Master` pauses the sounds played on master, not every sound. It takes `&self`, so
+    /// any client hook can ask: it applies at the next audio update (once a client tick), before
+    /// the `play_local_sound` plays asked with it. False on a server.
+    #[access(ClientSetup)]
+    fn sound_source_pause(&self, source: SoundSource, paused: bool) -> bool;
+    /// Side: client.
+    /// Stops every sound of `source` playing, a paused one too, as a stop-sound packet naming
+    /// only the source does (`SoundEngine.stop(null, source)`, `/stopsound @s <source>`); a sound
+    /// still waiting out a delay isn't playing yet and is left. Stopping `Music` skips the track:
+    /// the music manager waits its delay and starts the next one, as after `/stopsound`. It takes
+    /// `&self` and applies at the next audio update, before the `play_local_sound` plays asked
+    /// with it, which start after the stop. False on a server.
+    #[access(ClientSetup)]
+    fn sound_source_stop(&self, source: SoundSource) -> bool;
+    /// Side: client.
     /// The particles alive in the client's level (`ParticleEngine.countParticles`): 0 once
     /// a clear is asked, and on a server.
     #[access(ClientSetup)]
