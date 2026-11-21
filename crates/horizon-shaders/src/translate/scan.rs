@@ -87,6 +87,9 @@ pub(super) struct Stage<'p> {
     pub(super) replaced: HashMap<usize, String>,
     /// Globals whose initializer runs in our `main` (`g = hz_init_g();`), in order.
     pub(super) inits: Vec<String>,
+    /// Globals that keep their literal initializer (`initializer`): no constants, so a `const`
+    /// that names one runs in our `main` too.
+    pub(super) literal_globals: Vec<String>,
     /// Authored global names; automatic core matrix inputs must not hide them.
     pub(super) globals: BTreeSet<String>,
     /// Their captured array size constants and declarator ends: `.length()` stays type-only.
@@ -278,6 +281,40 @@ pub(super) fn is_ident(t: &str) -> bool {
     t.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
 }
 
+/// The scalar and vector types a literal initializer may construct (`literal_value`).
+const LITERAL_TYPES: [&str; 16] = [
+    "float", "int", "uint", "bool", "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4", "uvec2",
+    "uvec3", "uvec4", "bvec2", "bvec3", "bvec4",
+];
+
+/// Whether `value`, the significant tokens of a global's initializer, is numbers (a sign before
+/// one), `true` and `false` in constructors of scalars, vectors and arrays of one dimension
+/// (`vec2[2](vec2(-0.5, 1.0), vec2(2.0))`): an expression naga's frontend folds into literals
+/// and keeps as the global's own initializer.
+fn literal_value(value: &[&str]) -> bool {
+    let number = |t: &str| {
+        let mut chars = t.chars();
+        match chars.next() {
+            Some('.') => chars.next().is_some_and(|c| c.is_ascii_digit()),
+            first => first.is_some_and(|c| c.is_ascii_digit()),
+        }
+    };
+    let mut arrays = 0;
+    !value.is_empty()
+        && value.iter().enumerate().all(|(k, &t)| match t {
+            "(" | ")" | "," | "]" | "true" | "false" => true,
+            "[" => {
+                arrays += 1;
+                arrays == 1
+            }
+            "-" | "+" => {
+                (k == 0 || matches!(value[k - 1], "(" | ","))
+                    && value.get(k + 1).is_some_and(|&n| number(n))
+            }
+            _ => number(t) || LITERAL_TYPES.contains(&t),
+        })
+}
+
 fn outer_array_length(ty: &str) -> Option<&str> {
     let open = ty.find('[')?;
     let mut depth = 0;
@@ -351,6 +388,7 @@ impl<'p> Stage<'p> {
             paged_maps: false,
             replaced: HashMap::new(),
             inits: Vec::new(),
+            literal_globals: Vec::new(),
             globals: BTreeSet::new(),
             runtime_array_lengths: HashMap::new(),
             errors: Vec::new(),
@@ -878,12 +916,12 @@ impl<'p> Stage<'p> {
             .push(format!("hz_out{n}.{swizzle} = {name};"));
     }
 
-    /// A global `T name = a ? b : c;` or, without `const`, any initialized global: naga only
-    /// evaluates constant initializers at global scope (a conditional is not one; GL drivers
-    /// also take uniforms and other globals there), so each initializer becomes a function of
-    /// ours on the same line (`T a; T hz_init_a() { return T(...); } T b; ...`), called by our
-    /// `main` before the pack's, in file order. The return converts as GLSL's initialization
-    /// does (`vec2 v = ivec2(...)`).
+    /// A global `T name = a ? b : c;` or, without `const`, any initialized global but one of
+    /// literals (`literal_value`): naga only evaluates constant initializers at global scope (a
+    /// conditional is not one; GL drivers also take uniforms and other globals there), so each
+    /// initializer becomes a function of ours on the same line (`T a; T hz_init_a() { return
+    /// T(...); } T b; ...`), called by our `main` before the pack's, in file order. The return
+    /// converts as GLSL's initialization does (`vec2 v = ivec2(...)`).
     pub(super) fn initializer(&mut self, words: &[usize], to: usize) {
         let text = |i: usize| self.tokens[i];
         let Some(eq) = words.iter().position(|&i| text(i) == "=") else {
@@ -926,36 +964,54 @@ impl<'p> Stage<'p> {
         // at invocation time. Its value is unspecified in GLSL; keep the existing arithmetic
         // policy rather than inventing a finite replacement. Later dependent constants must
         // run after it, while unrelated constants (including comma declarators) stay constant.
-        let mut runtime_names: BTreeSet<&str> = self.inits.iter().map(String::as_str).collect();
+        let mut runtime_names: BTreeSet<&str> = (self.inits.iter())
+            .chain(&self.literal_globals)
+            .map(String::as_str)
+            .collect();
+        // A global of literals (`vec2 o[2] = vec2[2](vec2(-0.5, 1.0), vec2(2.0))`) keeps them as
+        // its initializer, as a GL driver takes it: nothing of ours stores it again in every
+        // invocation, so a table read at a dynamic index (TAA jitter, AO offsets) is the module's
+        // constant data. One array dimension at most: more are written reversed for naga.
+        let type_brackets = words[..name_at].iter().filter(|&&i| text(i) == "[").count();
+        let mut literal = Vec::new();
         let runtime: Vec<bool> = declarators
             .iter()
             .enumerate()
             .map(|(n, &(begin, assign, end))| {
+                let at = if n == 0 { name_at } else { begin };
                 let run = assign.is_some_and(|a| {
-                    !constant
-                        || (a + 1..end).any(|n| {
-                            let t = text(words[n]);
-                            let next = words.get(n + 1).map(|&i| text(i));
-                            t == "?"
-                                || (NOT_CONSTANT.contains(&t) && next == Some("("))
-                                || (t == "/" && next.is_some_and(is_zero_literal))
-                                || (runtime_names.contains(t)
-                                    && text(words[n - 1]) != "."
-                                    && next != Some("(")
-                                    // A sized array's length depends on its type, not its values.
-                                    && ![".", "length", "(", ")"].iter().enumerate().all(
-                                        |(offset, &t)| {
-                                            words.get(n + offset + 1).is_some_and(|&i| text(i) == t)
-                                        },
-                                    ))
-                        })
+                    if !constant {
+                        let brackets = (words[at..a].iter()).filter(|&&i| text(i) == "[").count();
+                        let value: Vec<&str> = words[a + 1..end].iter().map(|&i| text(i)).collect();
+                        return type_brackets + brackets > 1 || !literal_value(&value);
+                    }
+                    (a + 1..end).any(|n| {
+                        let t = text(words[n]);
+                        let next = words.get(n + 1).map(|&i| text(i));
+                        t == "?"
+                            || (NOT_CONSTANT.contains(&t) && next == Some("("))
+                            || (t == "/" && next.is_some_and(is_zero_literal))
+                            || (runtime_names.contains(t)
+                                && text(words[n - 1]) != "."
+                                && next != Some("(")
+                                // A sized array's length depends on its type, not its values.
+                                && ![".", "length", "(", ")"].iter().enumerate().all(
+                                    |(offset, &t)| {
+                                        words.get(n + offset + 1).is_some_and(|&i| text(i) == t)
+                                    },
+                                ))
+                    })
                 });
-                if run {
-                    runtime_names.insert(text(words[if n == 0 { name_at } else { begin }]));
+                if run || (!constant && assign.is_some()) {
+                    runtime_names.insert(text(words[at]));
+                }
+                if !run && !constant && assign.is_some() {
+                    literal.push(text(words[at]).to_owned());
                 }
                 run
             })
             .collect();
+        self.literal_globals.extend(literal);
         if !runtime.iter().any(|&run| run) {
             return;
         }
@@ -1180,5 +1236,60 @@ mod tests {
         // `p` and `q`, each packed into one slot.
         let inputs = p.fragment.entry_points[0].function.arguments.len();
         assert_eq!(inputs, 2, "{inputs} inputs");
+    }
+
+    /// A global of literals is the module's initializer, as a GL driver takes it, with nothing of
+    /// ours storing it again in every invocation: a table read at a dynamic index (TAA jitter,
+    /// AO offsets) is constant data, not an array copied for each pixel. One that reads a uniform
+    /// still runs in our `main`.
+    #[test]
+    fn a_global_of_literals_is_initialized_by_the_module() {
+        let vsh = "#version 120\nvoid main() { gl_Position = ftransform(); }\n";
+        let fsh = "#version 120\nuniform float viewWidth;\nuniform int frameCounter;\n\
+                   vec2 offsets[3] = vec2[3](vec2(-0.5, 1.0), vec2(0.25, -2.0), vec2(1.5));\n\
+                   float bias = -1.0, scaled = viewWidth * 2.0;\n\
+                   void main() { gl_FragData[0] = vec4(offsets[frameCounter], bias, scaled); }\n";
+        let p = program(
+            &[("composite.vsh", vsh), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let m = &p.fragment;
+        let init = |name: &str| {
+            let (_, global) = (m.global_variables.iter())
+                .find(|(_, g)| g.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("no global {name}"));
+            global.init.map(|e| {
+                let mut values = Vec::new();
+                literals(m, e, &mut values);
+                values
+            })
+        };
+        assert_eq!(init("offsets"), Some(vec![-0.5, 1.0, 0.25, -2.0, 1.5, 1.5]));
+        assert_eq!(init("bias"), Some(vec![-1.0]));
+        assert_eq!(init("scaled"), None);
+        let ours: Vec<&str> = (m.functions.iter())
+            .filter_map(|(_, f)| f.name.as_deref())
+            .filter(|name| name.starts_with("hz_init_"))
+            .collect();
+        assert_eq!(ours, ["hz_init_scaled"]);
+    }
+
+    /// The numbers of a constant expression of `m`, component by component.
+    fn literals(m: &naga::Module, e: naga::Handle<naga::Expression>, out: &mut Vec<f32>) {
+        match m.global_expressions[e] {
+            naga::Expression::Literal(naga::Literal::F32(v)) => out.push(v),
+            naga::Expression::Compose { ref components, .. } => {
+                for &c in components {
+                    literals(m, c, out);
+                }
+            }
+            naga::Expression::Splat { size, value } => {
+                for _ in 0..size as u8 {
+                    literals(m, value, out);
+                }
+            }
+            ref other => panic!("not a literal: {other:?}"),
+        }
     }
 }
