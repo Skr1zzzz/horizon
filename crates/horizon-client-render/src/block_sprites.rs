@@ -10,7 +10,7 @@ use crate::{mesher::TintSource, models::catalog::BakedFace, streaming::WorkerCon
 use horizon_assets::model::Direction;
 use horizon_core::position::BlockPos;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
-pub use mod_api::block::block_sprites::{BlockSprites, FaceSprite, SpriteRef};
+pub use mod_api::block::block_sprites::{BlockModelQuad, BlockSprites, FaceSprite, SpriteRef};
 
 /// The two axes a side's `rect` and `uv` count along, as indices into (x, y, z): down and up across x then z; north
 /// and south across x then y; west and east across z then y. (The block's corner at 0, 0, 0 is 0 on each.)
@@ -214,6 +214,22 @@ impl<'a> Lookup<'a> {
         }
     }
 
+    /// Every quad of `state`'s model as the mesher draws it, flat on a side or not, from the model [`Self::state`]
+    /// reads: none for a block with no model quads (air, a fluid, a block drawn only as a block entity).
+    pub fn model_quads(&self, state: BlockStateId) -> Vec<BlockModelQuad> {
+        let models = self
+            .context
+            .render
+            .model_catalog
+            .collect(state, BlockPos::new(0, 0, 0))
+            .unwrap_or_default();
+        model_quads(
+            models.iter().flat_map(|(_, m)| &m.faces),
+            |layer| self.sprite(layer),
+            |tint_index| self.context.tables.tint_source(state, tint_index),
+        )
+    }
+
     /// A model face as it lies on its side; none when it does not lie flat on one.
     fn face(&self, state: BlockStateId, face: &BakedFace) -> Option<(Direction, FaceSprite)> {
         let q = &face.quad;
@@ -251,6 +267,39 @@ impl<'a> Lookup<'a> {
             },
         ))
     }
+}
+
+/// Each of a model's baked `faces` as a mod reads it, in the order the mesher draws them: all of them, flat on a
+/// side or not (a flower's crossed planes, a turned element). `sprite` places a sprite layer in the arrays and
+/// `tint` names the source of a tint index.
+fn model_quads<'a>(
+    faces: impl Iterator<Item = &'a BakedFace>,
+    sprite: impl Fn(u32) -> SpriteRef,
+    tint: impl Fn(i32) -> Option<TintSource>,
+) -> Vec<BlockModelQuad> {
+    // Both `Direction`s list their sides down, up, north, south, west, east.
+    let side = |d: Direction| mod_api::Direction::ALL[d as usize];
+    faces
+        .map(|face| {
+            let q = &face.quad;
+            // Shaded as the mesher shades it (`Mesher::face`).
+            let shade = q
+                .shade
+                .then(|| side(q.shade_direction_override.unwrap_or(q.facing)));
+            mod_api::__private::built::block_model_quad(
+                q.positions,
+                q.uv,
+                sprite(face.layer),
+                q.material.sprite.clone(),
+                side(q.facing),
+                q.cull.map(side),
+                q.tint_index,
+                tint(q.tint_index),
+                shade,
+                face.translucent,
+            )
+        })
+        .collect()
 }
 
 /// The affine map from a face's points on its side to its UVs, `[u0, v0, du_u, du_v, dv_u, dv_v]`, from three of
@@ -353,6 +402,121 @@ mod tests {
         assert_eq!(m, [0.0, 1.0, 1.0, 0.0, 0.0, -1.0]);
         // a face seen edge on has no map
         assert_eq!(affine(&[[0.0, 0.0]; 4], &[[0.0, 0.0]; 4]), None);
+    }
+
+    /// `block_model_quads`: a cube's six quads lie on its sides, each culled by the neighbour there and wound
+    /// counterclockwise seen from outside; a fern's crossed planes, which `block_sprites` leaves out, are all
+    /// there, running corner to corner across the block (0.05 to 0.95, vanilla's rescaled 45 degree planes) with
+    /// their tint.
+    #[test]
+    fn a_crossed_planes_quads_are_kept_as_a_cubes_are() {
+        use horizon_assets::{
+            bake::{BlockModelTransform, bake_block_model},
+            model::CuboidModel,
+            resolve::ModelLibrary,
+        };
+        const CUBE: &str = r##"{"textures":{"all":"block/stone"},"elements":[{"from":[0,0,0],"to":[16,16,16],
+            "faces":{"down":{"texture":"#all","cullface":"down"},"up":{"texture":"#all","cullface":"up"},
+            "north":{"texture":"#all","cullface":"north"},"south":{"texture":"#all","cullface":"south"},
+            "west":{"texture":"#all","cullface":"west"},"east":{"texture":"#all","cullface":"east"}}}]}"##;
+        // Vanilla's `block/tinted_cross`: two planes turned 45 degrees about the block's upright axis.
+        const CROSS: &str = r##"{"textures":{"cross":"block/fern"},"elements":[
+            {"from":[0.8,0,8],"to":[15.2,16,8],"rotation":{"origin":[8,8,8],"axis":"y","angle":45,"rescale":true},
+             "faces":{"north":{"uv":[0,0,16,16],"texture":"#cross","tintindex":0},
+                      "south":{"uv":[0,0,16,16],"texture":"#cross","tintindex":0}}},
+            {"from":[8,0,0.8],"to":[8,16,15.2],"rotation":{"origin":[8,8,8],"axis":"y","angle":45,"rescale":true},
+             "faces":{"west":{"uv":[0,0,16,16],"texture":"#cross","tintindex":0},
+                      "east":{"uv":[0,0,16,16],"texture":"#cross","tintindex":0}}}]}"##;
+        let library = ModelLibrary::new(
+            [
+                ("t:cube".to_owned(), CuboidModel::from_json(CUBE).unwrap()),
+                ("t:cross".to_owned(), CuboidModel::from_json(CROSS).unwrap()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        let quads = |name: &str| {
+            let model = library.resolve(name).unwrap();
+            let faces: Vec<_> = bake_block_model(&model, BlockModelTransform::new([0; 3], false))
+                .unwrap()
+                .into_iter()
+                .map(|quad| BakedFace::new(quad, 3, false, false, None))
+                .collect();
+            let sprite = |layer| SpriteRef {
+                array: 0,
+                layer,
+                animated: false,
+                cutout: false,
+            };
+            model_quads(faces.iter(), sprite, |index| {
+                (index == 0).then_some(TintSource::Grass)
+            })
+        };
+
+        let cube = quads("t:cube");
+        assert_eq!(cube.len(), 6);
+        for side in mod_api::Direction::ALL {
+            assert_eq!(
+                cube.iter().filter(|q| q.facing == side).count(),
+                1,
+                "{side:?}"
+            );
+        }
+        for quad in &cube {
+            assert_eq!(quad.cull, Some(quad.facing));
+            assert_eq!(quad.shade, Some(quad.facing));
+            assert_eq!(quad.sprite_name, "minecraft:block/stone");
+            assert_eq!(
+                (quad.sprite.layer, quad.tint_index, quad.tint),
+                (3, -1, None)
+            );
+            let normal = quad.facing.normal();
+            let axis = normal.iter().position(|n| *n != 0).unwrap();
+            let plane = if normal[axis] > 0 { 1.0 } else { 0.0 };
+            assert!(
+                quad.positions
+                    .iter()
+                    .all(|p| (p[axis] - plane).abs() < 1e-6),
+                "{quad:?}"
+            );
+            let [p0, p1, p2, _] = quad.positions;
+            let (e, f) = (
+                [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]],
+                [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]],
+            );
+            let out = (e[1] * f[2] - e[2] * f[1]) * normal[0] as f32
+                + (e[2] * f[0] - e[0] * f[2]) * normal[1] as f32
+                + (e[0] * f[1] - e[1] * f[0]) * normal[2] as f32;
+            assert!(out > 0.0, "{quad:?} looks inward");
+        }
+
+        let cross = quads("t:cross");
+        assert_eq!(cross.len(), 4, "both faces of both planes");
+        let near = |v: f32, want: f32| (v - want).abs() < 1e-3;
+        for quad in &cross {
+            assert_eq!(quad.sprite_name, "minecraft:block/fern");
+            assert_eq!(
+                (quad.cull, quad.tint_index, quad.tint),
+                (None, 0, Some(TintSource::Grass))
+            );
+            for [x, y, z] in quad.positions {
+                assert!(near(x, 0.05) || near(x, 0.95), "{quad:?}");
+                assert!(near(z, 0.05) || near(z, 0.95), "{quad:?}");
+                assert!(near(y, 0.0) || near(y, 1.0), "{quad:?}");
+            }
+            // Corner to corner: across x and z both, so on no side.
+            let spread = |axis: usize| {
+                let values = quad.positions.map(|p| p[axis]);
+                values.iter().copied().fold(f32::MIN, f32::max)
+                    - values.iter().copied().fold(f32::MAX, f32::min)
+            };
+            assert!(spread(0) > 0.5 && spread(2) > 0.5, "{quad:?}");
+        }
+        let main_diagonal = cross
+            .iter()
+            .filter(|q| q.positions.iter().all(|p| near(p[0], p[2])))
+            .count();
+        assert_eq!(main_diagonal, 2, "one plane on each diagonal: {cross:?}");
     }
 
     /// The game's own blocks from real prepared resources: a cube, a grass block's tinted top and overlaid sides, a
@@ -488,6 +652,15 @@ mod tests {
         let flower = lookup.block("dandelion").unwrap();
         assert!(!flower.cube && flower.sides.iter().all(Vec::is_empty));
         assert!(flower.particle.is_some_and(|p| p.cutout));
+        // The model's quads keep what the sides leave out: the flower's two crossed planes, seen from both sides.
+        let state = |name: &str| parse_state(context.assets.registry, name).unwrap();
+        let planes = lookup.model_quads(state("dandelion"));
+        assert_eq!(planes.len(), 4, "{planes:?}");
+        assert!(planes.iter().all(|q| {
+            q.sprite_name == "minecraft:block/dandelion" && q.cull.is_none() && q.sprite.cutout
+        }));
+        assert_eq!(lookup.model_quads(state("stone")).len(), 6);
+        assert!(lookup.model_quads(state("air")).is_empty());
 
         assert_eq!(lookup.block("minecraft:no_such_block"), None);
         assert_eq!(lookup.block("stone[no_such=1]"), None);

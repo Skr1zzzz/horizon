@@ -417,6 +417,32 @@ impl World {
     pub fn layout(&self) -> ColumnLayout {
         self.shape.column()
     }
+    /// Marks for meshing again every section of a loaded column that the block box from `min` to `max` (both
+    /// corners included, in either order) reaches, so that the mods' section geometry is asked for them again:
+    /// a client mod's `remesh_sections`. Sections above or below the column and columns not loaded are left out.
+    /// How many sections it marked, those already marked included.
+    pub fn mark_box_dirty(&mut self, min: [i32; 3], max: [i32; 3]) -> usize {
+        let lo: [i32; 3] = std::array::from_fn(|i| min[i].min(max[i]));
+        let hi: [i32; 3] = std::array::from_fn(|i| min[i].max(max[i]));
+        let layout = self.layout();
+        // In i64: a box can reach any i32 height.
+        let section = |y: i32| (i64::from(y) - i64::from(layout.min_y())).div_euclid(16);
+        let bottom = section(lo[1]).max(0);
+        let top = section(hi[1]).min(layout.sections() as i64 - 1);
+        if bottom > top {
+            return 0;
+        }
+        let mask = SectionMask::below(top as usize + 1).from(bottom as usize);
+        let (columns_x, columns_z) = (lo[0] >> 4..=hi[0] >> 4, lo[2] >> 4..=hi[2] >> 4);
+        let mut marked = 0;
+        for &(x, z) in self.chunks.keys() {
+            if columns_x.contains(&x) && columns_z.contains(&z) {
+                self.dirty_sections.insert_column_mask((x, z), mask);
+                marked += mask.len();
+            }
+        }
+        marked
+    }
     /// The lowest block Y the level's chunks hold.
     pub fn bottom_y(&self) -> i32 {
         self.layout().min_y()
@@ -954,6 +980,49 @@ mod tests {
                 assert_eq!(world.dirty_sections.len(), 8);
             }
         }
+    }
+
+    /// `remesh_sections`: a box marks every section of the loaded columns it reaches, from its lowest block's
+    /// section to its highest's, whichever corner comes first; columns it misses or that aren't loaded and
+    /// heights past the level are left out, and a box as large as an i32 allows marks the whole level.
+    #[test]
+    fn a_box_marks_the_loaded_sections_it_reaches() {
+        let mut world = World::new(BlockStateId(0), 0);
+        for (x, z) in [(0, 0), (1, 0), (-1, -1), (5, 5)] {
+            world.chunks.insert((x, z), Arc::new(Chunk::empty(x, z)));
+        }
+        // x -3 to 17 is columns -1 to 1 and z -3 to 5 columns -1 to 0; y 70 is in section 8 (64 to 79) and
+        // y 90 in section 9.
+        assert_eq!(world.mark_box_dirty([17, 90, 5], [-3, 70, -3]), 6);
+        let mut got: Vec<_> = world
+            .dirty_sections
+            .columns()
+            .map(|(column, mask)| (column, mask.iter().collect::<Vec<_>>()))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [
+                ((-1, -1), vec![8, 9]),
+                ((0, 0), vec![8, 9]),
+                ((1, 0), vec![8, 9])
+            ]
+        );
+
+        world.dirty_sections.clear();
+        let top = MIN_Y + SECTIONS as i32 * 16;
+        assert_eq!(world.mark_box_dirty([0, top, 0], [15, top + 40, 15]), 0);
+        assert_eq!(world.mark_box_dirty([40, 0, 40], [60, 100, 60]), 0);
+        assert!(world.dirty_sections.is_empty());
+        // One block: its own section only.
+        assert_eq!(world.mark_box_dirty([16, MIN_Y, 0], [16, MIN_Y, 0]), 1);
+        assert!(world.dirty_sections.contains(&(1, 0, 0)));
+        assert_eq!(world.dirty_sections.len(), 1);
+        assert_eq!(
+            world.mark_box_dirty([i32::MIN; 3], [i32::MAX; 3]),
+            4 * SECTIONS
+        );
+        assert_eq!(world.dirty_sections.len(), 4 * SECTIONS);
     }
 
     /// `ChunkAccess.getNoiseBiome` clamps the cell to the level. An End chunk read back from a

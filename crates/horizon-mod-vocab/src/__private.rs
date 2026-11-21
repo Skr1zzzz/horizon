@@ -198,6 +198,32 @@ pub mod built {
             biome,
         }
     }
+    /// One quad of a block state's model, constructed by the game and only read by mods.
+    pub fn block_model_quad(
+        positions: [[f32; 3]; 4],
+        uvs: [[f32; 2]; 4],
+        sprite: crate::SpriteRef,
+        sprite_name: String,
+        facing: crate::Direction,
+        cull: Option<crate::Direction>,
+        tint_index: i32,
+        tint: Option<crate::TintSource>,
+        shade: Option<crate::Direction>,
+        translucent: bool,
+    ) -> crate::BlockModelQuad {
+        crate::BlockModelQuad {
+            positions,
+            uvs,
+            sprite,
+            sprite_name,
+            facing,
+            cull,
+            tint_index,
+            tint,
+            shade,
+            translucent,
+        }
+    }
     /// The replay this window plays, constructed by the game and only read by mods.
     pub fn replay_state(
         recording: String,

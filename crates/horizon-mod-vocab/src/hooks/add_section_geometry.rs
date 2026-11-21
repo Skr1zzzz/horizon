@@ -46,7 +46,14 @@ is asked no more. `context.level()` reads the section's chunk and its eight neig
 `level` does. The renderer runs on the meshing workers, so it keeps no mutable state and gets no `Host`; it is asked for every
 section the client meshes, also one that holds only air, and returns quickly when it has nothing there. Its quads
 are shaded only by the colour and light it gives them. A section meshes again when its blocks change, when the
-resources reload, and when a mod calls `ClientHost::refresh_render_visibility` and the hidden blocks change."#]
+resources reload, when a mod calls `ClientHost::refresh_render_visibility` and the hidden blocks change, and when a
+mod calls `ClientHost::remesh_sections(min, max)` with a block box that reaches it: call that when what your
+renderer adds changes, with the box it left and the box it now covers.
+
+A block's own model drawn where no block is (a schematic's ghost blocks) comes from
+`ClientHost::block_model_quads(state)`: every quad the mesher draws for the state, a flower's crossed planes
+included, with its corners, UVs and sprite name. Read them on the client thread, keep them where the renderer
+reads them, and add each quad moved to its block's place in the section."#]
     #[hook(
         side = "client",
         contract = "listen",

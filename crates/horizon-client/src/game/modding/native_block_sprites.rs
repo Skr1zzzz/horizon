@@ -30,6 +30,16 @@ impl Game<'_> {
             })
             .collect()
     }
+    /// For a client mod drawing a block where none is (a schematic's ghost blocks): every quad of `state`'s model
+    /// as the mesher draws it, those `block_sprites` leaves out included (`Lookup::model_quads`). None for a state
+    /// the game does not know.
+    pub(super) fn block_model_quads(
+        &self,
+        state: BlockStateId,
+    ) -> Option<Vec<mod_api::BlockModelQuad>> {
+        self.pack.context.assets.registry.state(state)?;
+        Some(self.native_sprite_lookup().model_quads(state))
+    }
     /// For a client mod: each texture's sprite by name (`minecraft:block/stone`, `block/stone`), none for one no
     /// model uses. API 380.
     pub(super) fn texture_sprites(&self, textures: &[&str]) -> Vec<Option<SpriteRef>> {

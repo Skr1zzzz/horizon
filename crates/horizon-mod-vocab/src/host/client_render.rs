@@ -42,6 +42,15 @@ pub trait ClientRenderClientHost {
     #[access(WorldOnly)]
     fn refresh_biome_colors(&mut self);
     /// Side: client.
+    /// Meshes again every loaded section that the block box from `min` to `max` (both corners included, in
+    /// either order) reaches, on the workers, as when their blocks change: each mod's `SectionGeometry` is
+    /// asked for those sections again. Call it when what your renderer adds there changes (a schematic moved,
+    /// turned or got new blocks), with the box it left and the box it now covers, not every frame: each section
+    /// costs the workers a mesh. Sections above or below the level and columns this client hasn't loaded are
+    /// left out; a column that loads later meshes then anyway.
+    #[access(WorldOnly)]
+    fn remesh_sections(&mut self, min: [i32; 3], max: [i32; 3]);
+    /// Side: client.
     /// A mod's own RGBA image, uploaded into the HUD atlas slot
     /// `MOD_IMAGE_SPRITE` and drawn with
     /// `native_sprite`: its own source rectangle crops and stretches it. `rgba`
@@ -76,6 +85,18 @@ pub trait ClientRenderClientHost {
     /// 380.
     #[access(PublishedResources)]
     fn block_sprites(&self, blocks: &[BlockState]) -> Vec<Option<BlockSprites>>;
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// For a client mod drawing a block where none is (a schematic's ghost blocks, added through
+    /// `add_section_geometry`): every quad of `state`'s baked model, in the order the chunk mesher draws them,
+    /// from the same models. Those `block_sprites` leaves out are included: a flower's crossed planes, an
+    /// element turned on an axis. Each gives its corners and UVs, its sprite and that sprite's atlas name, the
+    /// side it faces, its cull face, its tint index and source, its shade and whether it is translucent. The
+    /// model is the variant `block_sprites` reads. Empty for a state with no model quads (air, a fluid, a block
+    /// drawn only as a block entity); None for a state the game does not know. Ask again when
+    /// `block_sprites_version` changes.
+    #[access(PublishedResources)]
+    fn block_model_quads(&self, state: BlockState) -> Option<Vec<BlockModelQuad>>;
     /// Side: client.
     /// Published asset/data read: available in Setup, Reloading and World.
     /// For a client mod: each texture's sprite by name (`minecraft:block/stone`, `block/stone`), none for one no

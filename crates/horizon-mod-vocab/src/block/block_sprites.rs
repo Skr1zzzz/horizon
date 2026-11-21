@@ -119,12 +119,49 @@ impl FaceSprite {
 pub struct BlockSprites {
     /// The faces on each side, in the model's order: the one drawn first first (a grass block's side: its dirt
     /// and grass, then the grass overlay tinted over it). A side with none is empty. Faces that do not lie flat
-    /// on a side (a flower's crossed planes, a rotated element) are left out.
+    /// on a side (a flower's crossed planes, a rotated element) are left out: `ClientHost::block_model_quads`
+    /// gives those too.
     pub sides: [Vec<FaceSprite>; 6],
     /// The model's particle sprite (what breaking it scatters, a flower's whole picture), if it has one.
     pub particle: Option<SpriteRef>,
     /// The model is a plain cube: one whole face on each side, at its plane.
     pub cube: bool,
+}
+
+/// One quad of a block state's baked model, as `ClientHost::block_model_quads` gives it: what the chunk mesher
+/// draws for the state, whether or not the quad lies flat on a side (a flower's crossed planes, an element turned
+/// by 22.5 or 45 degrees). A mod drawing the block where no block is (a schematic's ghost blocks, through
+/// `add_section_geometry`) moves its corners to the block's place and adds it as a `SectionQuad`.
+/// Mods receive it from the game; they do not construct it.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct BlockModelQuad {
+    /// The corners in blocks from the block's lowest corner, 0 to 1 across the block (a model can reach past it),
+    /// counterclockwise seen from the side the quad faces, as `SectionQuad::positions` takes them.
+    pub positions: [[f32; 3]; 4],
+    /// Each corner's texture coordinate within the sprite, 0 to 1, as `SectionQuad::uvs` takes them.
+    pub uvs: [[f32; 2]; 4],
+    /// The sprite in the block sprite arrays, as `WorldDrawn::block_sprites` cuts them.
+    pub sprite: SpriteRef,
+    /// The sprite's name in the block atlas (`minecraft:block/dandelion`, a mod's `mymod:block/gear`), the name
+    /// `SectionGeometryContext::add` takes.
+    pub sprite_name: String,
+    /// The side the quad faces: the one nearest its normal, which the mesher lights it from.
+    pub facing: Direction,
+    /// The side whose neighbour hides the quad when that neighbour covers it (the face's `cullface`); none for a
+    /// quad always drawn.
+    pub cull: Option<Direction>,
+    /// The model's tint index for the quad, -1 for none: `ClientHost::block_tint_color` turns it into the colour
+    /// the quad is multiplied by at a position.
+    pub tint_index: i32,
+    /// Its colour source, none for an untinted quad.
+    pub tint: Option<TintSource>,
+    /// The side whose directional shade the mesher gives it (`facing`, or the element's
+    /// `shade_direction_override`); none for a quad drawn unshaded.
+    pub shade: Option<Direction>,
+    /// It has partly clear pixels: drawn sorted and blended, in the translucent pass.
+    pub translucent: bool,
 }
 
 /// An atlas the client stitches its sprites into (vanilla's `TextureAtlas`), as

@@ -227,6 +227,67 @@ position. Untinted faces return `None`. Water faces use tint index 0 and the wor
 water colour, including resource-pack water colormaps; other water indices return
 `None`. This differs from `fluid_box`, whose colour comes from its fluid stack.
 
+## Ghost blocks
+
+A schematic or a build planner draws blocks where none are: see-through copies of each block's own model,
+part of the section meshes (`add_section_geometry`), so there is no cap on how many. Two calls make it:
+
+- `block_model_quads(state)` gives every quad the chunk mesher draws for a state, from the same baked
+  models: the faces on its sides and also those `block_sprites` leaves out, such as a flower's crossed planes
+  and elements turned on an axis. Each `BlockModelQuad` has its corners (in blocks, 0 to 1 across the block,
+  counterclockwise seen from the side it faces), its UVs within the sprite, its `sprite` and `sprite_name` (the
+  block atlas name `SectionGeometryContext::add` takes), the side it is `facing`, its `cull` face, its
+  `tint_index` and `tint` source, its `shade` side and whether it is `translucent`. The model is the variant
+  `block_sprites` reads. Air, fluids and blocks drawn only as block entities have no quads; a state the game
+  doesn't know is `None`. Read them on the client thread, when the schematic loads, and again when
+  `block_sprites_version` changes.
+- `remesh_sections(min, max)` meshes again every loaded section that the block box reaches, both corners
+  included, so your renderer is asked for those sections again. Call it when the schematic moves, turns or
+  changes, with the box it left and the box it covers now, not every frame: each section costs the workers a
+  mesh. Columns the client hasn't loaded are left out; they mesh when they load.
+
+The renderer runs on the meshing workers with no `Host`, so keep the quads where it can read them:
+
+```rust,ignore
+struct Ghosts(Arc<RwLock<Schematic>>);
+impl SectionGeometry for Ghosts {
+    fn add(&self, origin: [i32; 3], context: &mut dyn SectionGeometryContext) {
+        let schematic = self.0.read().unwrap();
+        for (pos, quads) in schematic.blocks_in_section(origin) {
+            let at = [0, 1, 2].map(|i| (pos[i] - origin[i]) as f32);
+            for quad in quads {
+                let positions = quad.positions.map(|p| [0, 1, 2].map(|i| p[i] + at[i]));
+                // One corner past the section refuses all of this renderer's quads there.
+                if positions.iter().flatten().any(|c| !(0.0..=16.0).contains(c)) {
+                    continue;
+                }
+                let shade = quad.shade.map_or(1.0, |side| context.level().shade(side));
+                let grey = (255.0 * shade) as u32;
+                context.add(&quad.sprite_name, SectionQuad {
+                    positions,
+                    uvs: quad.uvs,
+                    color: 0x9900_0000 | grey << 16 | grey << 8 | grey,
+                    light: [15, 15],
+                    translucent: true,
+                });
+            }
+        }
+    }
+}
+
+// On the client thread, when the player moves the schematic:
+let (old_min, old_max) = schematic.bounds();
+schematic.move_by(offset);
+let (new_min, new_max) = schematic.bounds();
+host.remesh_sections(old_min, old_max);
+host.remesh_sections(new_min, new_max);
+```
+
+A tinted quad (`tint` set) is multiplied by its source's colour where the ghost block stands:
+`context.level().block_tint(pos, ColorResolver::Grass)` for `TintSource::Grass` (and the same for foliage,
+dry foliage and water), `Fixed` as it is. A quad of a model that reaches past its block's cell (a tall
+model at a section's edge) has to be left out or cut, as above.
+
 ## Texture pixels on the CPU
 
 A mod that colours things by the player's own textures without drawing them on the GPU
