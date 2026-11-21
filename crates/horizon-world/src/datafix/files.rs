@@ -953,8 +953,10 @@ fn clear_staging(folder: &Path, staging: &Path, target: Option<i32>) -> io::Resu
         }
         let live = folder.join(path.file_name().unwrap_or_default());
         if may_install(folder, staging, chunk, &path, &live, target)? {
-            // Its data on the disk before it replaces anything.
-            File::open(&path)?.sync_all()?;
+            // Its data on the disk before it replaces anything. Opened for
+            // writing (nothing is written): Windows flushes a file only
+            // through a handle with write access and refuses a read-only one.
+            File::options().write(true).open(&path)?.sync_all()?;
             fs::rename(&path, &live)?;
         } else {
             set_aside(folder, &path)?;
