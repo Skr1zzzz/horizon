@@ -147,6 +147,7 @@ pub(super) struct Parked {
     tick_chunks: TickChunkMembership,
     tickets: ChunkTickets,
     random_tick_sections: RandomTickSections,
+    postprocess_ready: horizon_client::postprocess_ready::PostprocessReady,
     level_events: Vec<LevelEvent>,
     /// Entity portal processes and cooldowns belong to this level's entities.
     pub(super) portal_states: HashMap<u32, horizon_client::nether_portal::PortalState>,
@@ -754,6 +755,7 @@ impl Game<'_> {
             tick_chunks: Default::default(),
             tickets,
             random_tick_sections: Default::default(),
+            postprocess_ready: Default::default(),
             level_events: Vec::new(),
             portal_states: HashMap::new(),
             portal_sections: Default::default(),
@@ -910,6 +912,7 @@ impl Game<'_> {
         swap(&mut self.tick_chunks, &mut p.tick_chunks);
         swap(&mut self.tickets, &mut p.tickets);
         swap(&mut self.random_tick_sections, &mut p.random_tick_sections);
+        swap(&mut self.postprocess_ready, &mut p.postprocess_ready);
         swap(&mut self.level_events, &mut p.level_events);
         swap(&mut self.portals.entities, &mut p.portal_states);
         swap(&mut self.portals.sections, &mut p.portal_sections);

@@ -13,17 +13,9 @@ const POSTPROCESS_FLAGS: i32 = 276;
 
 impl Game<'_> {
     pub(super) fn postprocess_chunks(&mut self) -> Result<()> {
-        let ready: Vec<(i32, i32)> = self
-            .world
-            .chunks
-            .iter()
-            .filter(|(_, c)| c.lit && !c.postprocess.is_empty())
-            .map(|(k, _)| *k)
-            .filter(|&(x, z)| {
-                (-1..=1)
-                    .all(|dz| (-1..=1).all(|dx| self.world.chunks.contains_key(&(x + dx, z + dz))))
-            })
-            .collect();
+        // The lit chunks with marks left whose 3×3 columns are resident, in the
+        // chunk map's order, kept between ticks instead of scanned (#11755).
+        let ready = self.postprocess_ready.ready(&self.world.chunks);
         if ready.is_empty() {
             return Ok(());
         }

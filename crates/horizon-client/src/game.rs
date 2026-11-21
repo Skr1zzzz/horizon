@@ -1505,6 +1505,8 @@ struct Game<'a> {
     tick_chunks: horizon_client::tick_chunk_membership::TickChunkMembership,
     tickets: horizon_client::ticket_levels::ChunkTickets,
     random_tick_sections: horizon_client::random_tick_sections::RandomTickSections,
+    /// The chunks `postprocess_chunks` runs generation's marks on, kept per level.
+    postprocess_ready: horizon_client::postprocess_ready::PostprocessReady,
     level_events: Vec<LevelEvent>,
     /// Falling models by state and selected-model address list; cleared on pack/atlas replacement.
     falling_vertices: RefCell<HashMap<BlockStateId, Vec<(Vec<usize>, Vec<Vertex>)>>>,
@@ -10800,6 +10802,7 @@ impl<'a> Game<'a> {
             tick_chunks: Default::default(),
             tickets: Default::default(),
             random_tick_sections: Default::default(),
+            postprocess_ready: Default::default(),
             level_events: Vec::new(),
             falling_vertices: Default::default(),
             falling: Default::default(),
