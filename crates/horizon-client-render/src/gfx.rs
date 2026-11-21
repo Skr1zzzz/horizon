@@ -393,6 +393,21 @@ impl<'a> SectionLists<'a> {
         count: u32,
         pulled: bool,
     ) {
+        self.draw_paged(pass, indirect, base, first, count, pulled, &|_, _| {});
+    }
+    /// `draw`, calling `paged` with each run's arena page before drawing it: a shader pack's
+    /// flat program binds that page's vertices for reading there, as it does before each of
+    /// `flat::Flat::draw_with`'s calls.
+    pub(super) fn draw_paged(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        indirect: &wgpu::Buffer,
+        base: u32,
+        first: u32,
+        count: u32,
+        pulled: bool,
+        paged: &dyn Fn(&mut wgpu::RenderPass<'_>, u32),
+    ) {
         let (draws, pages) = (self.draws, self.pages);
         let (mut i, end) = (first as usize, (first + count) as usize);
         while i < end {
@@ -424,6 +439,7 @@ impl<'a> SectionLists<'a> {
             {
                 pass.set_bind_group(1, group, &[]);
             }
+            paged(pass, page);
             pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
             if self.multi_draw {
                 let offset = (i - base as usize) as u64 * 20;
@@ -474,6 +490,39 @@ fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bo
 /// The compact layout of solid quads, unless `HORIZON_PACKED_QUADS=0` (A/B checks).
 fn packed_wanted() -> bool {
     std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
+}
+
+/// Whether a `shaders/` pack's shadow pass draws its solid list (draws `solid` of `draws`) with
+/// indirect multi-draws over the quad indices, each at its section's base vertex, rather than
+/// from the flat list (`flat::Flat::prepare`'s `skip`). Its program reads the arena page
+/// itself and sees the same vertex index either way, the base vertex plus the quad's corner,
+/// so the shadow map is the same; the frame no longer copies every index of the light's
+/// sections, its largest list, into the flat list each frame and reads them back. Only where
+/// frames without a pack draw section by section (`vanilla_flat` false, `flat::for_vanilla`:
+/// not where multi-draws are emulated or mishandled), with multi-draws the GPU runs itself
+/// (`native_multi_draw`), for a shadow program without a geometry stage, which reads the flat
+/// list's indices itself (`program`), while another draw keeps the frame flat, and unless
+/// `HORIZON_PACK_SHADOW_INDIRECT=0` (`wanted`).
+fn pack_shadow_indirect(
+    wanted: bool,
+    native_multi_draw: bool,
+    vanilla_flat: bool,
+    program: bool,
+    draws: &[[u32; 5]],
+    solid: std::ops::Range<usize>,
+) -> bool {
+    wanted
+        && native_multi_draw
+        && !vanilla_flat
+        && program
+        && !solid.is_empty()
+        && (draws.iter().enumerate()).any(|(i, d)| !solid.contains(&i) && d[0] > 0)
+}
+
+/// `pack_shadow_indirect`'s switch, for A/B checks: on unless `HORIZON_PACK_SHADOW_INDIRECT=0`.
+fn pack_shadow_indirect_wanted() -> bool {
+    static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WANTED.get_or_init(|| std::env::var("HORIZON_PACK_SHADOW_INDIRECT").as_deref() != Ok("0"))
 }
 
 pub(crate) mod animate;
@@ -9814,6 +9863,21 @@ impl Renderer {
                 &self.globals,
             );
         }
+        // A `shaders/` pack's shadow pass draws its solid list with indirect multi-draws, as
+        // frames without a pack draw theirs, not from the flat list (`pack_shadow_indirect`):
+        // only its flat programs read the page as the flat list's calls have them do.
+        let shadow_solid_draws = shadow_first as usize..(shadow_first + shadow_solid) as usize;
+        let shadow_indirect = self.pack_terrain_flat
+            && pack_shadow_indirect(
+                pack_shadow_indirect_wanted(),
+                self.multi_draw && self.info.backend != wgpu::Backend::Gl,
+                (self.flat.as_ref()).is_some_and(|f| f.min_sections != usize::MAX),
+                (self.pack_post.as_ref())
+                    .and_then(|p| p.1.as_ref())
+                    .is_some_and(|p| p.has_shadow() && !p.shadow_solid_geometry()),
+                &self.draws,
+                shadow_solid_draws.clone(),
+            );
         let flat_frame = match &mut self.flat {
             Some(flat)
                 if self.flat_on
@@ -9845,6 +9909,11 @@ impl Renderer {
                         solid_draws as usize,
                         lists.marks([shadow_first, shadow_first + shadow_solid]),
                         [opaque_end, cutout_start, phase2_cutout as usize],
+                        if shadow_indirect {
+                            shadow_solid_draws.clone()
+                        } else {
+                            0..0
+                        },
                         phase2,
                         self.translucent_arena.is_some(),
                         visible
@@ -9923,9 +9992,21 @@ impl Renderer {
             });
             flat.bind_looks(self.look_groups.as_ref());
         }
-        if flat_frame {
+        // The draws the indirect buffer gives: all of a frame drawn section by section; of a flat
+        // frame, the shadow camera's solid ones a `shaders/` pack draws indirectly, each as
+        // instance 0, as the flat list's calls draw theirs (what `gl_InstanceID` reads there).
+        let indirect_draws = if flat_frame {
             section_draw_calls = self.flat.as_ref().map_or(0, |f| f.shadow_calls[0]);
-        } else if self.multi_draw && !self.draws.is_empty() {
+            shadow_indirect.then(|| {
+                for d in &mut self.draws[shadow_solid_draws.clone()] {
+                    d[4] = 0;
+                }
+                shadow_solid_draws.clone()
+            })
+        } else {
+            (self.multi_draw && !self.draws.is_empty()).then_some(0..self.draws.len())
+        };
+        if let Some(range) = indirect_draws {
             if self.draws.len() as u64 > self.indirect_capacity {
                 let capacity = (self.draws.len() as u64).next_power_of_two();
                 let usage = wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST;
@@ -9946,8 +10027,8 @@ impl Renderer {
             self.uploads.buffer(
                 &mut encoder,
                 &self.indirect,
-                0,
-                bytemuck::cast_slice(&self.draws),
+                range.start as u64 * 20,
+                bytemuck::cast_slice(&self.draws[range]),
             );
         }
         if mesh_frame && let Some(mesh_terrain) = &mut self.mesh_terrain {
@@ -11559,6 +11640,34 @@ impl Renderer {
                         return;
                     }
                     match flat {
+                        // The shadow camera's solid draws, which the flat list left out: drawn
+                        // with indirect multi-draws, each page's run binding the page as the
+                        // flat calls do (`pack_shadow_indirect`).
+                        Some(flat)
+                            if shadow_indirect && list == L::ShadowSolid && geometry.is_none() =>
+                        {
+                            let lists = SectionLists {
+                                draws: &self.draws,
+                                pages: &self.draw_pages,
+                                arena: &self.arena,
+                                translucent_arena: self.translucent_arena.as_ref(),
+                                sorted_indices: &self.sorted_indices,
+                                indices: &self.indices,
+                                flat: Some(flat),
+                                multi_draw: self.multi_draw,
+                                looks: self.look_groups.as_ref(),
+                            };
+                            let indirect = &self.indirect;
+                            lists.draw_paged(
+                                rp,
+                                indirect,
+                                0,
+                                shadow_first,
+                                shadow_solid,
+                                true,
+                                page,
+                            );
+                        }
                         Some(flat) => {
                             let [shadow, shadow_translucent] = flat.shadow_calls;
                             let calls = match list {
@@ -14770,6 +14879,37 @@ mod shadow_caster_tests {
         let heights = [3.0e20, 1.5, 0.0, -2.5, -1.0e30, f32::NEG_INFINITY];
         let keys = heights.map(|h| shadow_order([0.0, h, 0.0], Vec3::Y));
         assert!(keys.windows(2).all(|pair| pair[0] < pair[1]), "{keys:?}");
+    }
+
+    /// A `shaders/` pack's shadow pass draws its solid list with indirect multi-draws where
+    /// frames without a pack do, with multi-draws the GPU runs, for a program without a geometry
+    /// stage, while the flat list keeps another draw; from the flat list everywhere else.
+    #[test]
+    fn the_pack_shadow_draws_its_solid_list_indirectly_where_vanilla_frames_do() {
+        // The camera's solid draw, then the shadow camera's two solid ones and its water.
+        let draws = [
+            [6, 1, 0, 0, 0],
+            [12, 1, 0, 40, 1],
+            [6, 1, 0, 64, 2],
+            [6, 1, 6, 80, 2],
+        ];
+        // (switch, native multi-draws, vanilla frames flat, program without a geometry stage)
+        let indirect = |[wanted, native, vanilla_flat, program]: [bool; 4]| {
+            pack_shadow_indirect(wanted, native, vanilla_flat, program, &draws, 1..3)
+        };
+        assert!(indirect([true, true, false, true]));
+        // `HORIZON_PACK_SHADOW_INDIRECT=0`; multi-draws looped on the CPU; frames that draw flat
+        // anyway (Metal, Intel Gen11 and Gen12 on Vulkan); a geometry stage.
+        assert!(!indirect([false, true, false, true]));
+        assert!(!indirect([true, false, false, true]));
+        assert!(!indirect([true, true, true, true]));
+        assert!(!indirect([true, true, false, false]));
+        // No shadow solid draws; or none left for the flat list, without which the frame would
+        // not be drawn flat.
+        let listed =
+            |draws: &[[u32; 5]], solid| pack_shadow_indirect(true, true, false, true, draws, solid);
+        assert!(!listed(&draws[..], 1..1));
+        assert!(!listed(&draws[1..3], 0..2));
     }
 
     /// What the shadow pass keeps of a camera-relative section at `min`, the camera at the

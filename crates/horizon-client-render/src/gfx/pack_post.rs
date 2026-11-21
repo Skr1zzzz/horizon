@@ -4899,6 +4899,13 @@ impl PackPost {
             && (self.shadow_terrain.is_some() || self.shadow_water.is_some())
     }
 
+    /// Whether the program that draws solid terrain into the shadow map has a geometry stage,
+    /// which reads the flat list's indices itself: its draws stay in that list
+    /// (`gfx::pack_shadow_indirect`).
+    pub fn shadow_solid_geometry(&self) -> bool {
+        self.shadow_terrain.as_ref().is_some_and(|p| p.geometry > 0)
+    }
+
     /// Whether the pack draws the sky (disc, sunset, stars, void) itself.
     /// What the world's background is when the pack draws the sky: colortex0's clear colour
     /// (`None`: the fog colour, its default).
