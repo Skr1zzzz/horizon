@@ -13,6 +13,24 @@ use horizon_client::block_pattern::{
 #[path = "tests/copper_golem_tests.rs"]
 mod copper_golem_tests;
 
+/// The UUIDs of the players `SUMMONED_ENTITY` reaches for a mob built with
+/// the box `built` (`getEntitiesOfClass(ServerPlayer.class,
+/// built.inflate(reach))`): each of the level's `players` that is not a
+/// spectator and whose box meets that box. `AABB.intersects` is strict: a box
+/// that only touches a face is out.
+fn summon_witnesses(
+    built: horizon_core::geometry::Aabb,
+    reach: f64,
+    players: impl IntoIterator<Item = super::natural_spawning::LevelPlayer>,
+) -> Vec<u128> {
+    let reached = built.inflate(horizon_core::geometry::Vec3::new(reach, reach, reach));
+    players
+        .into_iter()
+        .filter(|p| !p.spectator && p.bounds.intersects(reached))
+        .map(|p| p.uuid)
+        .collect()
+}
+
 impl Game<'_> {
     fn golem_block(&self, p: [i32; 3]) -> &str {
         let state = self.world.block(p[0], p[1], p[2]);
@@ -111,9 +129,12 @@ impl Game<'_> {
         self.update_pattern_blocks(&blocks)
     }
     /// SUMMONED_ENTITY for each player whose box is within `reach` blocks of
-    /// the built mob's box (the local player here): 5 for golems
+    /// the built mob's box: 5 for golems
     /// (`CarvedPumpkinBlock.spawnGolemInWorld`), 50 for the wither
-    /// (`WitherSkullBlock.checkSpawn`).
+    /// (`WitherSkullBlock.checkSpawn`). A dispenser builds outside any
+    /// player's turn, a player's build reaches the others near too, and a
+    /// server has no player of its own: each of the level's players it
+    /// reaches hears it in their own turn.
     pub(super) fn trigger_summoned(&mut self, id: Option<u32>, reach: f64) {
         let Some(built) = id
             .and_then(|id| self.mobs.iter().find(|m| m.id == id))
@@ -121,22 +142,17 @@ impl Game<'_> {
         else {
             return;
         };
-        let me = self.player_entity_for("minecraft:summoned_entity");
-        let half = f64::from(built.width()) / 2.0;
-        let height = f64::from(built.height());
-        let [x, y, z] = me.position;
-        let p = built.position;
-        // The player's box is 0.6 wide and 1.8 tall.
-        let near = x + 0.3 >= p.x - half - reach
-            && x - 0.3 <= p.x + half + reach
-            && y + 1.8 >= p.y - reach
-            && y <= p.y + height + reach
-            && z + 0.3 >= p.z - half - reach
-            && z - 0.3 <= p.z + half + reach;
-        if near {
-            let view = self.mob_entity(&built);
-            self.trigger_entity("minecraft:summoned_entity", "entity", &view);
+        let near = summon_witnesses(built.bounds(), reach, self.level_players_iter());
+        if near.is_empty() {
+            return;
         }
+        let view = self.mob_entity(&built);
+        self.for_each_player(|g| {
+            let me = horizon_client::lan::playerdata::ints_uuid(g.acting_uuid());
+            if near.contains(&me) {
+                g.trigger_entity("minecraft:summoned_entity", "entity", &view);
+            }
+        });
     }
     /// Whether placing a golem head at `head` completes a golem.
     pub(super) fn completes_golem(&self, head: [i32; 3]) -> bool {
@@ -313,6 +329,44 @@ mod tests {
         let at = |p: [i32; 3]| world.get(&p).copied().unwrap_or('~');
         let m = pattern.find(head, |c, p| at(p) == c)?;
         Some(m.front_cells())
+    }
+
+    /// `CarvedPumpkinBlock.spawnGolemInWorld` and `WitherSkullBlock.checkSpawn`
+    /// trigger SUMMONED_ENTITY for every player whose box meets the built
+    /// mob's box grown by 5 (50 for the wither). A server has no player of its
+    /// own, so a player it serves standing by a golem a dispenser built must
+    /// be reached, or nobody there earns "Hired Help". A spectator is not
+    /// (`NO_SPECTATORS`), nor a box that only touches the grown box's face.
+    #[test]
+    fn a_built_golem_reaches_the_players_a_server_serves() {
+        use super::super::natural_spawning::LevelPlayer;
+        use super::summon_witnesses;
+        use horizon_core::geometry::{Aabb, Vec3};
+        // A player's 0.6 wide box from `x` up.
+        let served = |uuid: u128, x: f64, spectator: bool| LevelPlayer {
+            uuid,
+            position: Vec3::new(x + 0.3, 64.0, 0.5),
+            bounds: Aabb::new(Vec3::new(x, 64.0, 0.2), Vec3::new(x + 0.6, 65.8, 0.8)),
+            alive: true,
+            creative: false,
+            spectator,
+        };
+        // The built mob's box runs from -0.5 to 1.5 along x: grown by 5, from
+        // -5.5 to 6.5.
+        let built = Aabb::new(Vec3::new(-0.5, 64.0, -0.5), Vec3::new(1.5, 66.5, 1.5));
+        assert_eq!(
+            summon_witnesses(built, 5.0, [served(7, 5.0, false)]),
+            vec![7]
+        );
+        let players = [
+            served(1, 5.0, true),
+            served(2, 6.5, false),
+            served(3, -5.75, false),
+            served(4, 40.0, false),
+        ];
+        assert_eq!(summon_witnesses(built, 5.0, players.clone()), vec![3]);
+        // The wither's 50 blocks reach the ones further off too.
+        assert_eq!(summon_witnesses(built, 50.0, players), vec![2, 3, 4]);
     }
 
     #[test]
