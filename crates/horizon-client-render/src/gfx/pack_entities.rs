@@ -276,6 +276,8 @@ pub(super) struct PackEntities {
     /// Set 1: the vertices again, for the quads' corners; last frame's and the indices into them.
     pub table: wgpu::BindGroupLayout,
     pub table_group: wgpu::BindGroup,
+    /// `table_group` for the last two frames' `vertices`, `previous` and `previous_index`.
+    table_groups: Vec<([wgpu::Buffer; 3], wgpu::BindGroup)>,
     slots: wgpu::Buffer,
     pub group: wgpu::BindGroup,
     stride: u64,
@@ -320,6 +322,7 @@ impl PackEntities {
             index_scratch: Vec::new(),
             table,
             table_group,
+            table_groups: Vec::new(),
             slots,
             group,
             stride,
@@ -629,13 +632,22 @@ impl PackEntities {
             0,
             bytemuck::cast_slice(&self.index_scratch),
         );
-        self.table_group = Self::table_group(
-            device,
-            &self.table,
-            &self.vertices,
-            &self.previous,
-            &self.previous_index,
-        );
+        // The buffers swap every frame and grow only now and then: the group made for the same
+        // three on an earlier frame serves again.
+        let buffers = [
+            self.vertices.clone(),
+            self.previous.clone(),
+            self.previous_index.clone(),
+        ];
+        self.table_group = kept(&mut self.table_groups, buffers, || {
+            Self::table_group(
+                device,
+                &self.table,
+                &self.vertices,
+                &self.previous,
+                &self.previous_index,
+            )
+        });
         if need_slots > have_slots {
             (self.slots, self.group) =
                 Self::slot_buffer(device, layout, need_slots.next_power_of_two(), self.stride);
@@ -696,6 +708,20 @@ impl PackEntities {
             water_mask,
         });
     }
+}
+
+/// The value `cache` holds for `key`, else `make`'s, kept with the one made before it: two in
+/// all, for keys that take turns frame by frame.
+fn kept<K: PartialEq, V: Clone>(cache: &mut Vec<(K, V)>, key: K, make: impl FnOnce() -> V) -> V {
+    if let Some((_, value)) = cache.iter().find(|(k, _)| *k == key) {
+        return value.clone();
+    }
+    let value = make();
+    if cache.len() == 2 {
+        cache.remove(0);
+    }
+    cache.push((key, value.clone()));
+    value
 }
 
 /// Two triangles for each of `quads` quads, from vertex 0.
@@ -1014,6 +1040,26 @@ pub fn runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keys taking turns (`vertices` and `previous` swap every frame) each have their value made
+    /// once; a third key (a buffer grew) puts out the first of the two, which is made again if
+    /// it comes back.
+    #[test]
+    fn values_are_kept_for_two_keys_taking_turns() {
+        let mut cache = Vec::new();
+        let mut made = 0;
+        let mut get = |cache: &mut Vec<(char, u32)>, key| {
+            kept(cache, key, || {
+                made += 1;
+                made
+            })
+        };
+        let turns = ['a', 'b', 'a', 'b', 'a'].map(|key| get(&mut cache, key));
+        assert_eq!(turns, [1, 2, 1, 2, 1]);
+        assert_eq!(get(&mut cache, 'c'), 3);
+        assert_eq!(get(&mut cache, 'b'), 2);
+        assert_eq!(get(&mut cache, 'a'), 4);
+    }
 
     #[test]
     fn destroy_stage_uses_the_pack_only_when_a_program_is_available() {
