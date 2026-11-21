@@ -53,6 +53,8 @@ fn rain_and_snow_leave_depth_alone_whatever_rain_depth_says() {
                 post.set_weather(None);
                 post.draw_weather(&device, &queue, &mut encoder, size);
                 assert!(post.has_weather());
+                // As `run` does once its passes are bound.
+                post.blocks.upload(&queue);
                 let targets = post.targets.as_ref().unwrap();
                 let color = targets.color[0].as_ref().unwrap()[0].texture();
                 let colors = readback(&device, &mut encoder, color);

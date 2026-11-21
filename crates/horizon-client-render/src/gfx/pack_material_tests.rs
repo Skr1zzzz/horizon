@@ -193,6 +193,8 @@ void main() {
             });
         }
         let group = post.bind(&device, &queue, &mut encoder, &mut pass, [15, 1]);
+        // As `run` does once its passes are bound.
+        post.blocks.upload(&queue);
         {
             let mut render = post.begin(&mut encoder, &pass);
             render.set_pipeline(pass.render());

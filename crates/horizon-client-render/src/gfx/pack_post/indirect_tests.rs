@@ -187,6 +187,8 @@ fn changing_indirect_shadow_arguments_bypasses_only_the_indirect_shadow_cache() 
                 &mut |_, _, _, _| {},
                 &frame,
             );
+            // As `run` does once its passes are bound.
+            post.blocks.upload(&gpu.queue);
             gpu.queue.submit([encoder.finish()]);
         }
         post.passes = passes;

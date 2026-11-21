@@ -34,6 +34,7 @@ mod blend_capability_tests;
 mod indirect;
 mod packed;
 
+mod blocks;
 mod carry;
 mod deep_reads;
 mod flip_carry;
@@ -116,6 +117,9 @@ mod deep_reads_tests;
 
 #[cfg(test)]
 mod carry_tests;
+
+#[cfg(test)]
+mod blocks_tests;
 
 /// The texture behind a pack sampler name.
 #[derive(Clone, Copy, PartialEq)]
@@ -516,7 +520,10 @@ struct Pass {
     /// (`RenderTypes.waterMask`: depth only, so no water shows inside a hull).
     water_mask: Option<Slot<wgpu::RenderPipeline>>,
     layout: wgpu::BindGroupLayout,
-    ubo: wgpu::Buffer,
+    /// Its uniform block's binding size: the block's, at least 16 bytes.
+    block_size: u64,
+    /// Where `PackPost::blocks` keeps its block: placed the first time the pass binds.
+    placed: Option<(usize, usize)>,
     block: Vec<u8>,
     /// Shader-declared defaults must survive a reset of the mutable upload block.
     initial_block: Vec<u8>,
@@ -880,6 +887,8 @@ pub struct PackPost {
     uniforms: FrameUniforms,
     /// This frame's `hz_fog_color` and `hz_fog` (`FrameUniforms::fog`), the same for every pass.
     fog: [glam::Vec4; 2],
+    /// Every pass's uniform block, uploaded once a frame (`blocks`).
+    blocks: blocks::Blocks,
 }
 
 /// The wgpu format of a pack format (6.7), the nearest one wgpu can render to.
@@ -2284,12 +2293,8 @@ fn build_pass(
     }
     let image_copies = image_copies(&samplers, &images);
     Some(Pass {
-        ubo: device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&p.name),
-            size: u64::from(interface.uniform_size.max(16)),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }),
+        block_size: u64::from(interface.uniform_size.max(16)),
+        placed: None,
         block: interface.initial_values.clone(),
         initial_block: interface.initial_values.clone(),
         uniforms: interface
@@ -2438,12 +2443,8 @@ fn build_compute(
     let image_copies = image_copies(&samplers, &images);
     let (before_colors, snapshots) = befores(&images);
     Some(Pass {
-        ubo: device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&name),
-            size: u64::from(interface.uniform_size.max(16)),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }),
+        block_size: u64::from(interface.uniform_size.max(16)),
+        placed: None,
         block: interface.initial_values.clone(),
         initial_block: interface.initial_values.clone(),
         uniforms: interface
@@ -3683,6 +3684,7 @@ impl PackPost {
                 u
             },
             fog: [glam::Vec4::ZERO; 2],
+            blocks: blocks::Blocks::new(device),
             shadow_cache: Default::default(),
             shadow_cache_eligible,
         };
@@ -3758,13 +3760,14 @@ impl PackPost {
         }
     }
 
-    /// Writes `pass`'s uniforms for a target of `out` pixels; its bind group for the buffers'
-    /// current mapping. The buffers it both samples and stores to are copied first, and it
-    /// samples the copies.
+    /// Writes `pass`'s uniforms for a target of `out` pixels into its place in `blocks`, which
+    /// `run` uploads once the frame's passes are bound (a caller binding outside `run` uploads
+    /// them itself; `_queue` writes nothing); its bind group for the buffers' current mapping.
+    /// The buffers it both samples and stores to are copied first, and it samples the copies.
     fn bind(
-        &self,
+        &mut self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         pass: &mut Pass,
         out: [u32; 2],
@@ -3816,8 +3819,17 @@ impl PackPost {
                 member.write(v, &mut pass.block, *offset as usize);
             }
         }
+        let place = match pass.placed {
+            Some(place) => place,
+            None => {
+                let place = self.blocks.place(device, pass.block_size);
+                pass.placed = Some(place);
+                place
+            }
+        };
         if !pass.block.is_empty() {
-            queue.write_buffer(&pass.ubo, 0, &pass.block);
+            let n = pass.block.len().min(pass.block_size as usize);
+            self.blocks.write(place, &pass.block[..n]);
         }
         let targets = self.targets.as_ref().expect("resized");
         let shadow = self.shadow_targets.as_ref();
@@ -3837,7 +3849,7 @@ impl PackPost {
         let group = pass.groups.entry(key).or_insert_with(|| {
             let mut entries = vec![wgpu::BindGroupEntry {
                 binding: 0,
-                resource: pass.ubo.as_entire_binding(),
+                resource: self.blocks.binding(place, pass.block_size),
             }];
             for s in &pass.samplers {
                 let shadow_color = |i: usize, side: usize| {
@@ -6043,6 +6055,9 @@ impl PackPost {
         if !water_drawn {
             self.draw_translucent(device, queue, encoder, size, terrain);
         }
+        // Every pass of the frame is bound: their blocks go up in one write a buffer, which
+        // lands before the frame's commands run.
+        self.blocks.upload(queue);
         let targets = self.targets.as_ref().expect("resized");
         // depthtex0 as the frame leaves it, for next frames' `centerDepthSmooth`.
         if let Some(center) = &mut self.center_depth {
@@ -6661,13 +6676,19 @@ mod tests {
         });
         let view = texture.create_view(&Default::default());
         let head = [64.0f32, 1.0, 1.0 / 64.0, 1.0];
-        queue.write_buffer(&pass.ubo, 0, bytemuck::cast_slice(&head));
+        let ubo = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: pass.block_size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&ubo, 0, bytemuck::cast_slice(&head));
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &pass.layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: pass.ubo.as_entire_binding(),
+                resource: ubo.as_entire_binding(),
             }],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
