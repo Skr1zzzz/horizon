@@ -195,6 +195,21 @@ pub fn valid_vibration(listens: bool, event: &str, ctx: &Context) -> bool {
     // stack's dampensVibrations flag (including after Entity.kill removes it).
     !ctx.dampens && !ctx.dampening_state
 }
+/// The context a sensor relays a vibration it `heard` with
+/// (`SculkSensorBlock.activate`: `tryResonateVibration`'s resonance and
+/// `SCULK_SENSOR_TENDRILS_CLICKING`), `GameEvent.Context.of(sourceEntity)`:
+/// `ctx`, made for `heard.source`, is still that entity. It keeps the saved
+/// UUID it was heard with, which names a served player after their turn
+/// (`VibrationInfo.uuid`), and a projectile keeps its owner, which the next
+/// listener's `VibrationInfo` takes from it again (`getProjectileOwner`).
+/// `owner_is_player`: `tryGetPlayer` finds a player through that owner.
+pub fn relayed_context(mut ctx: Context, heard: &Info, owner_is_player: bool) -> Context {
+    ctx.source_uuid = heard.source_uuid.or(ctx.source_uuid);
+    ctx.owner = heard.owner.or(ctx.owner);
+    ctx.owner_uuid = heard.owner_uuid.or(ctx.owner_uuid);
+    ctx.player |= owner_is_player;
+    ctx
+}
 
 impl Selector {
     pub fn add_candidate(&mut self, new: Info, tick: i64) {
@@ -972,6 +987,48 @@ mod tests {
             "minecraft:step",
             &Context::default()
         ));
+    }
+
+    /// A sensor relays with `Context.of(sourceEntity)`, the entity it heard: the
+    /// click a served player's step sets off after their turn still names them
+    /// (the UUID that picks whose warden tracker a shrieker warns), and the
+    /// click of a player's arrow landing keeps its owner, so a shrieker hears
+    /// it (`tryGetPlayer`) and a warden blames the owner.
+    #[test]
+    fn a_relayed_vibration_keeps_the_source_it_was_heard_from() {
+        let guest = [0, 0, 0, 12];
+        let step = Info {
+            source: Some(Who::Player.into()),
+            source_uuid: Some(guest),
+            ..info("minecraft:step", 3.0)
+        };
+        // Made on the server's block tick, where the player names no one.
+        let on_tick = Context {
+            source: Some(Who::Player.into()),
+            living: true,
+            player: true,
+            ..Context::default()
+        };
+        let click = relayed_context(on_tick, &step, false);
+        assert_eq!(click.source_uuid, Some(guest));
+        assert_eq!(click.source, Some(Who::Player.into()));
+        assert!(click.player);
+        let landed = Info {
+            source: Some(EventSource::Entity(40)),
+            owner: Some(Who::Player),
+            owner_uuid: Some(guest),
+            ..info("minecraft:projectile_land", 3.0)
+        };
+        let arrow = Context {
+            source: Some(EventSource::Entity(40)),
+            ..Context::default()
+        };
+        let click = relayed_context(arrow, &landed, true);
+        assert_eq!(
+            (click.owner, click.owner_uuid),
+            (Some(Who::Player), Some(guest))
+        );
+        assert!(click.player);
     }
 
     #[test]

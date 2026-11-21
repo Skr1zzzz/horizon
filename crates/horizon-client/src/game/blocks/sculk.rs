@@ -113,6 +113,9 @@ pub(super) struct SculkState {
     /// Who sets off the shrieker `try_shriek` is trying, whose tracker
     /// `try_to_warn` warns with (`try_shriek_by`).
     shrieker: ShriekPlayer,
+    /// The vibration the sensor `activate_sensor` activates for, as it was
+    /// heard (`activate_sensor_by`): its relayed events keep that source.
+    heard: Option<Info>,
     /// The wardens' and allays' slots in the mob list, and the list they were
     /// read from: see `listener_slots`.
     listeners: Vec<u32>,
@@ -1277,7 +1280,7 @@ impl Game<'_> {
                         e.last_frequency = frequency;
                     }
                     let power = sculk::redstone_strength(distance, radius);
-                    self.activate_sensor(key, info.source, power, frequency)?;
+                    self.activate_sensor_by(key, info, power, frequency)?;
                 }
             }
             SculkKind::Shrieker => {
@@ -1343,7 +1346,7 @@ impl Game<'_> {
                 let relative = (key.0 + n[0], key.1 + n[1], key.2 + n[2]);
                 let state = self.world.block(relative.0, relative.1, relative.2);
                 if self.state_is(&self.sculk.tables.resonator, state) {
-                    let ctx = self.event_source_context(source, Some(state));
+                    let ctx = self.relay_context(source, Some(state));
                     self.post_game_event(
                         sculk::RESONANCE[frequency as usize - 1],
                         center(relative),
@@ -1358,10 +1361,45 @@ impl Game<'_> {
                 }
             }
         }
-        let ctx = self.event_source_context(source, None);
+        let ctx = self.relay_context(source, None);
         self.post_game_event(sculk::TENDRILS_CLICKING, center(key), ctx);
         self.with_level(|b, level, ticks| b.sculk_sensor_click(level, ticks, pos));
         self.process_level_events()
+    }
+    /// `activate(sourceEntity, ...)` for a vibration the sensor heard:
+    /// [`Self::activate_sensor`], whose relayed events keep the source as
+    /// `heard` names it (`relay_context`): a served player's UUID after their
+    /// turn, a projectile's owner.
+    fn activate_sensor_by(
+        &mut self,
+        key: (i32, i32, i32),
+        heard: Info,
+        power: i32,
+        frequency: i32,
+    ) -> Result<()> {
+        let outer = self.sculk.heard.replace(heard);
+        let activated = self.activate_sensor(key, heard.source, power, frequency);
+        self.sculk.heard = outer;
+        activated
+    }
+    /// The context of an event a sensor relays from `source`
+    /// (`GameEvent.Context.of(sourceEntity, state)`), still naming the source
+    /// the vibration was heard from when `activate_sensor_by` activates for it
+    /// (`sculk::relayed_context`).
+    fn relay_context(
+        &mut self,
+        source: Option<EventSource>,
+        state: Option<BlockStateId>,
+    ) -> Context {
+        let ctx = self.event_source_context(source, state);
+        match self.sculk.heard.filter(|heard| heard.source == source) {
+            Some(heard) => {
+                let owner_is_player =
+                    heard.owner == Some(Who::Player) || self.rides_player(heard.owner);
+                sculk::relayed_context(ctx, &heard, owner_is_player)
+            }
+            None => ctx,
+        }
     }
     /// `SculkSensorBlock.stepOn` and `SculkShriekerBlock.stepOn`: standing on
     /// them is heard (or seen) every tick.
