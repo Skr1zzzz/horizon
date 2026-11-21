@@ -204,38 +204,90 @@ impl Value {
 
     /// Writes the value as the type the pack declared, at `offset` of a std140 block.
     pub fn write(&self, ty: &str, out: &mut [u8], offset: usize) {
-        let ints = matches!(ty, "int" | "bool" | "uint") || ty.starts_with(['i', 'u']);
-        let (floats, integers): ([f32; 16], [i32; 16]) = match *self {
-            Value::F(f) => (f, f.map(|v| v as i32)),
-            Value::I(i) => {
-                let mut f = [0.0; 16];
-                let mut v = [0; 16];
-                for k in 0..3 {
-                    f[k] = i[k] as f32;
-                    v[k] = i[k];
-                }
-                (f, v)
-            }
+        self.write_as(Layout::of(ty), out, offset);
+    }
+
+    /// [`write`](Self::write), with the declared type's [`Layout`] worked out beforehand.
+    pub fn write_as(&self, layout: Layout, out: &mut [u8], offset: usize) {
+        let floats = match *self {
+            Value::F(f) => f,
+            Value::I(i) => std::array::from_fn(|k| i.get(k).map_or(0.0, |&v| v as f32)),
         };
-        let count = match ty {
-            "mat4" => 16,
-            "mat3" => {
-                // std140: three columns, each padded to a vec4, from the mat4's upper left.
-                for c in 0..3 {
-                    let column: [f32; 3] = std::array::from_fn(|r| floats[c * 4 + r]);
-                    put(out, offset + c * 16, bytemuck::cast_slice(&column));
-                }
-                return;
+        let Some(count) = layout.count else {
+            // std140: three columns, each padded to a vec4, from the mat4's upper left.
+            for c in 0..3 {
+                let column: [f32; 3] = std::array::from_fn(|r| floats[c * 4 + r]);
+                put(out, offset + c * 16, bytemuck::cast_slice(&column));
             }
-            t => match t.as_bytes().last() {
-                Some(n @ b'2'..=b'4') if t.contains("vec") => (n - b'0') as usize,
-                _ => 1,
-            },
+            return;
         };
-        if ints {
+        let count = usize::from(count);
+        if layout.ints {
+            let integers: [i32; 16] = match *self {
+                Value::F(f) => f.map(|v| v as i32),
+                Value::I(i) => std::array::from_fn(|k| i.get(k).copied().unwrap_or(0)),
+            };
             put(out, offset, bytemuck::cast_slice(&integers[..count]));
         } else {
             put(out, offset, bytemuck::cast_slice(&floats[..count]));
+        }
+    }
+}
+
+/// How [`Value::write`] lays a value out as a declared GLSL type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    /// As integers: `int`, `bool`, and the types starting with `i` or `u`.
+    ints: bool,
+    /// The components written; `None` for a `mat3`, three columns each padded to a vec4.
+    count: Option<u8>,
+}
+
+impl Layout {
+    /// The layout of a value declared `ty`.
+    pub fn of(ty: &str) -> Self {
+        let count = match ty {
+            "mat4" => Some(16),
+            "mat3" => None,
+            t => Some(match t.as_bytes().last() {
+                Some(n @ b'2'..=b'4') if t.contains("vec") => n - b'0',
+                _ => 1,
+            }),
+        };
+        Layout {
+            ints: matches!(ty, "int" | "bool" | "uint") || ty.starts_with(['i', 'u']),
+            count,
+        }
+    }
+}
+
+/// How a member of a pass's uniform block takes its value each frame: what [`Value::read_as`]
+/// and [`Value::write`] work out from the built-in's name and the declared type, worked out
+/// once, when the pass is made, rather than for every member of every pass bound in a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Member {
+    /// Whether the program reads a float value, and an integer one.
+    reads: [bool; 2],
+    layout: Layout,
+}
+
+impl Member {
+    /// The member declared `ty` that built-in `name` gives (`None`: a custom uniform, whose
+    /// type was checked when the pass was made).
+    pub fn of(name: Option<&str>, ty: &str) -> Self {
+        // `read_as` tells values apart by their kind alone.
+        let reads = |value: Value| name.is_none_or(|name| value.read_as(name, ty));
+        Member {
+            reads: [reads(Value::F([0.0; 16])), reads(Value::I([0; 3]))],
+            layout: Layout::of(ty),
+        }
+    }
+
+    /// Writes `value` at `offset` of `block`, as [`Value::write`] does, where the program reads
+    /// it; a built-in declared with another type keeps the member's initial value.
+    pub fn write(self, value: &Value, block: &mut [u8], offset: usize) {
+        if self.reads[usize::from(matches!(value, Value::I(_)))] {
+            value.write_as(self.layout, block, offset);
         }
     }
 }
@@ -1260,6 +1312,76 @@ mod tests {
         ] {
             assert_eq!(value.read_as(name, ty), kept, "{ty} {name}");
         }
+    }
+
+    /// A member worked out once with its pass writes each frame's value as `read_as` and `write`
+    /// decide for that value, kept or left at its initial bytes: `read_as` looks at a value's
+    /// kind alone. Its layouts write the bytes std140 has for each type.
+    #[test]
+    fn members_write_what_read_as_and_write_decide() {
+        let values = [
+            Value::i(&[7]),
+            Value::i(&[-3, 9, 2048]),
+            Value::f(&[2.5]),
+            Value::f(&[1.5, -2.5, 3.25]),
+            Value::F(std::array::from_fn(|k| k as f32 - 7.5)),
+        ];
+        let types = [
+            "float", "int", "bool", "uint", "vec2", "vec3", "vec4", "ivec2", "ivec3", "uvec3",
+            "bvec2", "mat3", "mat4",
+        ];
+        let names = [
+            Some("worldTime"),
+            Some("sunAngle"),
+            Some("atlasSize"),
+            Some("cameraPosition"),
+            Some("gbufferModelView"),
+            Some(GBUFFERS_FOG_MODE),
+            None,
+        ];
+        for name in names {
+            for ty in types {
+                let member = Member::of(name, ty);
+                for value in &values {
+                    let (mut want, mut got) = ([0xa5u8; 96], [0xa5u8; 96]);
+                    if name.is_none_or(|name| value.read_as(name, ty)) {
+                        value.write(ty, &mut want, 16);
+                    }
+                    member.write(value, &mut got, 16);
+                    assert_eq!(want, got, "{name:?} {ty} {value:?}");
+                }
+            }
+        }
+        // The layouts, by fixed bytes: an int value declared `float`, floats declared `ivec2`
+        // (truncated), ints declared `uvec3`, and a `mat3` as the matrix's upper left in three
+        // padded columns.
+        let written = |ty: &str, value: Value, len: usize| {
+            let mut out = vec![0u8; len];
+            Member::of(None, ty).write(&value, &mut out, 0);
+            out
+        };
+        let floats = |out: Vec<u8>| -> Vec<f32> {
+            (out.chunks(4))
+                .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+                .collect()
+        };
+        let ints = |out: Vec<u8>| -> Vec<i32> {
+            (out.chunks(4))
+                .map(|b| i32::from_ne_bytes(b.try_into().unwrap()))
+                .collect()
+        };
+        assert_eq!(floats(written("float", Value::i(&[7]), 8)), [7.0f32, 0.0]);
+        assert_eq!(
+            ints(written("ivec2", Value::f(&[1.5, -2.5]), 12)),
+            [1i32, -2, 0]
+        );
+        let uvec3 = written("uvec3", Value::i(&[-3, 9, 2048]), 16);
+        assert_eq!(ints(uvec3), [-3i32, 9, 2048, 0]);
+        let matrix = Value::F(std::array::from_fn(|k| k as f32));
+        let columns = [
+            0.0f32, 1.0, 2.0, 0.0, 4.0, 5.0, 6.0, 0.0, 8.0, 9.0, 10.0, 0.0,
+        ];
+        assert_eq!(floats(written("mat3", matrix, 48)), columns);
     }
 
     /// Each built-in is found at its own position of `NAMES`, one position a name, and other

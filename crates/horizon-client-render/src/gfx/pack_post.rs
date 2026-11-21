@@ -522,6 +522,8 @@ struct Pass {
     initial_block: Vec<u8>,
     /// (index into `pack_uniforms::NAMES`, declared type, offset).
     uniforms: Vec<(Option<usize>, String, u32)>,
+    /// How each of `uniforms` takes its value (`member`).
+    members: Vec<pack_uniforms::Member>,
     samplers: Vec<Binding>,
     /// (location, buffer) of each output that reaches a buffer.
     writes: Vec<(u32, usize)>,
@@ -876,6 +878,8 @@ pub struct PackPost {
     final_target: Option<FinalTarget>,
     screen: wgpu::TextureFormat,
     uniforms: FrameUniforms,
+    /// This frame's `hz_fog_color` and `hz_fog` (`FrameUniforms::fog`), the same for every pass.
+    fog: [glam::Vec4; 2],
 }
 
 /// The wgpu format of a pack format (6.7), the nearest one wgpu can render to.
@@ -1972,6 +1976,12 @@ fn custom_index(custom: &[(String, String)], name: &str, ty: &str) -> Option<usi
     (!disabled).then_some(pack_uniforms::NAMES.len() + k)
 }
 
+/// How a uniform declared `ty` takes value `index` of the frame's (`pack_uniforms::Member`): a
+/// built-in only as Iris gives it, a custom uniform as `custom_index` let it through.
+fn member(index: Option<usize>, ty: &str) -> pack_uniforms::Member {
+    pack_uniforms::Member::of(index.and_then(|i| pack_uniforms::NAMES.get(i).copied()), ty)
+}
+
 /// The pass of program `p`: a quad, or `geometry` drawn by the game. `None` (with a note) when
 /// wgpu refuses it or it writes nothing. `formats` are its buffers' (for a program of the shadow
 /// buffers, buffer n is shadowcolor n); `shadow` the shadowcolor formats when the shadow pass
@@ -2287,6 +2297,9 @@ fn build_pass(
             .iter()
             .map(|u| (index(&u.name, &u.ty), u.ty.clone(), u.offset))
             .collect(),
+        members: (interface.uniforms.iter())
+            .map(|u| member(index(&u.name, &u.ty), &u.ty))
+            .collect(),
         name: p.name,
         group: p.group,
         pipeline: Pipeline::Render(pipeline),
@@ -2437,6 +2450,9 @@ fn build_compute(
             .uniforms
             .iter()
             .map(|u| (index(&u.name, &u.ty), u.ty.clone(), u.offset))
+            .collect(),
+        members: (interface.uniforms.iter())
+            .map(|u| member(index(&u.name, &u.ty), &u.ty))
             .collect(),
         name,
         group,
@@ -3666,6 +3682,7 @@ impl PackPost {
                 u.half_lives = half_lives;
                 u
             },
+            fog: [glam::Vec4::ZERO; 2],
             shadow_cache: Default::default(),
             shadow_cache_eligible,
         };
@@ -3775,7 +3792,7 @@ impl PackPost {
                 }
             }
         }
-        let fog = self.uniforms.fog();
+        let fog = self.fog;
         // Our block members first (`hz_target`, `hz_fog_color`, `hz_fog`, `hz_depth_linear`),
         // then the pack's.
         let ours = [
@@ -3792,17 +3809,11 @@ impl PackPost {
         let head: &[u8] = bytemuck::cast_slice(&ours);
         let n = head.len().min(pass.block.len());
         pass.block[..n].copy_from_slice(&head[..n]);
-        for (index, ty, offset) in &pass.uniforms {
-            let Some((i, v)) = index.and_then(|i| Some((i, self.uniforms.values.get(i)?))) else {
-                continue;
-            };
-            // A built-in of another type keeps its initial value (0); custom uniforms were
-            // checked when the pass was built.
-            if pack_uniforms::NAMES
-                .get(i)
-                .is_none_or(|name| v.read_as(name, ty))
-            {
-                v.write(ty, &mut pass.block, *offset as usize);
+        // A built-in of another type keeps its initial value (0); custom uniforms were checked
+        // when the pass was built.
+        for ((index, _, offset), member) in pass.uniforms.iter().zip(&pass.members) {
+            if let Some(v) = index.and_then(|i| self.uniforms.values.get(i)) {
+                member.write(v, &mut pass.block, *offset as usize);
             }
         }
         if !pass.block.is_empty() {
@@ -5613,6 +5624,7 @@ impl PackPost {
         // `smooth` starts on the first frame that knows the camera's biome.
         self.custom.world_frame(inputs.biome_known);
         self.uniforms.eval_custom(&mut self.custom);
+        self.fog = self.uniforms.fog();
         if self.targets.is_none() {
             return;
         }
