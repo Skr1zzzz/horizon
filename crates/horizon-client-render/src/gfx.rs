@@ -274,7 +274,7 @@ pub use entity_batch::{
     WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY, WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain,
     mark_oit,
 };
-use external::{shadow_box, shadow_runs};
+use external::{shadow_box, shadow_order, shadow_runs};
 pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
 use frustum::{block_entities_within_reach, frustum, shadow_casters, taa_frustum};
 use section_fade::{
@@ -8442,7 +8442,7 @@ impl Renderer {
                         reach: v.distance,
                     };
                     let near = radius.min((d / 16.0).ceil() as i32);
-                    self.sections.visible(
+                    self.sections.visible_unsorted(
                         camera,
                         near,
                         &all,
@@ -8452,20 +8452,29 @@ impl Renderer {
                     );
                 }
                 boxed.clear();
-                self.sections
-                    .visible(camera, radius, &light, |_| true, |_, _| false, &mut boxed);
+                self.sections.visible_unsorted(
+                    camera,
+                    radius,
+                    &light,
+                    |_| true,
+                    |_, _| false,
+                    &mut boxed,
+                );
                 seen.clear();
                 seen.extend(shadow_visible.iter().map(|s| s.key));
                 shadow_visible.extend(boxed.drain(..).filter(|s| !seen.contains(&s.key)));
             });
             self.shadow_boxed_scratch = boxed;
             self.shadow_seen_scratch = seen;
-            // Nearest the light first, so the depth test rejects what lies under it.
+            // Nearest the light first, so the depth test rejects what lies under it. The lists
+            // come unsorted (their order by distance from the camera would be undone here), and
+            // each section's height along the light is worked out once, into `distance`, which
+            // nothing reads of these sections after (`shadow_order`); ties go by key.
             let light = v.light;
-            shadow_visible.sort_unstable_by(|a, b| {
-                let height = |s: &resident::Visible| glam::Vec3::from(s.origin).dot(light);
-                height(b).total_cmp(&height(a))
-            });
+            for s in &mut shadow_visible {
+                s.distance = shadow_order(s.origin, light);
+            }
+            shadow_visible.sort_unstable_by_key(|s| (s.distance, s.key));
             for v in &shadow_visible {
                 self.sort_unseen(&mut encoder, v.slot, v.key, camera);
             }
@@ -14727,6 +14736,40 @@ mod shadow_caster_tests {
             .copied()
             .collect();
         assert_eq!(taken, vec![([3, 70, 3], 7)]);
+    }
+
+    /// The shadow pass draws its sections nearest the light first: highest along the light,
+    /// those level with each other by key, whatever order they were listed in.
+    #[test]
+    fn the_shadow_pass_draws_its_sections_nearest_the_light_first() {
+        // A light toward +Y and +Z (0.8, 0.6): the heights are 12.8, 12.8, 9.6, -19.2, -25.6.
+        let light = Vec3::new(0.0, 0.8, 0.6);
+        let section = |key: SectionKey, origin: [f32; 3]| resident::Visible {
+            distance: 0,
+            key,
+            slot: 0,
+            origin,
+        };
+        let mut sections = vec![
+            section((0, 0, 0), [0.0, -32.0, 0.0]),
+            section((1, 0, 0), [16.0, 16.0, 0.0]),
+            section((2, 0, 0), [-16.0, 0.0, -32.0]),
+            section((0, 1, 0), [0.0, 16.0, 0.0]),
+            section((0, 0, 1), [0.0, 0.0, 16.0]),
+        ];
+        for s in &mut sections {
+            s.distance = shadow_order(s.origin, light);
+        }
+        sections.sort_unstable_by_key(|s| (s.distance, s.key));
+        let keys: Vec<SectionKey> = sections.iter().map(|s| s.key).collect();
+        assert_eq!(
+            keys,
+            [(0, 1, 0), (1, 0, 0), (0, 0, 1), (2, 0, 0), (0, 0, 0)]
+        );
+        // The order is `total_cmp`'s, highest first, past zero and at the extremes too.
+        let heights = [3.0e20, 1.5, 0.0, -2.5, -1.0e30, f32::NEG_INFINITY];
+        let keys = heights.map(|h| shadow_order([0.0, h, 0.0], Vec3::Y));
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]), "{keys:?}");
     }
 
     /// What the shadow pass keeps of a camera-relative section at `min`, the camera at the
