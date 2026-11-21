@@ -1,0 +1,3 @@
+ids = ["method:prelude::HudLayersClientHost::hud_layer_bounds"]
+why = "Adds a client read of where a HUD layer drew in the last frame (#10125): the [x, y, w, h] GUI-pixel box of everything a vanilla layer (or a mod's registered layer) drew itself, measured from its own drawing between gui_layer_pre and gui_layer_post, so a widget can keep clear of the subtitles, boss bars, hotbar, effects or chat. None when the layer drew nothing."
+migrate = "Additive. Read it on the client; a box lags its layer by one frame."

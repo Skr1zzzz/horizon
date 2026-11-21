@@ -1,7 +1,9 @@
 //! The HUD's layer order (NeoForge's `GuiLayerManager`): vanilla's layers in the order Horizon
 //! draws them, with the layers native mods register (`register_gui_layers`) placed among them
-//! once at start, as `RegisterGuiLayersEvent` inserts them.
+//! once at start, as `RegisterGuiLayersEvent` inserts them. Also where each layer drew in the
+//! last frame ([`LayerBounds`]), for `hud_layer_bounds`.
 
+use crate::hud::HudVertex;
 use mod_api::{GuiLayer, GuiLayerPlacement, Identifier};
 use std::sync::OnceLock;
 
@@ -128,6 +130,82 @@ impl GuiLayers {
         self.layers.iter().map(String::as_str)
     }
 }
+
+/// Where each HUD layer drew, measured from the vertices it pushed: the box of what it drew so far
+/// this frame, and the box of what it drew in the last frame, which `hud_layer_bounds` reads. A
+/// layer keeps its entry once it has drawn, so a frame allocates nothing.
+#[derive(Debug, Default)]
+pub struct LayerBounds {
+    layers: Vec<DrawnLayer>,
+}
+
+#[derive(Debug)]
+struct DrawnLayer {
+    id: String,
+    /// The corners `[x0, y0, x1, y1]` of what it drew so far this frame.
+    drawing: Option<[f32; 4]>,
+    /// `[x, y, w, h]` of what it drew in the last frame.
+    drawn: Option<[f32; 4]>,
+}
+
+impl LayerBounds {
+    /// A frame's HUD starts: what the layers drew in the frame before is what is read now, and a
+    /// layer that drew nothing there, or nothing with an area, reads none.
+    pub fn next_frame(&mut self) {
+        for layer in &mut self.layers {
+            layer.drawn = layer
+                .drawing
+                .take()
+                .filter(|[x0, y0, x1, y1]| x1 > x0 && y1 > y0)
+                .map(|[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0]);
+        }
+    }
+
+    /// Layer `id` drew `vertices` this frame: the batch's vertices its drawing pushed, in GUI
+    /// pixels with its pose and clip applied. A layer drawn twice in a frame covers both; a vertex
+    /// that is not finite is passed over.
+    pub fn record(&mut self, id: &str, vertices: &[HudVertex]) {
+        let drew = vertices
+            .iter()
+            .map(|v| v.pos)
+            .filter(|[x, y]| x.is_finite() && y.is_finite())
+            .fold(None, |corners, [x, y]| Some(grow(corners, [x, y, x, y])));
+        let Some(drew) = drew else {
+            return;
+        };
+        let at = match self.layers.iter().position(|layer| layer.id == id) {
+            Some(at) => at,
+            None => {
+                self.layers.push(DrawnLayer {
+                    id: id.to_owned(),
+                    drawing: None,
+                    drawn: None,
+                });
+                self.layers.len() - 1
+            }
+        };
+        let drawing = &mut self.layers[at].drawing;
+        *drawing = Some(grow(*drawing, drew));
+    }
+
+    /// `[x, y, w, h]` in GUI pixels of what layer `id` drew in the last frame; none when it drew
+    /// nothing there.
+    pub fn get(&self, id: &str) -> Option<[f32; 4]> {
+        self.layers.iter().find(|layer| layer.id == id)?.drawn
+    }
+}
+
+/// `corners` grown to hold the corners `[x0, y0, x1, y1]`.
+fn grow(corners: Option<[f32; 4]>, [x0, y0, x1, y1]: [f32; 4]) -> [f32; 4] {
+    match corners {
+        Some([a0, b0, a1, b1]) => [a0.min(x0), b0.min(y0), a1.max(x1), b1.max(y1)],
+        None => [x0, y0, x1, y1],
+    }
+}
+
+#[cfg(test)]
+#[path = "gui_layer_bounds_tests.rs"]
+mod bounds_tests;
 
 #[cfg(test)]
 mod tests {

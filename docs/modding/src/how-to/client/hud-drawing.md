@@ -36,3 +36,40 @@ vanilla's corner arguments: `top` stays on the `y0` edge and `bottom` on the `y1
   Zero-area calls are culled here; vanilla can retain their layering bounds without drawing pixels.
 - **Cost.** One quad on the GUI batch, as `fill`; nothing is drawn or kept when a mod doesn't call it.
 - **Wire layout.** `GuiDraw` gained the `FillGradient` variant: rebuild wasm mods against the new SDK.
+
+## Where vanilla's layers drew
+
+A widget that keeps clear of vanilla's HUD reads where a layer drew with
+`ClientHost::hud_layer_bounds(layer)`: the smallest `[x, y, w, h]` rectangle in GUI pixels, as
+`fill` takes one, holding everything that layer drew in the last frame, its pose and clip
+applied. `layer` is an id `gui_layer_pre` lists, or a layer a mod registered
+(`register_gui_layers`).
+
+```rust,ignore
+fn gui_layer_draw(&self, host: &dyn ClientHost, event: &mut GuiLayerDrawEvent<'_>) {
+    if event.layer != "armorhud:pieces" {
+        return;
+    }
+    let [w, h] = event.draw.size();
+    // Above the subtitles while they show, else in their corner.
+    let bottom = match host.hud_layer_bounds("minecraft:subtitle_overlay") {
+        Some([_, y, _, _]) => y - 2.0,
+        None => h - 30.0,
+    };
+    event.draw.fill([w - 82.0, bottom - 20.0, 80.0, 20.0], 0x7800_0000);
+}
+```
+
+- **What counts.** Only the layer's own drawing: what mods draw in its `gui_layer_pre` and
+  `gui_layer_post` is left out. The box is measured from what the layer drew, so the subtitles'
+  box is their background (vanilla's `SubtitleOverlay` box), the boss bars' covers every bar and
+  name, the hotbar's its slots and selection, with the off-hand slot and the attack indicator
+  while they show, the effects' every icon, and the chat's every line shown. A sprite's transparent edges and text
+  shadows are inside it.
+- **None.** A layer that drew nothing that frame reads `None`: a mod hid it (`Flow::Cancel` in
+  `gui_layer_pre`), F1 or a canceled `render_gui_pre` hid the HUD, or it had nothing to show (no
+  boss bar, subtitle, effect or recent chat line). So does an id no layer has.
+- **One frame behind.** Each frame reads the boxes of the frame before it, wherever it is read: a
+  box follows its layer one frame late.
+- **Cost.** The HUD keeps one box per layer, measured as it draws; the call is a lookup. Native
+  and wasm mods make the same call.

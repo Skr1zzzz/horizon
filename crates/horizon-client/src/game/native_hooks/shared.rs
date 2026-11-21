@@ -2132,7 +2132,7 @@ impl Game<'_> {
     /// Draws one vanilla HUD layer between the mods' hooks: first the mods' layers
     /// placed below it (`draw_mod_gui_layers`), then `native_gui_layer_pre` (which
     /// may hide it), the layer, then `native_gui_layer_post`. `None` when a mod hid
-    /// the layer.
+    /// the layer. Where the layer itself drew is kept for `hud_layer_bounds`.
     pub(super) fn gui_layer<R>(
         &mut self,
         layer: &str,
@@ -2142,7 +2142,10 @@ impl Game<'_> {
         self.draw_mod_gui_layers(Some(layer), batch);
         let mut canceled = false;
         self.native_gui_layer_pre(layer, batch, &mut canceled);
+        let start = batch.vertices.len();
         let drawn = (!canceled).then(|| draw(self, batch));
+        let vertices = batch.vertices.get(start..).unwrap_or_default();
+        self.hud_layers_drawn.record(layer, vertices);
         self.native_gui_layer_post(layer, batch);
         drawn
     }
@@ -2172,7 +2175,10 @@ impl Game<'_> {
             let mut canceled = false;
             self.native_gui_layer_pre(layer, batch, &mut canceled);
             if !canceled {
+                let start = batch.vertices.len();
                 self.native_gui_layer_draw(layer, batch);
+                let vertices = batch.vertices.get(start..).unwrap_or_default();
+                self.hud_layers_drawn.record(layer, vertices);
             }
             self.native_gui_layer_post(layer, batch);
         }

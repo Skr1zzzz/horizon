@@ -1215,6 +1215,8 @@ struct Game<'a> {
     debug_renderers_version: Option<u64>,
     /// Next undrawn mod layer in HUD `gui_layers::order`; `None` while hidden or outside its pass.
     hud_layer_next: Option<usize>,
+    /// Where each HUD layer drew this frame and the last (`hud_layer_bounds`).
+    hud_layers_drawn: horizon_client::gui_layers::LayerBounds,
     /// The mod block entities' view distances, asked of the parts once (`native_block_entity_draw`).
     mod_view_distances: std::cell::OnceCell<native_block_entity_draw::ViewDistances>,
     /// `item_level` for one frame, game time, day time and dimension.
@@ -4655,6 +4657,8 @@ impl Game<'_> {
         // keep clear of; `hud_layers` fills it in once the world's HUD draws.
         let gui = HudBatch::new(size, self.settings.gui_scale_inputs());
         self.ui.room = horizon_client::hud_kit::room::Room::new(gui.width, gui.height);
+        // What the HUD layers drew in the last frame is what mods read in this one.
+        self.hud_layers_drawn.next_frame();
         // The pack prompt replaces the connecting screen (setScreen), but
         // in game it opens over the world.
         let mut batch = if (self.server_packs.prompt.is_some()
@@ -10643,6 +10647,7 @@ impl<'a> Game<'a> {
             debug_renderers: Vec::new(),
             debug_renderers_version: None,
             hud_layer_next: None,
+            hud_layers_drawn: Default::default(),
             mod_view_distances: Default::default(),
             item_level_cache: Default::default(),
             world_frames: 0,
