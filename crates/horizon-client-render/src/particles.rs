@@ -8,6 +8,7 @@
 use crate::{
     blocks::{BlockFacts, Fluid},
     fast_hash::FxHashMap,
+    gfx::ParticleQuad,
     hud::Rect,
     mesher::Vertex,
     world::World,
@@ -5193,6 +5194,7 @@ fn particle_light(
     }
 }
 
+/// One quad with corners `center ± d0` and `center ± d1` ([`ParticleQuad`]).
 #[inline(always)]
 fn emit_quad(
     target: &mut Vec<Vertex>,
@@ -5204,46 +5206,16 @@ fn emit_quad(
     color: u32,
     light: u32,
 ) {
-    let [u0, v0, u1, v1] = uv;
-    let quad = [
-        Vertex {
-            normal: [0; 4],
-            pos: (center + d0).to_array(),
-            uv: [u1, v1],
-            layer,
-            color,
-            light,
-            glint_uv: [0.0, 0.0],
-        },
-        Vertex {
-            normal: [0; 4],
-            pos: (center + d1).to_array(),
-            uv: [u1, v0],
-            layer,
-            color,
-            light,
-            glint_uv: [0.0, 0.0],
-        },
-        Vertex {
-            normal: [0; 4],
-            pos: (center - d0).to_array(),
-            uv: [u0, v0],
-            layer,
-            color,
-            light,
-            glint_uv: [0.0, 0.0],
-        },
-        Vertex {
-            normal: [0; 4],
-            pos: (center - d1).to_array(),
-            uv: [u0, v1],
-            layer,
-            color,
-            light,
-            glint_uv: [0.0, 0.0],
-        },
-    ];
-    target.extend_from_slice(&quad);
+    let quad = ParticleQuad {
+        center: center.to_array(),
+        layer,
+        d0: d0.to_array(),
+        color,
+        d1: d1.to_array(),
+        light,
+        uv,
+    };
+    target.extend_from_slice(&quad.vertices());
 }
 
 #[inline]

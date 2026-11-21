@@ -256,6 +256,8 @@ mod inter_stage_tests;
 #[cfg(test)]
 mod look_pack_tests;
 mod msaa;
+mod particle_expand;
+pub use particle_expand::ParticleQuad;
 mod section_fade;
 #[cfg(test)]
 mod sprite_arrays_tests;
