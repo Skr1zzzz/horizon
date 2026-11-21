@@ -34,6 +34,7 @@ mod blend_capability_tests;
 mod indirect;
 mod packed;
 
+mod deep_reads;
 mod flip_carry;
 
 #[cfg(test)]
@@ -108,6 +109,9 @@ mod translucent_color_tests;
 
 #[cfg(test)]
 mod noise_resolution_tests;
+
+#[cfg(test)]
+mod deep_reads_tests;
 
 /// The texture behind a pack sampler name.
 #[derive(Clone, Copy, PartialEq)]
@@ -492,6 +496,9 @@ struct Pass {
     written: u16,
     /// Buffers whose mip chain is regenerated right before it (6.1.7).
     mipmaps: u16,
+    /// Buffers its shaders may read past the first mip level, or count the levels of
+    /// (`deep_reads`): a chain no pass reads that way is not made.
+    deep: u16,
     /// Reads the per-draw block (`DrawUniforms`).
     draw: bool,
     /// What `texture` reads instead of the block atlas.
@@ -2062,6 +2069,7 @@ fn build_pass(
         .iter()
         .filter(|f| !f.1)
         .fold(0u16, |m, f| m | 1 << f.0);
+    let deep = deep_reads::deep_buffers(&samplers, [&program.vertex, &program.fragment]);
     // Gbuffers programs write in place (6.1.6). A forced flip of a buffer the program writes
     // cancels the write's own flip, as in Iris 1.11.7 (probed with packs of our own).
     let flip = if final_pass || geometry.is_some() {
@@ -2227,6 +2235,7 @@ fn build_pass(
         shadow_reads: shadow_reads | shadow_images(&images),
         written,
         mipmaps: p.mipmaps,
+        deep,
         draw,
         atlas: geometry.and_then(|g| g.atlas.clone()),
         material_maps: geometry.is_some_and(|g| g.material_maps),
@@ -2310,6 +2319,7 @@ fn build_compute(
         pack,
     )?;
     let local = c.module.entry_points[0].workgroup_size;
+    let deep = deep_reads::deep_buffers(&samplers, [&c.module]);
     let created = checked(device, || {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(&name),
@@ -2383,6 +2393,7 @@ fn build_compute(
         shadow_reads: shadow_reads | shadow_images(&images),
         written,
         mipmaps: 0,
+        deep,
         draw: false,
         atlas: None,
         material_maps: false,
@@ -5745,7 +5756,10 @@ impl PackPost {
         });
         let mut water_drawn = self.water.is_none() && self.weather.is_none() && !late_entities;
         let mut shadow_drawn = false;
-        for pass in &mut passes {
+        for k in 0..passes.len() {
+            // The passes after this one, which the mip chains it asks for may still serve.
+            let (done, later) = passes.split_at_mut(k + 1);
+            let pass = &mut done[k];
             if pass.group == Group::Setup && !self.setup_pending {
                 continue;
             }
@@ -5784,10 +5798,29 @@ impl PackPost {
                 continue;
             }
             let stale = pass.mipmaps & self.mipped & !self.mips_valid;
-            for b in (0..BUFFERS).filter(|b| stale & 1 << b != 0) {
+            // Only a chain some pass reads past its first level changes a pixel: the others
+            // aren't made (`deep_reads`), and the passes binding the buffer meanwhile read its
+            // first level alone, the same texels as the chain's first level. Composite and
+            // final passes come after all of the game's draws, so the passes after them are
+            // all that may bind the chain while it stays current; before them, a draw may too.
+            let make = if stale == 0 {
+                0
+            } else {
+                let late = matches!(pass.group, Group::Composite | Group::Final);
+                let runs = |q: &&Pass| {
+                    !(q.group == Group::Setup && !self.setup_pending) && !self.sizes_differ(q)
+                };
+                let after = (later.iter())
+                    .filter(|_| late)
+                    .filter(runs)
+                    .flat_map(|q| q.compute.iter().chain(std::iter::once(q)));
+                let binders = std::iter::once(&*pass).chain(after);
+                deep_reads::chains_to_make(stale, binders.map(|q| (q.deep, q.written)), !late)
+            };
+            for b in (0..BUFFERS).filter(|b| make & 1 << b != 0) {
                 self.mipmap(encoder, b);
             }
-            self.mips_valid |= stale;
+            self.mips_valid |= make;
             let final_pass = pass.group == Group::Final;
             // A pass writing buffers of a size of their own draws at that size (they share it).
             // `final` draws the picture at the world's size; a copy takes it to the window.
