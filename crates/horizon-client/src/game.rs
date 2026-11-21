@@ -11164,6 +11164,11 @@ pub(crate) fn run_with(
         // (horizon_threads::jobs) and other programs outnumber the cores, and a frame that gave its core up (in a GPU submit) waited
         // 10 to 200 ms to get one back.
         horizon_threads::favour_current();
+        // A frame's long loops share the tick's helper threads (`horizon_client::par::extend_frame`).
+        horizon_client::par::set_frame_pool(horizon_client::par::FramePool {
+            lanes: horizon_client::parallel::frame_lanes,
+            run: horizon_client::parallel::frame_pool,
+        });
     }
     // A dedicated server too: vanilla's "Server Shutdown Thread" (`DedicatedServer.initServer`'s
     // shutdown hook) halts the server and saves its players and levels on SIGTERM, SIGINT or SIGHUP.

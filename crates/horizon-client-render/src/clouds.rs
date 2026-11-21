@@ -72,6 +72,12 @@ pub fn radius_cells(cloud_range_chunks: i32) -> i32 {
 /// vertices they add.
 const SNAP_CELLS: i64 = 4;
 
+/// From this many cells a rebuild shares them with the frame's helper threads
+/// (`crate::par::extend_frame`): a few hundred microseconds of cells on one core, where waking
+/// the helpers costs tens. The default 128-chunk range walks about 96,000, a rebuild of
+/// milliseconds on the frame that crosses a snap cell.
+const SHARED_CELLS: usize = 16_384;
+
 #[derive(Clone)]
 pub struct CellIter {
     radius: i32,
@@ -555,6 +561,9 @@ impl Mesh {
         let uv = input.uv;
         let vert_mask = u8::from(key.bottom) | (u8::from(key.top) << 1);
         let (sub_x, sub_z) = (key.sub_x, key.sub_z);
+        // Each cell's quads come from its own texel alone: a large range's cells are shared with
+        // the frame's helper threads, their quads appended in the cells' order either way.
+        let share = self.cells.len() >= SHARED_CELLS;
 
         if w.is_power_of_two() && h.is_power_of_two() {
             let w_mask = (w - 1) as usize;
@@ -563,33 +572,37 @@ impl Mesh {
             let base_x = cell_x.rem_euclid(i64::from(w)) as usize;
             let base_z = cell_z.rem_euclid(i64::from(h)) as usize;
             if input.fast {
-                for &(dx, dz) in &self.cells {
-                    let (dx, dz) = (i32::from(dx), i32::from(dz));
-                    let tx = base_x.wrapping_add(dx as isize as usize) & w_mask;
-                    let tz = base_z.wrapping_add(dz as isize as usize) & h_mask;
-                    if mask_bits[(tz << w_shift) | tx] == 0 {
-                        continue;
+                crate::par::extend_frame(&self.cells, share, &mut self.vertices, |cells, out| {
+                    for &(dx, dz) in cells {
+                        let (dx, dz) = (i32::from(dx), i32::from(dz));
+                        let tx = base_x.wrapping_add(dx as isize as usize) & w_mask;
+                        let tz = base_z.wrapping_add(dz as isize as usize) & h_mask;
+                        if mask_bits[(tz << w_shift) | tx] == 0 {
+                            continue;
+                        }
+                        emit_flat_cell(out, dx as f32 * 12.0, dz as f32 * 12.0, uv);
                     }
-                    emit_flat_cell(&mut self.vertices, dx as f32 * 12.0, dz as f32 * 12.0, uv);
-                }
+                });
             } else {
-                for &(dx, dz) in &self.cells {
-                    let (dx, dz) = (i32::from(dx), i32::from(dz));
-                    let tx = base_x.wrapping_add(dx as isize as usize) & w_mask;
-                    let tz = base_z.wrapping_add(dz as isize as usize) & h_mask;
-                    let bits = mask_bits[(tz << w_shift) | tx];
-                    if bits == 0 {
-                        continue;
+                crate::par::extend_frame(&self.cells, share, &mut self.vertices, |cells, out| {
+                    for &(dx, dz) in cells {
+                        let (dx, dz) = (i32::from(dx), i32::from(dz));
+                        let tx = base_x.wrapping_add(dx as isize as usize) & w_mask;
+                        let tz = base_z.wrapping_add(dz as isize as usize) & h_mask;
+                        let bits = mask_bits[(tz << w_shift) | tx];
+                        if bits == 0 {
+                            continue;
+                        }
+                        emit_fancy_cell(
+                            out,
+                            vert_mask,
+                            bits,
+                            [dx - sub_x, dz - sub_z],
+                            [dx as f32 * 12.0, dz as f32 * 12.0],
+                            uv,
+                        );
                     }
-                    emit_fancy_cell(
-                        &mut self.vertices,
-                        vert_mask,
-                        bits,
-                        [dx - sub_x, dz - sub_z],
-                        [dx as f32 * 12.0, dz as f32 * 12.0],
-                        uv,
-                    );
-                }
+                });
             }
         } else {
             let r = key.radius.max(0);
@@ -617,31 +630,35 @@ impl Mesh {
             }
             let (wrap_x, wrap_z) = (&self.wrap_x, &self.wrap_z);
             if input.fast {
-                for &(dx, dz) in &self.cells {
-                    let (dx, dz) = (i32::from(dx), i32::from(dz));
-                    let idx = wrap_z[(dz + r) as usize] + wrap_x[(dx + r) as usize];
-                    if mask_bits[idx] == 0 {
-                        continue;
+                crate::par::extend_frame(&self.cells, share, &mut self.vertices, |cells, out| {
+                    for &(dx, dz) in cells {
+                        let (dx, dz) = (i32::from(dx), i32::from(dz));
+                        let idx = wrap_z[(dz + r) as usize] + wrap_x[(dx + r) as usize];
+                        if mask_bits[idx] == 0 {
+                            continue;
+                        }
+                        emit_flat_cell(out, dx as f32 * 12.0, dz as f32 * 12.0, uv);
                     }
-                    emit_flat_cell(&mut self.vertices, dx as f32 * 12.0, dz as f32 * 12.0, uv);
-                }
+                });
             } else {
-                for &(dx, dz) in &self.cells {
-                    let (dx, dz) = (i32::from(dx), i32::from(dz));
-                    let idx = wrap_z[(dz + r) as usize] + wrap_x[(dx + r) as usize];
-                    let bits = mask_bits[idx];
-                    if bits == 0 {
-                        continue;
+                crate::par::extend_frame(&self.cells, share, &mut self.vertices, |cells, out| {
+                    for &(dx, dz) in cells {
+                        let (dx, dz) = (i32::from(dx), i32::from(dz));
+                        let idx = wrap_z[(dz + r) as usize] + wrap_x[(dx + r) as usize];
+                        let bits = mask_bits[idx];
+                        if bits == 0 {
+                            continue;
+                        }
+                        emit_fancy_cell(
+                            out,
+                            vert_mask,
+                            bits,
+                            [dx - sub_x, dz - sub_z],
+                            [dx as f32 * 12.0, dz as f32 * 12.0],
+                            uv,
+                        );
                     }
-                    emit_fancy_cell(
-                        &mut self.vertices,
-                        vert_mask,
-                        bits,
-                        [dx - sub_x, dz - sub_z],
-                        [dx as f32 * 12.0, dz as f32 * 12.0],
-                        uv,
-                    );
-                }
+                });
             }
         }
 
@@ -739,6 +756,46 @@ mod tests {
         assert!(reloaded.prepare(&input).0);
         assert!(reloaded.vertices.is_empty());
         assert!(!reloaded.prepare(&input).0);
+    }
+
+    /// A range past `SHARED_CELLS` rebuilds, its cells shared among threads, the very mesh one
+    /// thread builds, for a texture whose sides are powers of two and one whose aren't, fast and
+    /// fancy, from below the layer and from inside it (the inward faces).
+    #[test]
+    fn a_shared_rebuild_is_the_serial_one() {
+        let square = (8, 8, (0..64).map(|i| i % 3 != 0).collect());
+        let odd = (6, 5, (0..30).map(|i| i % 4 != 1).collect());
+        for texture in [&square, &odd] {
+            for fast in [false, true] {
+                for y in [100.0, 194.0] {
+                    let input = Input {
+                        texture,
+                        uv: [0.5; 2],
+                        camera: glam::DVec3::new(30.0, y, -17.0),
+                        time: 0,
+                        partial_tick: 0.0,
+                        range: 64,
+                        fast,
+                        color: [1.0; 4],
+                    };
+                    let mut serial = Mesh::default();
+                    assert!(serial.prepare(&input).0);
+                    assert!(serial.cells.len() >= SHARED_CELLS);
+                    let mut shared = Mesh::default();
+                    let rebuilt = crate::par::with_test_pool(crate::par::FOUR_THREADS, || {
+                        shared.prepare(&input).0
+                    });
+                    assert!(rebuilt);
+                    assert_eq!(
+                        bytemuck::cast_slice::<_, u8>(&shared.vertices),
+                        bytemuck::cast_slice::<_, u8>(&serial.vertices),
+                        "{}x{} texture, fast {fast}, camera at y {y}",
+                        texture.0,
+                        texture.1
+                    );
+                }
+            }
+        }
     }
 
     #[test]

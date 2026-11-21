@@ -1,12 +1,16 @@
 //! The helper threads of the server tick's parallel phases: one pool, made once, the first time a
-//! phase shares its work, instead of threads started for every phase of every tick. A phase hands
-//! it work that gives the same result in whatever order the threads take it, and each part's
-//! results stay in order.
+//! phase (or a frame, [`frame_pool`]) shares its work, instead of threads started for every phase
+//! of every tick. A phase hands it work that gives the same result in whatever order the threads
+//! take it, and each part's results stay in order.
 //!
 //! Whether a tick's phases share their work is the Parallel Tick setting's
 //! (`graphics::ParallelTickMode`: Off, Auto or On), decided between ticks for the next one
 //! ([`after_tick`]) and never during one. `HORIZON_PARALLEL_TICK` wins over the setting, and is
 //! all a dedicated server follows (`server.toml`'s `parallel_tick`).
+//!
+//! A window's frames share the same helpers for their long loops ([`frame_lanes`],
+//! [`frame_pool`]) while the server tick doesn't; `HORIZON_SERIAL_FRAME=1` keeps those on the
+//! render thread.
 use crate::graphics::ParallelTickMode;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -282,6 +286,10 @@ pub fn lanes() -> usize {
 }
 
 /// The pool: one thread fewer than a phase's lanes (the server thread takes parts too).
+///
+/// Its threads ask for the priority the server and render threads have (`favour_current`): the
+/// tick or the frame waits for each part they take, and behind the chunk workers, which
+/// outnumber the cores while terrain loads, a part could wait 10 to 200 ms for a core.
 fn pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
@@ -291,9 +299,65 @@ fn pool() -> &'static rayon::ThreadPool {
                 horizon_threads::sizing::Pool::TickHelper,
             ))
             .thread_name(|i| format!("tick-helper-{i}"))
+            .start_handler(|_| {
+                horizon_threads::favour_current();
+            })
             .build()
             .expect("the tick's helper threads start")
     })
+}
+
+/// Fewer hardware threads than this and frames never share: the helpers can't take the render
+/// thread's priority there (`favour_current`), and would wait behind the chunk workers.
+const FRAME_MIN_THREADS: usize = 5;
+
+/// How many threads a frame's loop may share now, the render thread among them
+/// (`horizon_client::par::FramePool::lanes`, handed over as a window's game starts). Unlike
+/// [`par_map`] it does not wait for the Parallel Tick setting, which is the server's; but while
+/// the tick's phases share the helpers ([`parallel_tick`]: Parallel Tick On, Auto while a tick is
+/// heavy, `HORIZON_PARALLEL_TICK`), they are the tick's, and frames keep to the render thread
+/// rather than wait behind a phase's parts. 1 then, and on a small machine.
+pub fn frame_lanes() -> usize {
+    if parallel_tick() > 0 || horizon_threads::worker_count() < FRAME_MIN_THREADS {
+        1
+    } else {
+        horizon_threads::sizing::for_pool(horizon_threads::sizing::Pool::TickHelper) + 1
+    }
+}
+
+/// The frames' pool (`horizon_client::par::FramePool::run`): `run(k)` for every `k` in
+/// `0..parts`, the parts taken in turn by the render thread and the helpers, on
+/// [`frame_lanes`] threads.
+pub fn frame_pool(parts: usize, run: &(dyn Fn(usize) + Sync)) {
+    run_parts_on(parts, frame_lanes(), run);
+}
+
+/// [`frame_pool`] on `lanes` threads, this one among them; in order on this one alone when that
+/// is all there is.
+fn run_parts_on(parts: usize, lanes: usize, run: &(dyn Fn(usize) + Sync)) {
+    let lanes = lanes.min(parts);
+    if lanes <= 1 {
+        for k in 0..parts {
+            run(k);
+        }
+        return;
+    }
+    let next = AtomicUsize::new(0);
+    let work = || {
+        loop {
+            let k = next.fetch_add(1, Ordering::Relaxed);
+            if k >= parts {
+                break;
+            }
+            run(k);
+        }
+    };
+    pool().in_place_scope(|s| {
+        for _ in 1..lanes {
+            s.spawn(|_| work());
+        }
+        work();
+    });
 }
 
 /// `f` over `items` in parts on the pool, or all on this thread while the parallel tick is off or
@@ -521,6 +585,39 @@ mod tests {
             "no two chunks ran at once"
         );
         assert!(runs.iter().all(|r| r.load(Ordering::SeqCst) == 1));
+    }
+
+    /// A frame's parts each run once, on more than one thread while there are lanes for them (one
+    /// part waits, bounded, until another has started), and in order on the caller with one lane.
+    #[test]
+    fn frame_parts_run_once_each() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        let runs: Vec<AtomicUsize> = (0..64).map(|_| AtomicUsize::new(0)).collect();
+        let (active, overlapped) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        run_parts_on(64, 4, &|k: usize| {
+            runs[k].fetch_add(1, Ordering::SeqCst);
+            if active.fetch_add(1, Ordering::SeqCst) >= 1 {
+                overlapped.store(true, Ordering::SeqCst);
+            }
+            while !overlapped.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            active.fetch_sub(1, Ordering::SeqCst);
+        });
+        assert!(
+            overlapped.load(Ordering::SeqCst),
+            "no two parts ran at once"
+        );
+        assert!(runs.iter().all(|r| r.load(Ordering::SeqCst) == 1));
+        let order = Mutex::new(Vec::new());
+        let here = std::thread::current().id();
+        run_parts_on(5, 1, &|k: usize| {
+            assert_eq!(std::thread::current().id(), here);
+            order.lock().unwrap().push(k);
+        });
+        assert_eq!(order.into_inner().unwrap(), [0, 1, 2, 3, 4]);
     }
 
     /// A panic in a part reaches the caller instead of being lost on a helper.
