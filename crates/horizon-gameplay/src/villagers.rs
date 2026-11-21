@@ -331,7 +331,8 @@ fn in_pickup_reach(bounds: Aabb, item: &ItemEntity) -> bool {
 
 /// `Mob.aiStep` item pickup for villagers (`InventoryCarrier`): food,
 /// seeds and what their profession wants, from within a block, by a villager
-/// that `canPickUpLoot` (a command or its data may have turned it off).
+/// that `canPickUpLoot` (a command or its data may have turned it off). Each
+/// pickup credits the item's thrower (`LivingEntity.onItemPickup`).
 pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
     let griefing = l.mob_griefing();
     if l.dropped().is_empty() || (!griefing && !l.grief_hooked()) {
@@ -390,6 +391,9 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
                 continue;
             }
             let before = l.dropped()[j].clone();
+            // `InventoryCarrier.pickUpItem`'s `onItemPickup` comes before the
+            // stack goes in: the advancement of whoever threw it.
+            l.on_item_pickup(i, &before);
             let rest = villager::ext_mut(&mut l.parts().mobs[i]).add_item(stack, max);
             if rest.as_ref().is_none_or(|r| r.count < before.stack.count) {
                 let id = l.mobs()[i].id;
