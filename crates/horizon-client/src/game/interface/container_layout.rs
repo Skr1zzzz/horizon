@@ -22,6 +22,8 @@ pub(super) struct SlotInputs {
     mount: Option<(usize, bool, bool)>,
     rows: Option<usize>,
     native: Option<(u64, Option<f32>, Option<f32>)>,
+    /// The mods' slot moves the builds took (`set_screen_slot`).
+    moves: u64,
 }
 
 impl Game<'_> {
@@ -132,6 +134,7 @@ impl Game<'_> {
                 mount: self.mount_layout_inputs(),
                 rows: self.chest_rows(),
                 native: self.native_slot_inputs(),
+                moves: self.screen_slot_revision(),
             },
             image,
             origin,

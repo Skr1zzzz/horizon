@@ -298,7 +298,9 @@ impl Game<'_> {
         });
         allowed
     }
-    /// The hovered slot and whether the cursor is outside the window.
+    /// The hovered slot and whether the cursor is outside the window. A slot a
+    /// mod moved (`set_screen_slot`) is never outside, as a Java screen that
+    /// places slots outside its image widens `hasClickedOutside` over them.
     pub(super) fn inventory_target(&self) -> (Option<usize>, bool) {
         let Some(r) = self.renderer.as_ref() else {
             return (None, false);
@@ -307,10 +309,9 @@ impl Game<'_> {
             [r.config.width, r.config.height],
             self.settings.gui_scale_inputs(),
         );
-        (
-            self.slot_at(&batch, self.cursor.0, self.cursor.1),
-            self.clicked_outside(&batch),
-        )
+        let slot = self.slot_at(&batch, self.cursor.0, self.cursor.1);
+        let moved = slot.is_some_and(|slot| self.moved_slot(slot).is_some());
+        (slot, !moved && self.clicked_outside(&batch))
     }
     pub(super) fn screen_button(right: bool) -> horizon_client::container_screen::Button {
         use horizon_client::container_screen::Button;
@@ -378,14 +379,24 @@ impl Game<'_> {
         let (shift, width, height) = if self.screen == Screen::Creative {
             (0.0, Creative::WIDTH, Creative::HEIGHT)
         } else {
-            let (shift, width) = match self.station.as_ref().map(|s| s.kind) {
-                Some(stations::Kind::Merchant) => (-50.0, 276.0),
-                Some(stations::Kind::Beacon) => (beacon::SHIFT, 230.0),
-                _ => (0.0, self.native_screen_width().unwrap_or(176.0)),
+            let width = match self.station.as_ref().map(|s| s.kind) {
+                Some(stations::Kind::Merchant) => 276.0,
+                Some(stations::Kind::Beacon) => 230.0,
+                _ => self.native_screen_width().unwrap_or(176.0),
             };
-            (shift, width, self.screen_height())
+            (self.left_pos_shift(), width, self.screen_height())
         };
         [ox + shift, oy, width, height]
+    }
+    /// How far the window's `leftPos` is right of the origin `slot_position`
+    /// measures from: the merchant's and the beacon's wider windows start left
+    /// of it.
+    pub(super) fn left_pos_shift(&self) -> f32 {
+        match self.station.as_ref().map(|s| s.kind) {
+            Some(stations::Kind::Merchant) => -50.0,
+            Some(stations::Kind::Beacon) => beacon::SHIFT,
+            _ => 0.0,
+        }
     }
     /// The build's panel as `AbstractContainerScreen`'s `leftPos`/`topPos`/
     /// `imageWidth`/`imageHeight`, the shape `hasClickedOutside` reads.

@@ -1469,7 +1469,12 @@ impl Game<'_> {
     ) {
         self.galactic(batch, text, x, y, max, color);
     }
+    /// Where the station screen draws slot `i`, None for one it doesn't show
+    /// or a mod hid (`set_screen_slot`).
     fn slot_position_any(&self, i: usize) -> Option<(f32, f32)> {
+        if let Some(moved) = self.moved_slot(i) {
+            return moved;
+        }
         self.station_slot_position(i)
             .or_else(|| (i < 36).then(|| self.slot_position(i)))
     }

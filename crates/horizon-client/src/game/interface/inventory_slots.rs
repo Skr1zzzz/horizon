@@ -166,10 +166,14 @@ impl Game<'_> {
         let x = x + self.recipe_book_shift(batch.width) - self.screen_room_shift(batch);
         (x, y)
     }
-    /// InventoryMenu / CraftingMenu slot layouts.
+    /// InventoryMenu / CraftingMenu slot layouts, where a mod moved a slot
+    /// (`set_screen_slot`) there.
     pub(super) fn slot_position(&self, i: usize) -> (f32, f32) {
         #[cfg(test)]
         SLOT_POSITIONS.with(|count| count.set(count.get() + 1));
+        if let Some(Some(moved)) = self.moved_slot(i) {
+            return moved;
+        }
         if self.creative_inventory_open()
             && let Some(position) = Creative::inventory_slot_position(i)
         {
@@ -618,9 +622,14 @@ impl Game<'_> {
             .and_then(|k| self.world.block_entities.get(&k))
     }
     /// How many slots `slots` lists, counted without building the list: the
-    /// screen render hook asks once a frame and must not allocate. Same
-    /// branches in the same order, so the two stay in step.
+    /// screen render hook asks once a frame and must not allocate.
     pub(super) fn slot_count(&self) -> usize {
+        self.layout_slot_count()
+            .saturating_sub(self.hidden_screen_slots())
+    }
+    /// How many slots `layout_slots` lists. Same branches in the same order,
+    /// so the two stay in step.
+    fn layout_slot_count(&self) -> usize {
         if self.creative_inventory_open() {
             return Creative::inventory_slots().count();
         }
@@ -680,8 +689,17 @@ impl Game<'_> {
         };
         inventory + container
     }
-    /// 300.. are the open container's slots.
+    /// 300.. are the open container's slots; one a mod hid
+    /// (`set_screen_slot`) is not listed.
     pub(super) fn slots(&self) -> Vec<usize> {
+        let mut slots = self.layout_slots();
+        if self.hidden_screen_slots() > 0 {
+            slots.retain(|&slot| !self.screen_slot_hidden(slot));
+        }
+        slots
+    }
+    /// The slots the open screen's own layout shows.
+    fn layout_slots(&self) -> Vec<usize> {
         if self.creative_inventory_open() {
             return Creative::inventory_slots().collect();
         }

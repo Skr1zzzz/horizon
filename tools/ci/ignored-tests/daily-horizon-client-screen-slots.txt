@@ -1,0 +1,2 @@
+# A mod's moved and hidden container screen slots (ClientHost::set_screen_slot, #18397) through the game's layout and hit test.
+horizon-client game::screen_slot_moves::tests::a_mod_moves_and_hides_inventory_slots_until_the_screen_closes lib daily resources

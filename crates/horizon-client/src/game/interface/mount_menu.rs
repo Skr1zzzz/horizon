@@ -497,15 +497,19 @@ impl Game<'_> {
             batch.sprite(atlas, "gui/sprites/container/slot", ox + 7.0, oy + 35.0);
         }
         self.draw_screen_phase(batch, horizon_client::screen_draw::RenderPhase::Background);
-        if open.show_saddle && open.saddle.is_none() {
-            batch.sprite(
-                atlas,
-                "gui/sprites/container/slot/saddle",
-                ox + 8.0,
-                oy + 18.0,
-            );
+        // A slot's empty icon (`Slot.getNoItemIcon`) goes where its slot is.
+        let shown =
+            |slot: usize| (!self.screen_slot_hidden(slot)).then(|| self.slot_position(slot));
+        if open.show_saddle
+            && open.saddle.is_none()
+            && let Some((sx, sy)) = shown(SADDLE)
+        {
+            batch.sprite(atlas, "gui/sprites/container/slot/saddle", ox + sx, oy + sy);
         }
-        if open.show_armor && open.armor.is_none() {
+        if open.show_armor
+            && open.armor.is_none()
+            && let Some((sx, sy)) = shown(ARMOR)
+        {
             let sprite = if llama::is_llama(open.species) {
                 "gui/sprites/container/slot/llama_armor"
             } else if nautilus::is_nautilus(open.species) {
@@ -513,7 +517,7 @@ impl Game<'_> {
             } else {
                 "gui/sprites/container/slot/horse_armor"
             };
-            batch.sprite(atlas, sprite, ox + 8.0, oy + 36.0);
+            batch.sprite(atlas, sprite, ox + sx, oy + sy);
         }
         let grey = rgba(64, 64, 64, 255);
         let title = match self.mobs.iter().find(|m| m.id == open.mob) {

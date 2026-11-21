@@ -45,6 +45,33 @@ pub trait ScreensClientHost {
     #[access(ClientSetup)]
     fn screen_hovered_item(&self) -> Option<ItemKey>;
     /// Side: client.
+    /// Where the open container screen puts the slot of menu index `slot` from the next
+    /// frame (`Slot.x`, `Slot.y` in GUI pixels from the screen's `rect` top left, its
+    /// `leftPos`/`topPos`, to the item's top left corner): where `set_screen_slot` last put
+    /// it, else where the screen lays it out. None for a hidden slot, a menu index the open
+    /// menu doesn't have, or with no container screen open (the creative inventory and a
+    /// native mod's own screen for the menu count as none).
+    #[access(ClientSetup)]
+    fn screen_slot(&self, slot: usize) -> Option<[f32; 2]>;
+    /// Side: client.
+    /// Moves the slot of menu index `slot` (`MenuRef::slot_boxes`' order) of the open
+    /// container screen to `pos`, or hides it with None, as a Java screen that lays its slots
+    /// out again sets `Slot.x`/`Slot.y` or deactivates a slot. `pos` is in `screen_slot`'s
+    /// terms. From the next frame the slot (its item, its empty-slot icon and the recipe
+    /// book's ghost item) is drawn, hovered, highlighted, clicked, dragged
+    /// over and given its tooltip there; a hidden one is none of these. A position outside
+    /// the screen's image is allowed, and a click on the slot there is a click on the slot,
+    /// not outside the window. The change lasts until the screen closes or another
+    /// menu replaces it, and the next open starts from the screen's own layout. Nothing is
+    /// sent: the menu, its slot indices and the server keep every slot, so a hidden slot
+    /// keeps its item and a shift-click may still fill it, as a deactivated Java slot does.
+    /// It takes `&self`, so a screen hook may call it every frame; repeating a slot's current
+    /// place changes nothing and costs no layout work. Each refusal changes nothing and is
+    /// named by `ScreenSlotRefusal`: `NoScreen`, `NoSuchSlot`, `HiddenAtOpen`, `BadPosition`
+    /// and `Unavailable`. Hiding a slot the screen hid when it opened is already so.
+    #[access(ClientSetup)]
+    fn set_screen_slot(&self, slot: usize, pos: Option<[f32; 2]>) -> Result<(), ScreenSlotRefusal>;
+    /// Side: client.
     /// Requests vanilla's menu background blur for this frame, with a per-frame guard
     /// so blur is applied at most once per frame. Returns true if blur was newly
     /// requested this frame, or false if it was already applied/requested this frame.

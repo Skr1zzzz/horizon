@@ -129,8 +129,9 @@ impl Game<'_> {
                 (302, "potion"),
                 (304, "brewing_fuel"),
             ] {
-                if self.slot_mut(i).is_none() {
-                    let (sx, sy) = self.station_slot_position(i).unwrap_or_default();
+                if self.slot_mut(i).is_none()
+                    && let Some((sx, sy)) = self.slot_position_any(i)
+                {
                     batch.sprite(
                         &self.gui.atlas,
                         &format!("gui/sprites/container/slot/{icon}"),
@@ -181,12 +182,14 @@ impl Game<'_> {
                         open,
                         flip,
                     );
-                    if s.inputs[1].is_none() {
+                    if s.inputs[1].is_none()
+                        && let Some((sx, sy)) = self.slot_position_any(INPUT + 1)
+                    {
                         batch.sprite(
                             atlas,
                             "gui/sprites/container/slot/lapis_lazuli",
-                            ox + 35.0,
-                            oy + 47.0,
+                            ox + sx,
+                            oy + sy,
                         );
                     }
                     let mut names = LegacyRandom::new(i64::from(self.level.xp_seed));
@@ -449,7 +452,9 @@ impl Game<'_> {
                         if s.inputs[i].is_some() {
                             continue;
                         }
-                        let (sx, sy) = kind.input_pos(i);
+                        let Some((sx, sy)) = self.slot_position_any(INPUT + i) else {
+                            continue;
+                        };
                         for (icon, alpha) in cycling.shown(partial) {
                             batch.sprite_scaled(
                                 atlas,
@@ -482,8 +487,8 @@ impl Game<'_> {
                     // what the template wants there.
                     let hovered = (0..3).find(|&i| {
                         // AbstractContainerScreen.isHovering: a pixel round the slot.
-                        let (sx, sy) = kind.input_pos(i);
-                        inside(local, sx - 1.0, sy - 1.0, 18.0, 18.0)
+                        self.slot_position_any(INPUT + i)
+                            .is_some_and(|(sx, sy)| inside(local, sx - 1.0, sy - 1.0, 18.0, 18.0))
                     });
                     match (hovered, &s.inputs[0]) {
                         (Some(0), None) => {

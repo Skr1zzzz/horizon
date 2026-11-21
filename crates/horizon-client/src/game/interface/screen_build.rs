@@ -303,6 +303,8 @@ impl ScreenBuild {
 pub(super) struct ScreenState {
     pub(super) observed: Option<ObservedScreen>,
     pub(super) build: ScreenBuildState,
+    /// Where client mods moved the open container screen's slots (`set_screen_slot`).
+    pub(super) slot_moves: super::screen_slot_moves::ScreenSlotMoves,
 }
 
 /// One frame's `RenderInventoryMobEffects` answer and what it was taken for.
@@ -499,6 +501,9 @@ impl Game<'_> {
     /// and drops it when it closes. A frame that changes neither builds
     /// nothing, so `observe_screen` calls it every frame.
     pub(super) fn build_screen(&mut self) {
+        // The mods' slot moves take effect here, before the layout is compared, so
+        // a frame draws and hit-tests one layout; a closed screen's moves go.
+        self.commit_screen_slots();
         let shown =
             self.screen != Screen::Playing || self.title.is_some() || self.screen_over_playing();
         // Gui.setScreen: KeyMapping.releaseAll, as the screen or overlay opens.

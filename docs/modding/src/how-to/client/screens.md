@@ -77,3 +77,45 @@ capture at its uncompressed size after the hook (4 bytes a pixel, 6 for an HDR c
 the PNGs, and at least 1 MiB: about 500 screenshots at 1920 by 1080, 120 at 3840 by 2160, and never more
 than 4096. A capture that would pass the budget once the hook has run is not written, and the chat line
 reports the failure. The budget is reset when the game restarts. F2 itself is never limited.
+
+## Moving and hiding a container screen's slots
+
+A client mod that redraws a vanilla container screen (Legacy4J's inventory, crafting table or
+furnace layouts, for example) can move the open screen's slots to its own artwork, or hide them, as
+a Java screen sets `Slot.x`/`Slot.y` or deactivates a slot:
+
+```rust
+// Menu index 0 of a crafting table is its result: put it at (134, 30).
+host.set_screen_slot(0, Some([134.0, 30.0]))?;
+// On the same screen, hide the first slot of the player's inventory.
+host.set_screen_slot(10, None)?;
+// Where a slot is now, or None while hidden.
+let result = host.screen_slot(0);
+```
+
+`slot` is a menu slot index, in the order `MenuRef::slot_boxes` uses. A position is the item's top
+left corner in GUI pixels from the screen's `rect` top left (`leftPos`, `topPos`): the numbers a Java
+`Slot` holds. From the next frame the slot (its item, its empty-slot icon and the recipe book's ghost
+item) is drawn, hovered, highlighted, clicked, dragged over and given its tooltip at its new place,
+and `MenuRef::slot_boxes` reports it there; a hidden slot is none of these, and `ScreenView.slots` no
+longer counts it. A position outside the screen's image is allowed: a click on a moved slot there is
+a click on the slot, where vanilla would count it outside the window, as a Java screen that places
+slots outside its image widens `hasClickedOutside` over them. The screen's background is the mod's
+to draw. `ClientHost::screen_slot()` reads the slot's place back at once, before the frame
+that draws it.
+
+Only the screen changes. Nothing is sent: the menu, its slot indices and the server keep every
+slot, so a hidden slot keeps its item and a shift-click may still fill it, as with a deactivated
+Java slot. The changes last until the screen closes or another menu replaces it; the next open
+starts from the screen's own layout. Repeating a slot's current place changes nothing, so a screen
+hook may call it every frame.
+
+It returns `Err(ScreenSlotRefusal)` and changes nothing:
+
+| Refusal | When |
+|---|---|
+| `NoScreen` | no container screen is open: another screen or none, the creative inventory, or a native mod's own screen for the menu, which places its slots itself |
+| `NoSuchSlot` | the open menu has no slot of that index |
+| `HiddenAtOpen` | showing a slot the screen did not lay out when it opened, as vanilla leaves a mount's missing saddle or body armour slot inactive (hiding it again is already so, and returns `Ok`) |
+| `BadPosition` | a coordinate is not finite; there is no other bound |
+| `Unavailable` | on a server, or with no game backend |

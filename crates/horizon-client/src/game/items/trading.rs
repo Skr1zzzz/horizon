@@ -981,7 +981,10 @@ impl Game<'_> {
             }
         }
         // Slots, hover highlight, carried stack, tooltip.
-        let slots: Vec<usize> = (0..36).chain([INPUT, INPUT + 1, RESULT]).collect();
+        let slots: Vec<usize> = (0..36)
+            .chain([INPUT, INPUT + 1, RESULT])
+            .filter(|&i| !self.screen_slot_hidden(i))
+            .collect();
         let drag = self.drag_view();
         self.draw_hovered_slot_highlight(batch, false, ox, oy);
         for i in slots {

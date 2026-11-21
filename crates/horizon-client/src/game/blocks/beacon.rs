@@ -645,7 +645,10 @@ impl Game<'_> {
             false,
             "gui/sprites/container/beacon/cancel",
         );
-        let slots: Vec<usize> = (0..36).chain([INPUT]).collect();
+        let slots: Vec<usize> = (0..36)
+            .chain([INPUT])
+            .filter(|&i| !self.screen_slot_hidden(i))
+            .collect();
         self.draw_hovered_slot_highlight(batch, false, ox, oy);
         for i in slots {
             let (sx, sy) = self.slot_position(i);

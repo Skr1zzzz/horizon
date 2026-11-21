@@ -2020,6 +2020,7 @@ impl Game<'_> {
             .recipe_ui
             .ghost
             .iter()
+            .filter(|g| !self.screen_slot_hidden(g.slot))
             .map(|g| {
                 let (sx, sy) = self.slot_position(g.slot);
                 GhostView {
