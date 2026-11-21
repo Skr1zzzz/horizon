@@ -333,12 +333,12 @@ impl Game<'_> {
             if !griefing || !close {
                 continue;
             }
-            let thrown_by_player = e
-                .thrower
-                .is_some_and(|uuid| Some(uuid) == self.level.player_uuid);
             let mut swallowed = e.stack.clone();
             swallowed.count = 1;
             let (taken_item, id) = (e.clone(), self.mobs[i].id);
+            // `SulfurCube.pickUpItem` calls `onItemPickup` first: the whole
+            // stack, for whoever threw it, a server's player in their turn.
+            self.mob_item_pickup_trigger(i, &taken_item);
             self.add_pickup(
                 super::pickups::Taken::Item(Box::new(taken_item)),
                 super::pickups::Collector::Mob(id),
@@ -349,17 +349,9 @@ impl Game<'_> {
                 self.remove_dropped(j);
             }
             let m = &mut self.mobs[i];
-            m.extra.set_body_stack(Some(swallowed.clone()));
+            m.extra.set_body_stack(Some(swallowed));
             m.extra.point = None;
             self.sulfur_sound(i, "entity.sulfur_cube.absorb");
-            if thrown_by_player {
-                let target = self.mob_entity(&self.mobs[i]);
-                self.trigger_item_entity(
-                    "minecraft:thrown_item_picked_up_by_entity",
-                    &swallowed,
-                    &target,
-                );
-            }
         }
     }
 }
@@ -454,6 +446,67 @@ mod off_level_tests {
             game.sulfur_cube_power_priming(&primable);
             assert!(!sulfur_cube::primed(game.mob_object(73).unwrap()));
             assert!(sulfur_cube::primed(game.mob_object(74).unwrap()));
+        });
+    }
+}
+
+#[cfg(test)]
+mod thrower_tests {
+    use horizon_client::{advancements as adv, items::ItemStack, mobs::Mob};
+    use horizon_core::geometry::Vec3;
+    use horizon_world::lazy_json::LazyJson;
+
+    /// `SulfurCube.pickUpItem` calls `onItemPickup`, which fires
+    /// THROWN_ITEM_PICKED_UP_BY_ENTITY for the player who threw the item (how
+    /// "Uh Oh" counts dropped TNT). The cube takes it in its own tick, outside
+    /// any turn, and a server has no player of its own: the thrower is a
+    /// player it serves, who earns it, and no one else does.
+    #[test]
+    #[ignore = "daily"]
+    fn a_sulfur_cube_credits_the_served_player_who_threw_the_item() {
+        const ADV: &str = "horizon:test/sulfur_cube_pickup";
+        const TRIGGER: &str = "minecraft:thrown_item_picked_up_by_entity";
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let mut tree = adv::Tree::default();
+            tree.list.push(adv::Advancement {
+                id: ADV.into(),
+                parent: None,
+                display: None,
+                criteria: vec![adv::Criterion {
+                    name: "pickup".into(),
+                    trigger: TRIGGER.into(),
+                    conditions: LazyJson::new(&serde_json::json!({})),
+                }],
+                requirements: vec![vec!["pickup".into()]],
+                rewards: Default::default(),
+            });
+            tree.by_id.insert(ADV.into(), 0);
+            tree.by_trigger.insert(TRIGGER.into(), vec![(0, 0)]);
+            game.adv.tree = std::sync::Arc::new(tree);
+            game.lan.as_mut().unwrap().hub.guests.update_all(|guest| {
+                guest.loaded = true;
+                guest.advancements_loaded = true;
+            });
+            let kind = game
+                .res
+                .mob_types()
+                .get("minecraft:sulfur_cube")
+                .unwrap()
+                .clone();
+            let item = kind.tempt.first().expect("a swallowable item").to_string();
+            game.next_entity += 1;
+            let id = game.next_entity;
+            game.mobs.push(Mob::new(id, kind, Vec3::ZERO, 0.0));
+            game.creatures.ticked.insert(id);
+            game.spawn_item(ItemStack::new(&item, 1), [0.0; 3], [0.0; 3], 0);
+            // `ItemEntity.getOwner`: guest 13 threw it.
+            game.just_spawned_item().unwrap().thrower = Some([0, 0, 0, 13]);
+            game.sulfur_cube_pickups();
+            let cube = game.mobs.iter().find(|m| m.id == id).unwrap();
+            assert!(cube.extra.body_id().is_some(), "the cube took the item");
+            let hub = &game.lan.as_ref().unwrap().hub;
+            assert!(hub.guest(13).unwrap().advancements.has(ADV, "pickup"));
+            assert!(!hub.guest(12).unwrap().advancements.has(ADV, "pickup"));
         });
     }
 }
