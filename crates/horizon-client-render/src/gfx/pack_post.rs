@@ -5705,8 +5705,26 @@ impl PackPost {
         let limits = device.limits();
         let max_attachments = (limits.max_color_attachments as usize).min(8);
         // The buffers the blit doesn't clear, and the other texture of every cleared buffer.
-        let alt_clears = (0..BUFFERS)
+        let doubled_clears = (0..BUFFERS)
             .filter(|&b| self.clears[b].is_some() && self.doubled & 1 << b != 0)
+            .fold(0u16, |m, b| m | 1 << b);
+        // `HORIZON_SHADER_PACK_NO_ALT_CLEAR` leaves the clear out where no pass shows that side
+        // this frame, or the first to show it overwrites it whole (`carry`): passes read, draw
+        // into and bind as images main alone, so every pixel comes out as with the clear, while
+        // what alt holds until then is never seen. Each frame decides again, so one that shows
+        // it otherwise has it cleared. Buffers bound as images always get it: an image may write
+        // a three-channel buffer's alpha, which passes keep.
+        let unseen = match doubled_clears {
+            0 => 0,
+            _ if carry::no_alt_clear() => {
+                let (whole, never) =
+                    carry::first_shown(doubled_clears & !self.storage, self.alt_shown());
+                whole | never
+            }
+            _ => 0,
+        };
+        let alt_clears = (0..BUFFERS)
+            .filter(|&b| doubled_clears & !unseen & 1 << b != 0)
             .filter(|&b| view(self.main, b, true).is_some())
             .map(|b| (b, true));
         let mut by_size: Vec<([u32; 2], Vec<(usize, bool)>)> = Vec::new();

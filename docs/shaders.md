@@ -65,7 +65,9 @@ compiles. `HORIZON_SHADER_PACK_NO_FLIP_COPY=1` skips
 the copy that brings a buffer the pack doesn't clear to its other side as a frame starts, where the frame's first
 pass to show that side overwrites it whole; that holds only if the pass's vertex stage covers the buffer, as a
 composite's full-screen quad does, which nothing checks, so it is off by default: with a pass that draws less, the
-pixels it leaves would show an older frame. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
+pixels it leaves would show an older frame. `HORIZON_SHADER_PACK_NO_ALT_CLEAR=1` does the same for the clear of a
+cleared buffer's other side, on the same condition (or where no pass shows that side), and is off by default for the
+same reason: such a pass would leave pixels of an older frame where the clear colour belongs. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
 own tint, directional shade, ambient occlusion and face beside its vertices while one of Horizon's packs
 runs, as a pack whose material or vertex stage reads `tint`, `shade`, `ao` or `face` does, for the engine's
 own tests: they take a third again the terrain's memory, and the world loads again when such a pack starts or stops. The game checks the pack first, and refuses one that

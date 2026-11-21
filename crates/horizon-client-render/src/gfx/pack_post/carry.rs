@@ -69,3 +69,15 @@ pub(super) fn no_flip_copy() -> bool {
          show that side overwrites it whole",
     )
 }
+
+/// `HORIZON_SHADER_PACK_NO_ALT_CLEAR=1`: a cleared buffer's alt side is cleared as the frame
+/// starts only when a pass of the frame shows it before overwriting it whole.
+pub(super) fn no_alt_clear() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    switch(
+        &ON,
+        "HORIZON_SHADER_PACK_NO_ALT_CLEAR",
+        "cleared buffers skip clearing their other side where no pass shows it before \
+         overwriting it whole",
+    )
+}
