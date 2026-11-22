@@ -105,9 +105,11 @@ fn world_section(position: [f64; 3]) -> Option<[i32; 3]> {
 
 /// Whether `QuadParticleGroup`'s test keeps `particle`: its position this tick (camera-relative, not
 /// interpolated) is on or inside `view`, the camera's frustum pulled back [`PARTICLE_FRUSTUM_OFFSET`] blocks.
+/// A position that is not finite as a float is dropped: `FrustumIntersection.testPoint`'s
+/// comparisons fail on it.
 pub(super) fn in_view(view: &crate::gfx::JoinedFrusta, particle: &Particle, camera: DVec3) -> bool {
-    let at = DVec3::from_array(particle.position) - camera;
-    view.contains_point(at.as_vec3())
+    let at = (DVec3::from_array(particle.position) - camera).as_vec3();
+    at.is_finite() && view.contains_point(at)
 }
 
 impl ParticleEngine {

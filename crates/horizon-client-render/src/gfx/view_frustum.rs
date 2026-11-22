@@ -62,7 +62,8 @@ impl Frustum {
     }
     /// Whether the camera-relative `point` is on or inside every plane (vanilla's
     /// `Frustum.pointInFrustum`). A point that is not finite is kept: a test that cannot
-    /// tell must not hide the particle.
+    /// tell keeps what it tests. The particles' test drops one first, as vanilla's comparisons
+    /// do (`particles::view_cull::in_view`).
     pub fn contains_point(&self, point: Vec3) -> bool {
         if !point.is_finite() {
             return true;

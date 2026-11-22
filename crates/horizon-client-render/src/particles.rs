@@ -5810,6 +5810,8 @@ mod tests {
             [100.0, 0.0, -5.0], // far to the side
             [0.0, 60.0, -5.0],  // far above
             [0.0, 0.0, -600.0], // beyond the far plane
+            // Not a number: vanilla's comparisons fail.
+            [f64::NAN, 0.0, -5.0],
         ];
         let all: Vec<_> = kept.iter().chain(&dropped).copied().collect();
         let engine = smoke_at(&all);
