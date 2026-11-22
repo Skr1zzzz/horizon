@@ -668,11 +668,13 @@ impl Region {
         region: (u32, u32),
     ) -> Option<(u32, u32)> {
         // Not full: emptying the region would not make room either.
-        if w >= atlas.0 || h > region.1 {
+        if w > atlas.0 || h > region.1 {
             return None;
         }
         let (mut x, mut y) = self.cursor;
-        if x + w + 1 > atlas.0 {
+        // The pixel between glyphs, none past the atlas edge: an exact fit is
+        // taken (`DynamicAtlasTree.insert`, from `FontTexture.add`).
+        if x + w > atlas.0 {
             x = 0;
             y += self.row + 1;
         }
@@ -2189,20 +2191,24 @@ mod tests {
     /// A sheet cell no glyph region could hold, taller than the region or wider than the atlas,
     /// is refused before it is copied and draws as the missing glyph, as vanilla's stitcher
     /// gives one no font texture holds: nothing lands outside the atlas, and the region is not
-    /// emptied every frame for it.
+    /// emptied every frame for it. One exactly as wide as the atlas and as tall as the region
+    /// fills an empty region, as vanilla's `DynamicAtlasTree` takes an exact fit.
     #[test]
     fn a_cell_no_region_holds_is_the_missing_glyph() {
-        let (tall, wide) = (png(4, 40, |_, _| true), png(12, 8, |_, _| true));
-        let default = br#"{"providers":[{"type":"bitmap","file":"pack:font/tall.png","ascent":7,"chars":["a"]},{"type":"bitmap","file":"pack:font/wide.png","ascent":7,"chars":["b"]}]}"#;
+        let (tall, wide) = (png(4, 33, |_, _| true), png(11, 8, |_, _| true));
+        let exact = png(10, 32, |_, _| true);
+        let default = br#"{"providers":[{"type":"bitmap","file":"pack:font/tall.png","ascent":7,"chars":["a"]},{"type":"bitmap","file":"pack:font/wide.png","ascent":7,"chars":["b"]},{"type":"bitmap","file":"pack:font/exact.png","ascent":7,"chars":["c"]}]}"#;
         let root = root(
             "unheld",
             &[
                 ("assets/minecraft/font/default.json", default),
                 ("assets/pack/textures/font/tall.png", &tall),
                 ("assets/pack/textures/font/wide.png", &wide),
+                ("assets/pack/textures/font/exact.png", &exact),
             ],
         );
-        // A 10 wide atlas whose region has 32 rows: 'a' is 4x40, 'b' 12x8.
+        // A 10 wide atlas whose region has 32 rows: 'a' is 4x33 and 'b' 11x8, a pixel too
+        // tall or too wide, and 'c' 10x32 fits exactly.
         let font = Font::load(
             &ResourceSource::directory(root.clone()),
             &HashMap::new(),
@@ -2218,6 +2224,14 @@ mod tests {
             assert_eq!((glyph.rect.is_none(), glyph.advance), (true, 6.0), "{c}");
         }
         assert!(font.take_patches().is_empty());
+        // The pixel between glyphs is not needed past the atlas edge.
+        assert!(font.glyph('c').rect.is_some());
+        let patches = font.take_patches();
+        let placed: Vec<_> = patches
+            .iter()
+            .map(|p| (p.x, p.y, p.width, p.height))
+            .collect();
+        assert_eq!(placed, [(0, 0, 10, 32)]);
         font.begin_frame();
         assert_eq!(font.epoch(), epoch);
     }
