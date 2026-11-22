@@ -1375,3 +1375,41 @@ fn chat_suggestions_leave_commands_blank_text_and_stale_answers_alone() {
     assert!(shown(&stale).is_empty());
     assert_eq!(stale.value(), "hi sta");
 }
+
+/// A completion in the middle of the text works vanilla's list out again with
+/// the cursor at the end (`EditBox.setValue`), then moves the cursor back to
+/// the completion's end (`SuggestionsList.useSuggestion`). Mods are asked at
+/// the cursor the list was worked out with, so their entries join the players'
+/// names for the same word.
+#[test]
+fn after_a_completion_mods_are_asked_at_the_lists_cursor() {
+    use winit::keyboard::KeyCode as K;
+    let font = font();
+    let m = Measure(&font);
+    let registries = Registries {
+        players: vec!["Alex".into(), "Theresa".into()],
+        ..Registries::default()
+    };
+    let c = Commands {
+        dispatcher: crate::command::vanilla::game_dispatcher(),
+        registries: &registries,
+    };
+    let mut screen = ChatScreen::new(&m, &c, "", false, 0, 640, 360, full());
+    screen.type_text(&m, &c, "hi al ther");
+    screen.edit_input(&m, &c, |field| field.set_cursor_and_highlight(&m, 5));
+    for _ in 0..2 {
+        screen.key(&m, &c, &[], K::Tab, false, false);
+    }
+    assert_eq!(screen.value(), "hi Alex ther");
+    assert_eq!(
+        screen.input.cursor, 7,
+        "the cursor stays after the completion"
+    );
+    let (input, cursor) = screen.take_chat_query().expect("the completion asks mods");
+    assert_eq!((input.as_str(), cursor), ("hi Alex ther", 12));
+    screen.add_chat_suggestions(&input, cursor, vec!["Theo".into()]);
+    // Escape hides the list; Tab shows it again from what is pending.
+    screen.key(&m, &c, &[], K::Escape, false, false);
+    screen.key(&m, &c, &[], K::Tab, false, false);
+    assert_eq!(shown(&screen), ["Theo", "Theresa"]);
+}

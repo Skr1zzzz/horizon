@@ -1399,10 +1399,12 @@ pub struct ChatScreen {
 enum ChatQuery {
     /// The list is a command's, blank text's, or already has mods' entries.
     Closed,
-    /// The list is plain chat text's, and mods are still to be asked.
-    Unasked,
-    /// Mods were asked about this list; their entries may join it.
-    Asked,
+    /// The list is plain chat text's, worked out with the cursor at this
+    /// character, and mods are still to be asked.
+    Unasked(usize),
+    /// Mods were asked about this list, at its cursor; their entries may join
+    /// it.
+    Asked(usize),
 }
 /// Local completions waiting for the server's reply to request `id`.
 struct Awaiting {
@@ -1703,7 +1705,7 @@ impl ChatScreen {
             let (range, list) = merge_suggestions(partial, builder.out);
             self.awaiting = None;
             self.pending = Some((range.0, list));
-            self.chat_query = ChatQuery::Unasked;
+            self.chat_query = ChatQuery::Unasked(cursor);
             self.usage_width = 0;
             self.usage_position = 0;
             // CommandSuggestions.updateCommandInfo: the Chat option may take
@@ -1724,15 +1726,18 @@ impl ChatScreen {
         self.request.take()
     }
     /// The plain chat text (no `/`) the list was just worked out for, and the
-    /// cursor in characters: once each time that happens (the text changed, or
-    /// the screen opened or resized holding it), for mods to add theirs with
-    /// `add_chat_suggestions`. None for a command or blank text.
+    /// cursor it was worked out with, in characters: once each time that
+    /// happens (the text changed, or the screen opened or resized holding it),
+    /// for mods to add theirs with `add_chat_suggestions`. None for a command
+    /// or blank text. After a completion that cursor is the end of the text:
+    /// `EditBox.setValue` works the list out there, then `useSuggestion` moves
+    /// the cursor back.
     pub fn take_chat_query(&mut self) -> Option<(String, usize)> {
-        if self.chat_query != ChatQuery::Unasked {
+        let ChatQuery::Unasked(cursor) = self.chat_query else {
             return None;
-        }
-        self.chat_query = ChatQuery::Asked;
-        Some((self.input.value.clone(), self.input.cursor))
+        };
+        self.chat_query = ChatQuery::Asked(cursor);
+        Some((self.input.value.clone(), cursor))
     }
     /// Mods' completions for the plain chat text `input` with the cursor at
     /// `cursor` (from `take_chat_query`). Each replaces the word before the
@@ -1742,10 +1747,7 @@ impl ChatScreen {
     /// Brigadier's `suggest` leaves it. Nothing changes unless the list is
     /// still the one asked about, for that text and cursor.
     pub fn add_chat_suggestions(&mut self, input: &str, cursor: usize, entries: Vec<String>) {
-        if self.chat_query != ChatQuery::Asked
-            || self.input.value != input
-            || self.input.cursor != cursor
-        {
+        if self.chat_query != ChatQuery::Asked(cursor) || self.input.value != input {
             return;
         }
         self.chat_query = ChatQuery::Closed;
