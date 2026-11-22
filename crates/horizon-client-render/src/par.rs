@@ -46,7 +46,8 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec
 pub type FrameRun = fn(usize, &(dyn Fn(usize) + Sync));
 
 /// The pool a frame's loops are shared with: how this crate reaches the game's helper threads
-/// (`horizon_client::parallel::frame_lanes` and `frame_pool`), which it doesn't own.
+/// (`horizon_client::parallel::frame_lanes` and `frame_pool`, handed over by
+/// `horizon_client::parallel::hand_to_frames`), which it doesn't own.
 #[derive(Clone, Copy)]
 pub struct FramePool {
     /// How many threads would take parts now, the calling one among them; 1 when there is no one
@@ -162,7 +163,11 @@ fn frame_parts(lanes: usize, items: usize) -> usize {
 }
 
 /// [`extend_frame`]'s shared path: `items` cut into `parts` runs, each run's results kept apart
-/// until `run` ran them all, then appended in order.
+/// until `run` ran them all, then copied into `out` in order, once.
+///
+/// Each run starts with its share of the room `out` has spare, which a caller that knows about
+/// how many results to expect leaves there (the cloud mesh keeps its last rebuild's), so a run
+/// rarely grows its buffer; without any, room for a result per item.
 fn extend_on<T: Sync, R: Send>(
     items: &[T],
     parts: usize,
@@ -175,15 +180,21 @@ fn extend_on<T: Sync, R: Send>(
     }
     let size = items.len().div_ceil(parts.max(1));
     let count = items.len().div_ceil(size);
+    let room = (out.capacity() - out.len()).div_ceil(count);
     let slots: Vec<Mutex<Vec<R>>> = (0..count).map(|_| Mutex::new(Vec::new())).collect();
     run(count, &|k: usize| {
         let part = &items[k * size..((k + 1) * size).min(items.len())];
-        let mut done = Vec::with_capacity(part.len());
+        let mut done = Vec::with_capacity(if room > 0 { room } else { part.len() });
         f(part, &mut done);
         *slots[k].lock().unwrap_or_else(PoisonError::into_inner) = done;
     });
-    for slot in slots {
-        out.extend(slot.into_inner().unwrap_or_else(PoisonError::into_inner));
+    let done: Vec<Vec<R>> = slots
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner))
+        .collect();
+    out.reserve(done.iter().map(Vec::len).sum());
+    for part in done {
+        out.extend(part);
     }
 }
 
