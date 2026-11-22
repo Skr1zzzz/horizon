@@ -467,6 +467,43 @@ enum Pipeline {
     },
 }
 
+impl Pipeline {
+    /// Whether `dispatch` may leave this compute pipeline unrun over a target of `size`, on a
+    /// device that dispatches at most `most` work groups a dimension: with more, or with
+    /// indirect arguments, whose range it checks only then. A render pipeline always runs.
+    fn may_skip(&self, size: [u32; 2], most: u32) -> bool {
+        match self {
+            Self::Render(_) => false,
+            Self::Compute {
+                indirect: Some(_), ..
+            } => true,
+            Self::Compute {
+                groups,
+                render,
+                local,
+                indirect: None,
+                ..
+            } => work_groups(*groups, *render, *local, size)
+                .iter()
+                .any(|&n| n > most),
+        }
+    }
+}
+
+/// The work groups a compute pass dispatches over a target of `size`: `workGroups` (`groups`),
+/// else `workGroupsRender` (`render`) of `size` over the local size.
+fn work_groups(
+    groups: Option<[u32; 3]>,
+    render: [f32; 2],
+    local: [u32; 3],
+    size: [u32; 2],
+) -> [u32; 3] {
+    groups.unwrap_or_else(|| {
+        let n = |k: usize| (size[k] as f32 * render[k] / local[k] as f32).ceil() as u32;
+        [n(0), n(1), 1]
+    })
+}
+
 #[derive(Clone)]
 struct Pass {
     name: String,
@@ -3992,13 +4029,11 @@ impl PackPost {
             return;
         };
         let pipeline = pipeline.get().expect("compiled with its pack");
-        let groups = groups.unwrap_or_else(|| {
-            let n = |k: usize| (size[k] as f32 * render[k] / local[k] as f32).ceil() as u32;
-            [n(0), n(1), 1]
-        });
+        let groups = work_groups(*groups, *render, *local, size);
         let (pipeline, groups) = (pipeline.clone(), groups);
         // wgpu panics on a dispatch over its limit. The translator reshapes a large
-        // `workGroups`; a `workGroupsRender` that large is not run.
+        // `workGroups`; a `workGroupsRender` that large is not run. `Pipeline::may_skip` says
+        // when this may return before the dispatch, for the mip chains planned ahead of it.
         let most = device.limits().max_compute_workgroups_per_dimension;
         if indirect.is_none() && groups.iter().any(|&n| n > most) {
             log::warn!(
@@ -5903,19 +5938,20 @@ impl PackPost {
             // first level alone, the same texels as the chain's first level. Composite and
             // final passes come after all of the game's draws, so the passes after them are
             // all that may bind the chain while it stays current; before them, a draw may too.
+            // A compute job `dispatch` may skip writes nothing then, so its writes don't count.
             let make = if stale == 0 {
                 0
             } else {
-                let late = matches!(pass.group, Group::Composite | Group::Final);
+                let most = device.limits().max_compute_workgroups_per_dimension;
                 let runs = |q: &&Pass| {
                     !(q.group == Group::Setup && !self.setup_pending) && !self.sizes_differ(q)
                 };
-                let after = (later.iter())
-                    .filter(|_| late)
+                let later = (later.iter())
                     .filter(runs)
-                    .flat_map(|q| q.compute.iter().chain(std::iter::once(q)));
-                let binders = std::iter::once(&*pass).chain(after);
-                deep_reads::chains_to_make(stale, binders.map(|q| (q.deep, q.written)), !late)
+                    .flat_map(|q| q.compute.iter().chain(std::iter::once(q)))
+                    .map(|q| (q.deep, q.written, !q.pipeline.may_skip(size, most)));
+                let asking = (pass.deep, pass.written);
+                deep_reads::chains_to_make(pass.group, stale, asking, later)
             };
             for b in (0..BUFFERS).filter(|b| make & 1 << b != 0) {
                 self.mipmap(encoder, b);

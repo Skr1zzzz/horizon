@@ -1,6 +1,8 @@
 //! A buffer's mip chain is made only when some pass may read it past the first level before the
 //! buffer is written again (`deep_reads`).
+use super::Pipeline;
 use super::deep_reads::{chains_to_make, deep_bindings};
+use horizon_shaders::Group;
 use std::io::{Cursor, Write};
 
 /// A composite program reading colortex0 and colortex6 at level 0 alone (`texelFetch` and
@@ -65,21 +67,70 @@ fn only_reads_that_may_leave_the_first_level_count() {
 }
 
 /// A chain is made when a pass reads it past the first level before something writes the
-/// buffer, and when the game's draws still to come may.
+/// buffer.
 #[test]
 fn a_chain_is_made_for_a_deep_read_while_it_stays_current() {
     const C0: u16 = 1;
     const C3: u16 = 1 << 3;
-    // (deep reads, writes) of each pass from the one asking for the chains.
+    let late = |stale, asking, later: &[(u16, u16, bool)]| {
+        chains_to_make(Group::Composite, stale, asking, later.iter().copied())
+    };
+    // (deep reads, writes) of the pass asking for the chains, then (deep reads, writes, surely
+    // runs) of each pass after it.
     // It reads colortex0 at level 0 and writes it: nothing reads the chain.
-    assert_eq!(chains_to_make(C0, [(0, C0)], false), 0);
-    assert_eq!(chains_to_make(C0, [(0, C0)], true), 0);
-    // It leaves colortex0 current, and the game's draws may read it.
-    assert_eq!(chains_to_make(C0, [(0, 0)], true), C0);
+    assert_eq!(late(C0, (0, C0), &[]), 0);
+    assert_eq!(chains_to_make(Group::Deferred, C0, (0, C0), []), 0);
     // A later pass reads colortex0 deep before anything writes it; colortex3 was written.
-    assert_eq!(chains_to_make(C0 | C3, [(0, C3), (C0 | C3, 0)], false), C0);
+    assert_eq!(late(C0 | C3, (0, C3), &[(C0 | C3, 0, true)]), C0);
     // Only after a pass wrote it.
-    assert_eq!(chains_to_make(C0, [(0, 0), (0, C0), (C0, 0)], false), 0);
+    assert_eq!(late(C0, (0, 0), &[(0, C0, true), (C0, 0, true)]), 0);
     // The asking pass's own read counts, though it writes the buffer.
-    assert_eq!(chains_to_make(C3, [(C3, C3)], false), C3);
+    assert_eq!(late(C3, (C3, C3), &[]), C3);
+}
+
+/// A pass before the composite passes that leaves a chain current has it made, whatever it and
+/// the passes after it read: the game's draws come between them. A composite or final pass, after
+/// the game's draws, has it made only for a deep read to come.
+#[test]
+fn a_chain_left_current_is_made_before_the_game_draws_alone() {
+    const C0: u16 = 1;
+    let later = [(0, C0, true), (C0, 0, true)];
+    for group in [Group::Begin, Group::Prepare, Group::Deferred] {
+        assert_eq!(chains_to_make(group, C0, (0, 0), []), C0, "{group:?}");
+        assert_eq!(chains_to_make(group, C0, (0, 0), later), C0, "{group:?}");
+    }
+    for group in [Group::Composite, Group::Final] {
+        assert_eq!(chains_to_make(group, C0, (0, 0), []), 0, "{group:?}");
+        assert_eq!(chains_to_make(group, C0, (0, 0), later), 0, "{group:?}");
+    }
+}
+
+/// composite asks for colortex2's chain and reads level 0; composite1's compute job writes it
+/// but has a `workGroupsRender` over the device's limit, so it doesn't run; composite2 samples
+/// colortex2 at an implicit level. The chain is made, as before chains were cut.
+#[test]
+fn a_compute_job_that_may_not_run_does_not_end_a_chain() {
+    const C2: u16 = 1 << 2;
+    let job = |groups| Pipeline::Compute {
+        pipeline: Default::default(),
+        groups,
+        render: [1.0, 1.0],
+        local: [16, 16, 1],
+        indirect: None,
+    };
+    let (render, fixed) = (job(None), job(Some([8, 8, 1])));
+    // 65535 work groups a dimension, wgpu's default limit: 2^21 / 16 is 2^17 groups.
+    let (size, most) = ([1 << 21, 16], 65535);
+    assert!(render.may_skip(size, most));
+    assert!(!render.may_skip([1280, 720], most));
+    assert!(!fixed.may_skip(size, most));
+    let later = |job: &Pipeline| [(0, C2, !job.may_skip(size, most)), (C2, 0, true)];
+    assert_eq!(
+        chains_to_make(Group::Composite, C2, (0, 0), later(&render)),
+        C2
+    );
+    assert_eq!(
+        chains_to_make(Group::Composite, C2, (0, 0), later(&fixed)),
+        0
+    );
 }

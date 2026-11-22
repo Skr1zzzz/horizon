@@ -7,6 +7,7 @@
 //! `textureQueryLevels` counts them. A texture handed to a function counts with what the
 //! function reads of it.
 
+use horizon_shaders::Group;
 use naga::{Expression, Handle};
 
 use super::{Binding, Source};
@@ -193,24 +194,39 @@ pub(super) fn deep_buffers<'m>(
     deep
 }
 
-/// Of the buffers `stale` whose mip chains a pass asks for, those to make: the ones some pass
-/// may read past the first level while the chain stays current. `binders` are, in order from
-/// the asking pass, what binds buffers until the chain is next made or the frame ends: each
-/// one's deep reads (`deep_buffers`) and the buffers it writes, which end a chain's turn after
-/// its own read. With `open`, more may bind after `binders` (the game's draws between the
-/// pack's passes): a chain still current at their end is made.
+/// Of the buffers `stale` whose mip chains a pass of `group` asks for, those to make: the ones
+/// some pass may read past the first level while the chain stays current.
+///
+/// `asking` is the asking pass's deep reads (`deep_buffers`) and the buffers it writes. Before
+/// the composite passes (setup, begin, prepare, deferred), the game's draws may bind the chain
+/// after it, so a chain it leaves current is made, whatever is read. Composite and final passes
+/// come after all of the game's draws, so what binds the chain then is in `later`: in order,
+/// each compute job and pass that runs after the asking pass this frame, with its deep reads,
+/// the buffers it writes, and whether it surely runs. A write ends a chain's turn after the
+/// writer's own read, unless the writer may not run: `dispatch` skips a compute job whose work
+/// groups are over the device's limit or whose indirect arguments are out of range, and the
+/// chain then still serves the reads after it.
 pub(super) fn chains_to_make(
+    group: Group,
     stale: u16,
-    binders: impl IntoIterator<Item = (u16, u16)>,
-    open: bool,
+    asking: (u16, u16),
+    later: impl IntoIterator<Item = (u16, u16, bool)>,
 ) -> u16 {
-    let (mut current, mut make) = (stale, 0);
-    for (deep, written) in binders {
-        make |= current & deep;
-        current &= !(deep | written);
+    let (deep, written) = asking;
+    let mut make = stale & deep;
+    let mut current = stale & !(deep | written);
+    if !matches!(group, Group::Composite | Group::Final) {
+        return make | current;
+    }
+    for (deep, written, runs) in later {
         if current == 0 {
             break;
         }
+        make |= current & deep;
+        current &= !deep;
+        if runs {
+            current &= !written;
+        }
     }
-    if open { make | current } else { make }
+    make
 }
