@@ -5106,6 +5106,30 @@ impl Renderer {
     fn quad_indices(device: &wgpu::Device, quads: u32) -> Option<wgpu::Buffer> {
         rt::query::quad_indices(device, quads)
     }
+    /// Room in the indirect buffer for the arguments of `draws` draws, grown to the next power
+    /// of two: `false` where video memory had none (#13624, warned of once as `kind`), the
+    /// buffer left as it was.
+    fn grow_indirect(&mut self, draws: usize, kind: frame_targets::Kind) -> bool {
+        if draws as u64 <= self.indirect_capacity {
+            return true;
+        }
+        let capacity = (draws as u64).next_power_of_two();
+        let device = &self.device;
+        let made = frame_targets::made(device, kind, || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Section draws"),
+                size: capacity * 20,
+                usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let Some(buffer) = made else {
+            return false;
+        };
+        self.indirect_capacity = capacity;
+        self.indirect = buffer;
+        true
+    }
 
     /// A window frame was given up (#13624). Where video memory stays full, every frame would
     /// be: black frames, or the last one held, behind one warning. After `GIVEN_UP_LIMIT` in a
@@ -9926,7 +9950,11 @@ impl Renderer {
                     .is_some_and(|p| p.has_shadow() && !p.shadow_solid_geometry()),
                 &self.draws,
                 shadow_solid_draws.clone(),
-            );
+            )
+            // Their arguments need room in the indirect buffer before the flat list leaves them
+            // out: where video memory has none for a larger one (#13624), the flat list keeps
+            // them this frame rather than the frame being given up.
+            && self.grow_indirect(shadow_solid_draws.end, frame_targets::Kind::ShadowDraws);
         let flat_frame = match &mut self.flat {
             Some(flat)
                 if self.flat_on
@@ -10049,22 +10077,15 @@ impl Renderer {
         if let Some((offset, range)) =
             indirect_upload(&mut self.draws, flat_frame, shadow, self.multi_draw)
         {
-            if self.draws.len() as u64 > self.indirect_capacity {
-                let capacity = (self.draws.len() as u64).next_power_of_two();
-                let usage = wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST;
-                let made =
-                    frame_targets::buffer(&self.device, "Section draws", capacity * 20, usage);
-                let Some(buffer) = made else {
-                    return self.abandon_frame(frame_targets::Abandoned::grown(
-                        encoder,
-                        copies,
-                        surface_frame,
-                        fg_frames,
-                        backstop,
-                    ));
-                };
-                self.indirect_capacity = capacity;
-                self.indirect = buffer;
+            // A flat frame's shadow draws found their room before the flat list left them out.
+            if !self.grow_indirect(range.end, frame_targets::Kind::Buffers) {
+                return self.abandon_frame(frame_targets::Abandoned::grown(
+                    encoder,
+                    copies,
+                    surface_frame,
+                    fg_frames,
+                    backstop,
+                ));
             }
             self.uploads.buffer(
                 &mut encoder,
