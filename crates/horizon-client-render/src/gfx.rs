@@ -495,24 +495,25 @@ fn packed_wanted() -> bool {
 /// Whether a `shaders/` pack's shadow pass draws its solid list (draws `solid` of `draws`) with
 /// indirect multi-draws over the quad indices, each at its section's base vertex, rather than
 /// from the flat list (`flat::Flat::prepare`'s `skip`). Its program reads the arena page
-/// itself and sees the same vertex index either way, the base vertex plus the quad's corner,
-/// so the shadow map is the same; the frame no longer copies every index of the light's
-/// sections, its largest list, into the flat list each frame and reads them back. Only where
-/// frames without a pack draw section by section (`vanilla_flat` false, `flat::for_vanilla`:
-/// not where multi-draws are emulated or mishandled), with multi-draws the GPU runs itself
-/// (`native_multi_draw`), for a shadow program without a geometry stage, which reads the flat
-/// list's indices itself (`program`), while another draw keeps the frame flat, and unless
-/// `HORIZON_PACK_SHADOW_INDIRECT=0` (`wanted`).
+/// itself and sees the same vertex index either way, the base vertex plus the quad's corner;
+/// the frame no longer copies every index of the light's sections, its largest list, into the
+/// flat list each frame and reads them back. Only where frames without a pack draw section by
+/// section (`vanilla_flat` false, `flat::for_vanilla`: not where multi-draws are emulated or
+/// mishandled), where the device runs each of the list's multi-draws as one command (`limit`,
+/// `native_multi_draw_limit`; a page's run holds at most the whole list), as one replayed draw
+/// by draw would turn the flat list's few calls into a command a draw, for a shadow program
+/// without a geometry stage, which reads the flat list's indices itself (`program`), while
+/// another draw keeps the frame flat, and unless `HORIZON_PACK_SHADOW_INDIRECT=0` (`wanted`).
 fn pack_shadow_indirect(
     wanted: bool,
-    native_multi_draw: bool,
+    limit: u32,
     vanilla_flat: bool,
     program: bool,
     draws: &[[u32; 5]],
     solid: std::ops::Range<usize>,
 ) -> bool {
     wanted
-        && native_multi_draw
+        && solid.len() <= limit as usize
         && !vanilla_flat
         && program
         && !solid.is_empty()
@@ -523,6 +524,21 @@ fn pack_shadow_indirect(
 fn pack_shadow_indirect_wanted() -> bool {
     static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *WANTED.get_or_init(|| std::env::var("HORIZON_PACK_SHADOW_INDIRECT").as_deref() != Ok("0"))
+}
+
+/// The most draws one of the device's indirect multi-draws may hold and still be one command,
+/// 0 where they are replayed draw by draw or missing (`multi_draw`): all of them under DirectX 12
+/// (`ExecuteIndirect`); on Vulkan up to `maxDrawIndirectCount` with `multiDrawIndirect`
+/// (`horizon_hdr::vulkan_multi_draw_limit`), past which wgpu-hal issues one
+/// `vkCmdDrawIndexedIndirect` a draw; none under OpenGL and Metal. wgpu reports none of it.
+fn native_multi_draw_limit(adapter: &wgpu::Adapter, multi_draw: bool) -> u32 {
+    match adapter.get_info().backend {
+        _ if !multi_draw => 0,
+        wgpu::Backend::Dx12 => u32::MAX,
+        #[cfg(not(target_os = "macos"))]
+        wgpu::Backend::Vulkan => horizon_hdr::vulkan_multi_draw_limit(adapter).unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// Where draw `i`'s `DrawIndexedIndirectArgs` sit in an indirect buffer that holds them from
@@ -1934,6 +1950,9 @@ pub struct Renderer {
     indirect_capacity: u64,
     /// Indirect draws may set `first_instance` (the section origin).
     pub multi_draw: bool,
+    /// The most draws an indirect multi-draw may hold and still be one command
+    /// (`native_multi_draw_limit`).
+    multi_draw_limit: u32,
     /// Per-frame scratch, kept to avoid allocating every frame.
     visible: Vec<resident::Visible>,
     visible_lods: Vec<lod::Visible>,
@@ -4527,6 +4546,7 @@ impl Renderer {
             .features()
             .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && indirect_execution;
+        let multi_draw_limit = native_multi_draw_limit(&adapter, multi_draw);
         let translucent = match &flat {
             Some(f) if translucent_pulled(&adapter.get_info(), multi_draw, true) => {
                 let layout = kept.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -4876,6 +4896,7 @@ impl Renderer {
             indirect,
             indirect_capacity: 1024,
             multi_draw,
+            multi_draw_limit,
             visible: Vec::new(),
             visible_lods: Vec::new(),
             shadow_visible: Vec::new(),
@@ -9898,7 +9919,7 @@ impl Renderer {
         let shadow_indirect = self.pack_terrain_flat
             && pack_shadow_indirect(
                 pack_shadow_indirect_wanted(),
-                self.multi_draw && self.info.backend != wgpu::Backend::Gl,
+                self.multi_draw_limit,
                 (self.flat.as_ref()).is_some_and(|f| f.min_sections != usize::MAX),
                 (self.pack_post.as_ref())
                     .and_then(|p| p.1.as_ref())
@@ -14904,8 +14925,9 @@ mod shadow_caster_tests {
     }
 
     /// A `shaders/` pack's shadow pass draws its solid list with indirect multi-draws where
-    /// frames without a pack do, with multi-draws the GPU runs, for a program without a geometry
-    /// stage, while the flat list keeps another draw; from the flat list everywhere else.
+    /// frames without a pack do, where the device runs each of them as one command, for a
+    /// program without a geometry stage, while the flat list keeps another draw; from the flat
+    /// list everywhere else.
     #[test]
     fn the_pack_shadow_draws_its_solid_list_indirectly_where_vanilla_frames_do() {
         // The camera's solid draw, then the shadow camera's two solid ones and its water.
@@ -14915,21 +14937,29 @@ mod shadow_caster_tests {
             [6, 1, 0, 64, 2],
             [6, 1, 6, 80, 2],
         ];
-        // (switch, native multi-draws, vanilla frames flat, program without a geometry stage)
-        let indirect = |[wanted, native, vanilla_flat, program]: [bool; 4]| {
-            pack_shadow_indirect(wanted, native, vanilla_flat, program, &draws, 1..3)
+        // (switch, vanilla frames flat, program without a geometry stage), and the most draws a
+        // multi-draw holds as one command.
+        let indirect = |[wanted, vanilla_flat, program]: [bool; 3], limit| {
+            pack_shadow_indirect(wanted, limit, vanilla_flat, program, &draws, 1..3)
         };
-        assert!(indirect([true, true, false, true]));
-        // `HORIZON_PACK_SHADOW_INDIRECT=0`; multi-draws looped on the CPU; frames that draw flat
-        // anyway (Metal, Intel Gen11 and Gen12 on Vulkan); a geometry stage.
-        assert!(!indirect([false, true, false, true]));
-        assert!(!indirect([true, false, false, true]));
-        assert!(!indirect([true, true, true, true]));
-        assert!(!indirect([true, true, false, false]));
+        // DirectX 12; Vulkan with `multiDrawIndirect`, the two draws within its
+        // `maxDrawIndirectCount`.
+        assert!(indirect([true, false, true], u32::MAX));
+        assert!(indirect([true, false, true], 2));
+        // Where a multi-draw of the two would be replayed draw by draw: past that count; Vulkan
+        // without `multiDrawIndirect`, OpenGL, Metal.
+        assert!(!indirect([true, false, true], 1));
+        assert!(!indirect([true, false, true], 0));
+        // `HORIZON_PACK_SHADOW_INDIRECT=0`; frames that draw flat anyway (Metal, Intel Gen11 and
+        // Gen12 on Vulkan); a geometry stage.
+        assert!(!indirect([false, false, true], u32::MAX));
+        assert!(!indirect([true, true, true], u32::MAX));
+        assert!(!indirect([true, false, false], u32::MAX));
         // No shadow solid draws; or none left for the flat list, without which the frame would
         // not be drawn flat.
-        let listed =
-            |draws: &[[u32; 5]], solid| pack_shadow_indirect(true, true, false, true, draws, solid);
+        let listed = |draws: &[[u32; 5]], solid| {
+            pack_shadow_indirect(true, u32::MAX, false, true, draws, solid)
+        };
         assert!(!listed(&draws[..], 1..1));
         assert!(!listed(&draws[1..3], 0..2));
     }
