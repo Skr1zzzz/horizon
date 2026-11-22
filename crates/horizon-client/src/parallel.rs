@@ -285,13 +285,16 @@ pub fn lanes() -> usize {
     }
 }
 
-/// The pool: one thread fewer than a phase's lanes (the server thread takes parts too).
+/// The pool, made the first time a phase or a frame shares its work: one thread fewer than a
+/// phase's lanes (the server thread takes parts too). `None` if its threads couldn't start.
+static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+
+/// [`POOL`], made now if it isn't yet.
 ///
 /// Its threads ask for the priority the server and render threads have (`favour_current`): the
 /// tick or the frame waits for each part they take, and behind the chunk workers, which
 /// outnumber the cores while terrain loads, a part could wait 10 to 200 ms for a core.
-fn pool() -> &'static rayon::ThreadPool {
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+fn try_pool() -> Option<&'static rayon::ThreadPool> {
     POOL.get_or_init(|| {
         log::info!("Horizon: starting the tick's helper threads");
         rayon::ThreadPoolBuilder::new()
@@ -303,8 +306,42 @@ fn pool() -> &'static rayon::ThreadPool {
                 horizon_threads::favour_current();
             })
             .build()
-            .expect("the tick's helper threads start")
+            .inspect_err(|e| log::warn!("Horizon: the tick's helper threads didn't start: {e}"))
+            .ok()
     })
+    .as_ref()
+}
+
+/// [`try_pool`] for a tick phase, which stops the game when its helpers can't start, as it
+/// always did; a frame keeps to the render thread instead ([`frame_pool`]).
+fn pool() -> &'static rayon::ThreadPool {
+    try_pool().expect("the tick's helper threads start")
+}
+
+/// How many tick phases have parts in the pool now, queued or running. A frame shares the
+/// helpers only while none has ([`run_parts_on`]), so its parts never queue behind a phase's;
+/// the lock orders a phase's start against a frame queueing its parts.
+static PHASES: Mutex<usize> = Mutex::new(0);
+
+/// A tick phase's `work` on this thread and `lanes - 1` helpers, each taking the phase's parts
+/// until none is left: counted in [`PHASES`] from before its parts are queued until all have run.
+fn share_out(lanes: usize, work: &(dyn Fn() + Sync)) {
+    /// Takes the phase off [`PHASES`] however it ends, a part's panic included.
+    struct Phase;
+    impl Drop for Phase {
+        fn drop(&mut self) {
+            *PHASES.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        }
+    }
+    let pool = pool();
+    *PHASES.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+    let _phase = Phase;
+    pool.in_place_scope(|s| {
+        for _ in 1..lanes {
+            s.spawn(|_| work());
+        }
+        work();
+    });
 }
 
 /// Fewer hardware threads than this and frames never share: the helpers can't take the render
@@ -327,21 +364,27 @@ pub fn frame_lanes() -> usize {
 
 /// The frames' pool (`horizon_client::par::FramePool::run`): `run(k)` for every `k` in
 /// `0..parts`, the parts taken in turn by the render thread and the helpers, on
-/// [`frame_lanes`] threads.
+/// [`frame_lanes`] threads; all on the render thread, in order, if the helpers can't start.
 pub fn frame_pool(parts: usize, run: &(dyn Fn(usize) + Sync)) {
-    run_parts_on(parts, frame_lanes(), run);
+    let lanes = frame_lanes();
+    let pool = if lanes > 1 { try_pool() } else { None };
+    run_parts_on(parts, lanes, pool, &PHASES, run);
 }
 
-/// [`frame_pool`] on `lanes` threads, this one among them; in order on this one alone when that
-/// is all there is.
-fn run_parts_on(parts: usize, lanes: usize, run: &(dyn Fn(usize) + Sync)) {
-    let lanes = lanes.min(parts);
-    if lanes <= 1 {
-        for k in 0..parts {
-            run(k);
-        }
-        return;
-    }
+/// [`frame_pool`] on `lanes` threads of `pool`, this one among them; in order on this one alone
+/// when that is all there is, without a pool, or while `phases` counts a tick phase in it.
+///
+/// A frame waits until every helper it woke has started, even one that finds no part left:
+/// `phases` is held while its parts are queued, so a phase that starts meanwhile queues behind
+/// them (each helper finishes the frame's part it holds first), and the frame never queues
+/// behind a phase.
+fn run_parts_on(
+    parts: usize,
+    lanes: usize,
+    pool: Option<&rayon::ThreadPool>,
+    phases: &Mutex<usize>,
+    run: &(dyn Fn(usize) + Sync),
+) {
     let next = AtomicUsize::new(0);
     let work = || {
         loop {
@@ -352,10 +395,23 @@ fn run_parts_on(parts: usize, lanes: usize, run: &(dyn Fn(usize) + Sync)) {
             run(k);
         }
     };
-    pool().in_place_scope(|s| {
+    let lanes = lanes.min(parts);
+    let Some(pool) = pool.filter(|_| lanes > 1) else {
+        work();
+        return;
+    };
+    let queueing = phases.lock().unwrap_or_else(PoisonError::into_inner);
+    if *queueing > 0 {
+        drop(queueing);
+        work();
+        return;
+    }
+    let mut queueing = Some(queueing);
+    pool.in_place_scope(|s| {
         for _ in 1..lanes {
             s.spawn(|_| work());
         }
+        drop(queueing.take());
         work();
     });
 }
@@ -412,12 +468,7 @@ fn par_chunks_mut_on<T: Send>(
             f(slice);
         }
     };
-    pool().in_place_scope(|s| {
-        for _ in 1..lanes.min(count) {
-            s.spawn(|_| work());
-        }
-        work();
-    });
+    share_out(lanes.min(count), &work);
 }
 
 /// [`par_map`] on `lanes` threads (a test's count, or a caller that caps them).
@@ -453,12 +504,7 @@ pub fn par_map_on<T: Sync, R: Send>(
             *slots[k].lock().unwrap_or_else(PoisonError::into_inner) = done;
         }
     };
-    pool().in_place_scope(|s| {
-        for _ in 1..lanes {
-            s.spawn(|_| work());
-        }
-        work();
-    });
+    share_out(lanes, &work);
     let mut out = Vec::with_capacity(items.len());
     for slot in slots {
         out.extend(slot.into_inner().unwrap_or_else(PoisonError::into_inner));
@@ -596,7 +642,9 @@ mod tests {
         let runs: Vec<AtomicUsize> = (0..64).map(|_| AtomicUsize::new(0)).collect();
         let (active, overlapped) = (AtomicUsize::new(0), AtomicBool::new(false));
         let deadline = Instant::now() + Duration::from_secs(10);
-        run_parts_on(64, 4, &|k: usize| {
+        // Its own count of phases: the other tests' phases in the pool would keep it serial.
+        let no_phase = Mutex::new(0);
+        run_parts_on(64, 4, Some(pool()), &no_phase, &|k: usize| {
             runs[k].fetch_add(1, Ordering::SeqCst);
             if active.fetch_add(1, Ordering::SeqCst) >= 1 {
                 overlapped.store(true, Ordering::SeqCst);
@@ -613,11 +661,35 @@ mod tests {
         assert!(runs.iter().all(|r| r.load(Ordering::SeqCst) == 1));
         let order = Mutex::new(Vec::new());
         let here = std::thread::current().id();
-        run_parts_on(5, 1, &|k: usize| {
+        run_parts_on(5, 1, Some(pool()), &no_phase, &|k: usize| {
             assert_eq!(std::thread::current().id(), here);
             order.lock().unwrap().push(k);
         });
         assert_eq!(order.into_inner().unwrap(), [0, 1, 2, 3, 4]);
+    }
+
+    /// Where the helpers couldn't start, a frame with lanes to share runs every part itself, in
+    /// order, instead of failing.
+    #[test]
+    fn a_frame_without_helpers_runs_its_parts_here() {
+        let (order, here) = (Mutex::new(Vec::new()), std::thread::current().id());
+        run_parts_on(6, 4, None, &Mutex::new(0), &|k: usize| {
+            assert_eq!(std::thread::current().id(), here);
+            order.lock().unwrap().push(k);
+        });
+        assert_eq!(order.into_inner().unwrap(), [0, 1, 2, 3, 4, 5]);
+    }
+
+    /// While a tick phase has parts in the pool, a frame queues none behind them: it runs every
+    /// part itself, in order.
+    #[test]
+    fn a_frame_never_queues_behind_a_phase() {
+        let (order, here) = (Mutex::new(Vec::new()), std::thread::current().id());
+        run_parts_on(6, 4, Some(pool()), &Mutex::new(1), &|k: usize| {
+            assert_eq!(std::thread::current().id(), here);
+            order.lock().unwrap().push(k);
+        });
+        assert_eq!(order.into_inner().unwrap(), [0, 1, 2, 3, 4, 5]);
     }
 
     /// A panic in a part reaches the caller instead of being lost on a helper.
