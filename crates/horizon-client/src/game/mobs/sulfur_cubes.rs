@@ -4,7 +4,9 @@
 //! splitting into two babies.
 use super::Game;
 use horizon_client::{
+    entities::ItemEntity,
     items::ItemStack,
+    join_seq::JoinList,
     mesher::Vertex,
     mobs::{Mob, Species, Who, sulfur_cube},
     projectiles::Projectile,
@@ -34,6 +36,17 @@ fn block_overlay(fuse_ticks: i32, alpha: f32, hurt: bool) -> u32 {
 fn block_light(light: u32, emission: u8) -> u32 {
     let block = (light >> 8 & 0xFF).max(u32::from(emission) * 16);
     (light & 0xFF) | block << 8
+}
+
+/// `itemStack.split(1)` in `SulfurCube.pickUpItem`: one fewer in the stack of
+/// the item entity `id`, found by id, because a reward function run by
+/// `onItemPickup` may have removed or moved items. Its index and whether that
+/// emptied it; none once it is gone.
+fn split_one(dropped: &mut JoinList<ItemEntity>, id: u32) -> Option<(usize, bool)> {
+    let j = dropped.iter().position(|e| e.id == id)?;
+    let e = &mut dropped[j];
+    e.stack.count -= 1;
+    Some((j, e.stack.count == 0))
 }
 
 impl Game<'_> {
@@ -296,7 +309,10 @@ impl Game<'_> {
             .rules
             .bool_at(horizon_client::gamerules::vanilla::MOB_GRIEFING);
         for i in 0..self.mobs.len() {
-            let m = &self.mobs[i];
+            // A pickup's reward function may take mobs out of the level.
+            let Some(m) = self.mobs.get(i) else {
+                break;
+            };
             if m.species() != Species::SulfurCube || !self.creatures.ticked.contains(&m.id) {
                 continue;
             }
@@ -339,15 +355,22 @@ impl Game<'_> {
             // `SulfurCube.pickUpItem` calls `onItemPickup` first: the whole
             // stack, for whoever threw it, a server's player in their turn.
             self.mob_item_pickup_trigger(i, &taken_item);
-            self.add_pickup(
-                super::pickups::Taken::Item(Box::new(taken_item)),
-                super::pickups::Collector::Mob(id),
-            );
-            let e = &mut self.dropped[j];
-            e.stack.count -= 1;
-            if e.stack.count == 0 {
-                self.remove_dropped(j);
+            // An advancement it finishes runs its reward function at once,
+            // which can remove or move the item and the cube, so both are
+            // found again by id. Vanilla's `take` skips a removed item, but
+            // the cube still swallows a copy of the stack it read first.
+            if let Some((j, emptied)) = split_one(&mut self.dropped, taken_item.id) {
+                self.add_pickup(
+                    super::pickups::Taken::Item(Box::new(taken_item)),
+                    super::pickups::Collector::Mob(id),
+                );
+                if emptied {
+                    self.remove_dropped(j);
+                }
             }
+            let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
+                continue;
+            };
             let m = &mut self.mobs[i];
             m.extra.set_body_stack(Some(swallowed));
             m.extra.point = None;
@@ -396,6 +419,46 @@ mod tests {
         assert_eq!(block_light(0x2050, 1), 0x2050);
         assert_eq!(block_light(0x2050, 7), 0x7050);
         assert_eq!(block_light(0x0070, 0), 0x0070);
+    }
+
+    /// `SulfurCube.pickUpItem` reads the stack, then `onItemPickup` can finish
+    /// an advancement whose reward function runs at once. One that kills
+    /// items moves the rest down the list, or takes the chosen item itself:
+    /// the split takes one from that item wherever it went, no other stack
+    /// loses any, and nothing is split once it is gone.
+    #[test]
+    fn the_split_follows_the_item_a_reward_function_moved_or_removed() {
+        let at = horizon_core::geometry::Vec3::ZERO;
+        let mut dropped: JoinList<ItemEntity> = JoinList::default();
+        for (id, item, count) in [
+            (5, "minecraft:tnt", 2),
+            (6, "minecraft:tnt", 1),
+            (7, "minecraft:sand", 3),
+        ] {
+            dropped.push(ItemEntity::new(
+                id,
+                ItemStack::new(item, count),
+                at,
+                at,
+                0.0,
+            ));
+        }
+        let counts = |dropped: &JoinList<ItemEntity>| {
+            dropped
+                .iter()
+                .map(|e| (e.id, e.stack.count))
+                .collect::<Vec<_>>()
+        };
+        // The function killed item 5: the cube's choice, item 7, went from
+        // third to second, and only it loses one.
+        dropped.remove(0);
+        assert_eq!(split_one(&mut dropped, 7), Some((1, false)));
+        assert_eq!(counts(&dropped), [(6, 1), (7, 2)]);
+        // Had the cube chosen item 5, nothing is split.
+        assert_eq!(split_one(&mut dropped, 5), None);
+        assert_eq!(counts(&dropped), [(6, 1), (7, 2)]);
+        // Splitting an item's last one empties it, for `remove_dropped`.
+        assert_eq!(split_one(&mut dropped, 6), Some((0, true)));
     }
 }
 
