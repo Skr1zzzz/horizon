@@ -5985,7 +5985,7 @@ mod tests {
             |p| p.additive = true,
         ];
         let mut random = LegacyRandom::new(3);
-        for i in 0..20 {
+        for i in 0..20usize {
             let at = [
                 i as f64 * 0.37 - 3.0,
                 0.5 * (i % 3) as f64,
@@ -5993,7 +5993,7 @@ mod tests {
             ];
             let mut particle =
                 Particle::moving(&mut random, ParticleType::Smoke, at, [0.01, 0.02, -0.03]);
-            let sprite = if i % 2 == 0 {
+            let sprite = if i.is_multiple_of(2) {
                 "test:opaque"
             } else {
                 "test:glass"

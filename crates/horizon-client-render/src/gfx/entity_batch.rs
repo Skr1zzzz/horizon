@@ -1104,7 +1104,7 @@ mod tests {
                 // What the engine would have pushed there, in its order.
                 let mut pushed = Vec::new();
                 for i in 0..next() % 12 {
-                    let overlay = if next() % 3 == 0 {
+                    let overlay = if next().is_multiple_of(3) {
                         TRANSLUCENT_PARTICLE_OVERLAY
                     } else {
                         0
