@@ -5109,12 +5109,19 @@ impl Renderer {
     /// Room in the indirect buffer for the arguments of `draws` draws, grown to the next power
     /// of two: `false` where video memory had none (#13624, warned of once as `kind`), the
     /// buffer left as it was.
-    fn grow_indirect(&mut self, draws: usize, kind: frame_targets::Kind) -> bool {
-        if draws as u64 <= self.indirect_capacity {
+    /// Takes the fields it changes rather than `self`, so a frame can grow the buffer while it
+    /// still holds other fields of the renderer.
+    fn grow_indirect(
+        device: &wgpu::Device,
+        indirect: &mut wgpu::Buffer,
+        indirect_capacity: &mut u64,
+        draws: usize,
+        kind: frame_targets::Kind,
+    ) -> bool {
+        if draws as u64 <= *indirect_capacity {
             return true;
         }
         let capacity = (draws as u64).next_power_of_two();
-        let device = &self.device;
         let made = frame_targets::made(device, kind, || {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Section draws"),
@@ -5126,8 +5133,8 @@ impl Renderer {
         let Some(buffer) = made else {
             return false;
         };
-        self.indirect_capacity = capacity;
-        self.indirect = buffer;
+        *indirect_capacity = capacity;
+        *indirect = buffer;
         true
     }
 
@@ -9954,7 +9961,13 @@ impl Renderer {
             // Their arguments need room in the indirect buffer before the flat list leaves them
             // out: where video memory has none for a larger one (#13624), the flat list keeps
             // them this frame rather than the frame being given up.
-            && self.grow_indirect(shadow_solid_draws.end, frame_targets::Kind::ShadowDraws);
+            && Self::grow_indirect(
+                &self.device,
+                &mut self.indirect,
+                &mut self.indirect_capacity,
+                shadow_solid_draws.end,
+                frame_targets::Kind::ShadowDraws,
+            );
         let flat_frame = match &mut self.flat {
             Some(flat)
                 if self.flat_on
@@ -10078,7 +10091,13 @@ impl Renderer {
             indirect_upload(&mut self.draws, flat_frame, shadow, self.multi_draw)
         {
             // A flat frame's shadow draws found their room before the flat list left them out.
-            if !self.grow_indirect(range.end, frame_targets::Kind::Buffers) {
+            if !Self::grow_indirect(
+                &self.device,
+                &mut self.indirect,
+                &mut self.indirect_capacity,
+                range.end,
+                frame_targets::Kind::Buffers,
+            ) {
                 return self.abandon_frame(frame_targets::Abandoned::grown(
                     encoder,
                     copies,
