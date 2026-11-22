@@ -485,10 +485,11 @@ fn packed_wanted() -> bool {
     std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
 }
 
-/// naga leaves a loop it proves finite without the bound wgpu forces on every loop
-/// (`naga::back::bounded_loop`, THIRD_PARTY_NOTICES.md), so the driver's compiler sees its trip
-/// count. `HORIZON_SHADER_LOOP_PROOFS=0` bounds every loop of every shader again, for A/B checks:
-/// read once, before the renderer makes its first pipeline.
+/// On Vulkan, naga's SPIR-V writer leaves a loop it proves finite without the bound wgpu forces
+/// on every loop (`naga::back::bounded_loop`, THIRD_PARTY_NOTICES.md), so the driver's compiler
+/// sees its trip count; its HLSL and MSL writers still bound them all.
+/// `HORIZON_SHADER_LOOP_PROOFS=0` bounds every loop of every shader again, for A/B checks: read
+/// once, before the renderer makes its first pipeline.
 fn shader_loop_proofs() {
     static READ: std::sync::Once = std::sync::Once::new();
     READ.call_once(|| {

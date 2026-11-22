@@ -34,6 +34,11 @@ pub fn set_enabled(enabled: bool) {
 /// variable that is set from itself.
 const DEPTH: u32 = 4;
 
+/// How deep [`Counted::bounds`] follows the `!`, `&&` and `||` of a loop's test. An operand may
+/// be used by several of them, so a test made of ever the same operand would be walked 2^depth
+/// times: no test anyone writes nests this deep.
+const NESTING: u32 = 16;
+
 /// Whether the loop of `function` with this `body` and `continuing` block counts its way out,
 /// whatever its variables hold:
 ///
@@ -77,7 +82,7 @@ pub fn is_finite(module: &Module, function: &Function, body: &Block, continuing:
             } else {
                 None
             };
-            if holds.is_some_and(|holds| cx.bounds(at, condition, holds)) {
+            if holds.is_some_and(|holds| cx.bounds(at, condition, holds, 0)) {
                 return true;
             }
         }
@@ -221,25 +226,32 @@ struct Counted<'a> {
 
 impl Counted<'_> {
     /// Whether `expr`, which is `holds` in every iteration that goes on past the body's
-    /// statement `at`, keeps a counter of the loop from running forever.
-    fn bounds(&self, at: usize, expr: Handle<Expression>, holds: bool) -> bool {
+    /// statement `at`, keeps a counter of the loop from running forever. `depth` is how many
+    /// `!`, `&&` and `||` it lies under in that statement's test ([`NESTING`]).
+    fn bounds(&self, at: usize, expr: Handle<Expression>, holds: bool, depth: u32) -> bool {
         use BinaryOperator as Op;
+        if depth > NESTING {
+            return false;
+        }
+        let under = depth + 1;
         match self.function.expressions[expr] {
             Expression::Unary {
                 op: UnaryOperator::LogicalNot,
                 expr,
-            } => self.bounds(at, expr, !holds),
+            } => self.bounds(at, expr, !holds, under),
             // Each operand of a true `&&` is true, and each operand of a false `||` is false.
             Expression::Binary {
                 op: Op::LogicalAnd,
                 left,
                 right,
-            } if holds => self.bounds(at, left, true) || self.bounds(at, right, true),
+            } if holds => self.bounds(at, left, true, under) || self.bounds(at, right, true, under),
             Expression::Binary {
                 op: Op::LogicalOr,
                 left,
                 right,
-            } if !holds => self.bounds(at, left, false) || self.bounds(at, right, false),
+            } if !holds => {
+                self.bounds(at, left, false, under) || self.bounds(at, right, false, under)
+            }
             Expression::Binary { op, left, right } => {
                 // Whether `left` is below `right` (else above it), and never equal to it.
                 let (below, strict) = match op {
