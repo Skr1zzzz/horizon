@@ -485,6 +485,22 @@ fn packed_wanted() -> bool {
     std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
 }
 
+/// naga leaves a loop it proves finite without the bound wgpu forces on every loop
+/// (`naga::back::bounded_loop`, THIRD_PARTY_NOTICES.md), so the driver's compiler sees its trip
+/// count. `HORIZON_SHADER_LOOP_PROOFS=0` bounds every loop of every shader again, for A/B checks:
+/// read once, before the renderer makes its first pipeline.
+fn shader_loop_proofs() {
+    static READ: std::sync::Once = std::sync::Once::new();
+    READ.call_once(|| {
+        if std::env::var("HORIZON_SHADER_LOOP_PROOFS").as_deref() == Ok("0") {
+            naga::back::bounded_loop::set_enabled(false);
+            log::info!(
+                "Horizon renderer: HORIZON_SHADER_LOOP_PROOFS=0: every shader loop keeps wgpu's bound"
+            );
+        }
+    });
+}
+
 pub(crate) mod animate;
 mod arena;
 pub mod capture;
@@ -2524,6 +2540,7 @@ impl Renderer {
         request: output::FrameRequest,
         display: output::DisplayReading,
     ) -> Result<Self> {
+        shader_loop_proofs();
         let Opened {
             instance,
             surface,
