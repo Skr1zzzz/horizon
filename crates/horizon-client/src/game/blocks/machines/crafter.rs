@@ -46,6 +46,21 @@ fn crafter_witnesses(
         .map(|p| p.uuid)
         .collect()
 }
+/// The connections of the `guests` that `near` names, each to take the
+/// trigger in their own turn; a dead one is left out. A guest whose client is
+/// still loading (placed, no `PlayerLoaded` yet) counts: `getEntitiesOfClass`
+/// finds every `ServerPlayer` in the level, where `for_each_player` waits for
+/// that packet.
+fn witness_turns<'g>(
+    near: &[u128],
+    guests: impl IntoIterator<Item = &'g horizon_client::lan::guest::Guest>,
+) -> Vec<u32> {
+    guests
+        .into_iter()
+        .filter(|g| !g.dead && near.contains(&g.uuid))
+        .map(|g| g.conn)
+        .collect()
+}
 /// Whether an advancement condition's `recipes` entry names the recipe.
 fn recipe_matches(condition: &Value, id: &str) -> bool {
     match condition {
@@ -223,12 +238,14 @@ impl Game<'_> {
         let near = crafter_witnesses(pos, self.level_players_iter());
         if !near.is_empty() {
             let id = horizon_client::crafting::qualified(recipe);
-            self.for_each_player(|g| {
-                let me = horizon_client::lan::playerdata::ints_uuid(g.acting_uuid());
-                if near.contains(&me) {
-                    g.trigger_crafter_recipe_crafted(&id);
-                }
-            });
+            let me = horizon_client::lan::playerdata::ints_uuid(self.acting_uuid());
+            if self.player.is_some() && !self.lan_acting_fake && near.contains(&me) {
+                self.trigger_crafter_recipe_crafted(&id);
+            }
+            let guests = self.lan.iter().flat_map(|h| h.hub.guests.iter());
+            for conn in witness_turns(&near, guests) {
+                self.as_guest(conn, |g| g.trigger_crafter_recipe_crafted(&id));
+            }
         }
         self.dispenser_event(1049, pos, 0);
         self.dispenser_event(2010, pos, facing as i32);
@@ -550,6 +567,21 @@ mod tests {
             served(3, -8.5, false),
         ];
         assert_eq!(crafter_witnesses(pos, players), vec![3]);
+    }
+    /// A served player whose client is still loading (placed, no
+    /// `PlayerLoaded` yet) is in the level all the same: `getEntitiesOfClass`
+    /// finds it, so the trigger reaches it in its own turn as it does a loaded
+    /// one, or a craft in that window passes it by. A guest the box missed is
+    /// not reached.
+    #[test]
+    fn a_crafter_reaches_a_served_player_whose_client_is_still_loading() {
+        use crate::game::native_player_death::tests::new_guest;
+        let mut playing = new_guest(1, 11);
+        (playing.loaded, playing.loading) = (true, false);
+        let mut loading = new_guest(2, 12);
+        (loading.loaded, loading.loading) = (false, true);
+        let guests = [playing, loading, new_guest(3, 13)];
+        assert_eq!(witness_turns(&[11, 12], &guests), vec![1, 2]);
     }
     /// `CrafterBlock.dispenseItem` ejects into the container entity in front of
     /// it (`HopperBlockEntity.getContainerAt`'s `getEntityContainer`), not
