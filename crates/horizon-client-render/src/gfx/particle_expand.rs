@@ -11,8 +11,9 @@
 //!
 //! Where compute shaders run, [`ParticleExpand`] writes those vertices on the GPU: the batch
 //! leaves their room, the frame's upload skips it, and `particle_expand.wgsl` fills it from the
-//! records, 64 bytes a quad uploaded instead of 176. Otherwise the batch writes them, one copy
-//! of each quad instead of two.
+//! records, 64 bytes a quad uploaded instead of 176. Otherwise, and in a frame whose buffers are
+//! past what the device binds ([`binds`]), the batch writes them, one copy of each quad instead
+//! of two.
 
 use super::entity_batch::{OIT_ENTITY, ORDINARY, TRANSLUCENT_PARTICLES, material};
 use super::upload::Uploads;
@@ -24,6 +25,8 @@ const ROW: u32 = 32_768;
 /// The words before the records: each layer's records, each layer's first vertex, a zero the
 /// shader cannot fold away (`keep`), 3 spare.
 const HEAD_WORDS: usize = 8;
+/// The storage buffers the pass binds: the records and the entity vertices.
+const STORAGE_BUFFERS: u32 = 2;
 
 /// `HORIZON_PARTICLES_GPU=1`: a frame's particle quads come to the renderer as records where they
 /// may (`Renderer::expands_particles`). Off by default, for A/B runs against the vertices.
@@ -35,6 +38,27 @@ pub(super) fn wanted() -> bool {
             Ok("1" | "on" | "true")
         )
     })
+}
+
+/// The records buffer's size for `quads` records: the head and the records, at least 256 bytes,
+/// grown to the next power of two.
+fn records_bytes(quads: usize) -> u64 {
+    let quad = std::mem::size_of::<ParticleQuad>() as u64;
+    ((HEAD_WORDS * 4) as u64 + quads as u64 * quad)
+        .max(256)
+        .next_power_of_two()
+}
+
+/// Whether the pass may write `quads` records into an entity buffer of `entity_bytes`. It binds
+/// that whole buffer and the records buffer as storage, and a binding past the device's limits
+/// is a validation error, which panics in a frame. Where it would be, the batch writes the
+/// vertices that frame.
+pub(super) fn binds(limits: &wgpu::Limits, entity_bytes: u64, quads: usize) -> bool {
+    let records = records_bytes(quads);
+    limits.max_storage_buffers_per_shader_stage >= STORAGE_BUFFERS
+        && entity_bytes <= limits.max_storage_buffer_binding_size
+        && records <= limits.max_storage_buffer_binding_size
+        && records <= limits.max_buffer_size
 }
 
 /// One camera-facing particle quad (`QuadParticleRenderState.renderRotatedQuad`): its corners are
@@ -180,7 +204,7 @@ impl ParticleExpand {
     }
 
     fn compile(device: &wgpu::Device) -> Option<Self> {
-        if device.limits().max_storage_buffers_per_shader_stage < 2 {
+        if device.limits().max_storage_buffers_per_shader_stage < STORAGE_BUFFERS {
             return None;
         }
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -213,7 +237,8 @@ impl ParticleExpand {
 
     /// Records the frame's expansion: `quads`' opaque records write their vertices into `out`
     /// from vertex `rooms[0]` on, the translucent ones from `rooms[1]` on. Call after the entity
-    /// stream's upload, which leaves those rooms out.
+    /// stream's upload, which leaves those rooms out, and only where [`binds`] says the device
+    /// binds both buffers.
     pub(super) fn dispatch(
         &mut self,
         device: &wgpu::Device,
@@ -229,9 +254,7 @@ impl ParticleExpand {
         }
         let quad = std::mem::size_of::<ParticleQuad>() as u64;
         let head = (HEAD_WORDS * 4) as u64;
-        let bytes = (head + u64::from(count) * quad)
-            .max(256)
-            .next_power_of_two();
+        let bytes = records_bytes(quads.len());
         if self.records.as_ref().is_none_or(|b| b.size() < bytes) {
             self.records = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Particle quads"),
@@ -351,6 +374,38 @@ mod tests {
         let mut ordinary = [4, 20, 20, 28, 4];
         quads.shift_cuts(cuts.into_iter(), &mut ordinary);
         assert_eq!(ordinary, [4, 20, 32, 40, 4]);
+    }
+
+    /// The pass runs only where the device binds the whole entity buffer and the records as
+    /// storage: neither past the binding limit, the records within the largest buffer, two
+    /// storage buffers a stage. Otherwise the batch writes the vertices that frame.
+    #[test]
+    fn the_pass_runs_only_where_the_device_binds_both_buffers() {
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: 1 << 20,
+            max_buffer_size: 1 << 22,
+            max_storage_buffers_per_shader_stage: 2,
+            ..Default::default()
+        };
+        // 32 bytes of head and 64 a record, grown to a power of two: 16,383 records fit in
+        // 1 MiB, one more needs 2 MiB.
+        assert!(binds(&limits, 1 << 20, 16_383));
+        assert!(!binds(&limits, 1 << 20, 16_384));
+        // An entity buffer a word past the binding limit, with a single record.
+        assert!(!binds(&limits, (1 << 20) + 4, 1));
+        // Records past the largest buffer, though within the binding limit.
+        let small = wgpu::Limits {
+            max_buffer_size: 1 << 19,
+            ..limits
+        };
+        assert!(binds(&small, 1 << 19, 8_191));
+        assert!(!binds(&small, 1 << 19, 8_192));
+        // One storage buffer a stage.
+        let one = wgpu::Limits {
+            max_storage_buffers_per_shader_stage: 1,
+            ..limits
+        };
+        assert!(!binds(&one, 1 << 10, 1));
     }
 
     #[test]

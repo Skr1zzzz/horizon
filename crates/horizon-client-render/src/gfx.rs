@@ -9445,14 +9445,13 @@ impl Renderer {
                 frame.camera,
             );
         }
-        let all_entities = &self.entity_batch.combined;
         let hand_quads = (frame.hand.len() / 4) as u32;
         let additive_quads = (frame.additive.len() / 4) as u32 - self.entity_batch.moved_additive;
         let see_through_quads = (frame.see_through.len() / 4) as u32;
         let shadow_only_quads = (frame.shadow_only.len() / 4) as u32;
         // Glowing entities' silhouettes posed on the GPU go last, past every
         // material (the outline pass draws them from there).
-        let outline_base = posed + all_entities.len() as u32;
+        let outline_base = posed + self.entity_batch.combined.len() as u32;
         let outlined = skin.map_or(0, |s| s.outline_vertices);
         let entity_vertices = u64::from(outline_base) + u64::from(outlined);
         if entity_vertices > self.entity_capacity {
@@ -9472,6 +9471,20 @@ impl Renderer {
             self.entity_capacity = capacity;
             self.entity_buffer = buffer;
         }
+        // The pass binds the whole entity buffer and its records as storage. Past the device's
+        // limits that is a validation error, so the batch writes the room this frame instead.
+        let particles_on_gpu = if particles_on_gpu
+            && !particle_expand::binds(
+                &self.device.limits(),
+                self.entity_buffer.size(),
+                self.particle_quads.len(),
+            ) {
+            self.entity_batch.expand_particle_room(&self.particle_quads);
+            false
+        } else {
+            particles_on_gpu
+        };
+        let all_entities = &self.entity_batch.combined;
         if !all_entities.is_empty() {
             // The particles' room is left out: the GPU writes it (below).
             let rooms = match particles_on_gpu {

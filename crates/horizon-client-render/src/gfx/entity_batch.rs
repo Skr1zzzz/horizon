@@ -428,6 +428,21 @@ impl EntityBatch {
         counts.map(|count| count as u32)
     }
 
+    /// Writes `quads`' vertices into the room the last `update` left for the GPU
+    /// (`ParticleRoom::expand` off), for a frame whose pass cannot bind its buffers
+    /// (`particle_expand::binds`).
+    pub(super) fn expand_particle_room(&mut self, quads: &ParticleQuads) {
+        for (list, (first, vertices)) in [&quads.opaque, &quads.translucent]
+            .into_iter()
+            .zip(self.particle_room)
+        {
+            let room = &mut self.combined[first as usize..(first + vertices) as usize];
+            for (corners, quad) in room.as_chunks_mut::<4>().0.iter_mut().zip(list) {
+                *corners = quad.vertices();
+            }
+        }
+    }
+
     /// Writes into each ordinary or improved transparency quad's layer the kind of the run of
     /// `kinds` it is in, and that it is in the ray scene's entity layer (`RAY_ENTITY_QUAD`), and
     /// forgets the runs: they are one frame's. The other materials' quads take none, in a run
@@ -1061,7 +1076,8 @@ mod tests {
 
     /// The particle quads a frame hands over as records land in `combined` where the vertices
     /// the engine would have pushed at the cut land, written by the batch or left as zeros the
-    /// GPU writes, among every other material, with improved transparency on and off.
+    /// GPU writes (or the batch afterwards, where the pass cannot bind its buffers), among every
+    /// other material, with improved transparency on and off.
     #[test]
     fn handed_over_particle_quads_land_where_their_vertices_would() {
         use crate::gfx::ParticleQuad;
@@ -1161,6 +1177,17 @@ mod tests {
                         bytemuck::cast_slice::<_, u8>(&cpu.combined),
                         "oit {oit}, expand {expand}"
                     );
+                    if !expand {
+                        // A frame whose pass cannot bind its buffers: the batch fills the room.
+                        let mut filled = EntityBatch::default();
+                        filled.update_with_particles(&stream, &[], &[], &[], oit, Some(room));
+                        filled.expand_particle_room(&quads);
+                        assert_eq!(
+                            bytemuck::cast_slice::<_, u8>(&filled.combined),
+                            bytemuck::cast_slice::<_, u8>(&cpu.combined),
+                            "oit {oit}, filled by the batch"
+                        );
+                    }
                 }
             }
         }
