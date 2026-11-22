@@ -491,8 +491,9 @@ fn combine(
     out.lines.truncate(out.code.split('\n').count());
     // A strip of n vertices is n - 2 triangles: at most `max_vertices - 2`, whichever of the
     // stage's paths runs, and no more than its loops when each draws one strip of three
-    // (`emission_loops`). An instance past the triangles the stage emits would draw nothing
-    // and write nothing (`hz_primary` is in the first one), yet run the whole stage.
+    // (`emission_loops`). An instance past the triangles the stage emits would draw nothing and
+    // skip the image and atomic writes (`hz_primary` is in the first one); its other stores
+    // repeat the first instance's. Yet it runs the whole stage.
     let strip = max_vertices.saturating_sub(2);
     let triangles = emission_loops(&gs_tokens)
         .map_or(strip, |loops| loops.min(strip))
@@ -616,8 +617,8 @@ fn counter<'a>(header: &[&'a str]) -> Option<&'a str> {
     (counts && steps && super::scan::is_ident(v)).then_some(v)
 }
 
-/// Whether `body` may set variable `v`: an assignment, `++` or `--`, or `v` passed alone to a
-/// function, which may take it as an `out` parameter.
+/// Whether `body` may set variable `v`: an assignment, `++` or `--`, a swizzle of it (`v.x = 0`
+/// sets `v`), or `v` passed alone to a function, which may take it as an `out` parameter.
 fn sets(body: &[&str], v: &str) -> bool {
     let at = |i: Option<usize>| i.and_then(|i| body.get(i)).copied().unwrap_or("");
     (0..body.len()).any(|j| {
@@ -630,6 +631,7 @@ fn sets(body: &[&str], v: &str) -> bool {
                 || (matches!(n1, "<" | ">") && n2 == n1 && n3 == "=")
                 || (matches!(n1, "+" | "-") && n2 == n1)
                 || (matches!(p1, "+" | "-") && p2 == p1)
+                || n1 == "."
                 || (matches!(p1, "(" | ",") && matches!(n1, ")" | ",")))
     })
 }
@@ -888,6 +890,11 @@ mod tests {
             // The counter set again, or passed to a function that may set it.
             "void main() { for (int i = 0; i < 3; i++) { EmitVertex(); if (c) i = 0; } }".into(),
             "void main() { for (int i = 0; i < 3; i++) { step(i); EmitVertex(); } }".into(),
+            "void main() { for (int i = 0; i < 3; i++) { EmitVertex(); if (c) i--; } }".into(),
+            "void main() { for (int i = 0; i < 3; i++) { EmitVertex(); if (c) i.x = -1; } }".into(),
+            // A strip not ended before the next one, and one in a loop of another kind.
+            format!("void main() {{ if (c) {{ {strip} }} {strip} EndPrimitive(); }}"),
+            format!("void main() {{ do {{ {strip} EndPrimitive(); }} while (++n < 2); }}"),
             "void main() { int i = 0; while (i < 3) { EmitVertex(); i++; } }".into(),
             // Emitted by a function of the stage's own.
             "void emit() { EmitVertex(); }\nvoid main() { for (int i = 0; i < 3; i++) emit(); }"
