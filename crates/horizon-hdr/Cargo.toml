@@ -8,6 +8,8 @@ description = "HDR metadata for the swapchain: the Vulkan calls the crates that 
 
 [dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
+# Logs what HORIZON_SHADER_PACK_UNCHECKED takes off pack programs.
+log = "0.4"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # The version wgpu-hal already uses.

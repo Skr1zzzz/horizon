@@ -59,7 +59,9 @@ it on Options > Video Settings > Shaders > Shader Packs..., which lists Horizon'
 name>` runs a pack whatever the page says, for development. `HORIZON_SHADER_PACK_UNCHECKED=bounds,loops,div` (or
 `all`) compiles a `shaders/` pack's programs without those of wgpu's runtime checks (its clamp on every index, its
 bound on every loop, its guard on integer division), to measure what they cost: it is off by default, as a pack's
-out-of-bounds index or endless loop then becomes undefined behaviour. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
+out-of-bounds index or endless loop then becomes undefined behaviour. Vulkan and Metal drop all three, DX12 keeps its
+guard on integer division and OpenGL keeps every check; the log names the ones dropped when the first program
+compiles. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
 own tint, directional shade, ambient occlusion and face beside its vertices while one of Horizon's packs
 runs, as a pack whose material or vertex stage reads `tint`, `shade`, `ao` or `face` does, for the engine's
 own tests: they take a third again the terrain's memory, and the world loads again when such a pack starts or stops. The game checks the pack first, and refuses one that

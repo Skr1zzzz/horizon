@@ -1078,68 +1078,17 @@ fn checked<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> Result<T, St
     }
 }
 
-/// The runtime checks `HORIZON_SHADER_PACK_UNCHECKED` (`value`) takes off a pack's programs, to
-/// measure what they cost: comma-separated `bounds` (wgpu's clamp on every index), `loops` (its
-/// bound on every loop), `div` (its guard on integer division), or `all` (or `1`) for the three.
-/// `None` keeps wgpu's checks: unset, empty, `0` or words it doesn't know. Off by default, as a
-/// pack's out-of-bounds index or endless loop is then undefined behaviour.
-fn runtime_checks(value: Option<&str>) -> Option<wgpu::ShaderRuntimeChecks> {
-    let (mut bounds, mut loops, mut div) = (true, true, true);
-    for word in value.unwrap_or_default().split(',') {
-        match word.trim() {
-            "1" | "all" => (bounds, loops, div) = (false, false, false),
-            "bounds" => bounds = false,
-            "loops" => loops = false,
-            "div" => div = false,
-            _ => {}
-        }
-    }
-    if bounds && loops && div {
-        return None;
-    }
-    Some(wgpu::ShaderRuntimeChecks {
-        bounds_checks: bounds,
-        force_loop_bounding: loops,
-        int_div_checks: div,
-        ..wgpu::ShaderRuntimeChecks::checked()
-    })
-}
-
-/// [`runtime_checks`] of the environment, read and logged once.
-fn pack_runtime_checks() -> Option<wgpu::ShaderRuntimeChecks> {
-    static CHECKS: std::sync::OnceLock<Option<wgpu::ShaderRuntimeChecks>> =
-        std::sync::OnceLock::new();
-    *CHECKS.get_or_init(|| {
-        let checks = runtime_checks(
-            std::env::var("HORIZON_SHADER_PACK_UNCHECKED")
-                .ok()
-                .as_deref(),
-        );
-        if let Some(c) = checks {
-            let on = |checked: bool| if checked { "on" } else { "off" };
-            log::info!(
-                "shader pack: HORIZON_SHADER_PACK_UNCHECKED: the pack's programs compile with \
-                 wgpu's bounds checks {}, loop bounding {}, integer division checks {}",
-                on(c.bounds_checks),
-                on(c.force_loop_bounding),
-                on(c.int_div_checks)
-            );
-        }
-        checks
-    })
-}
-
 /// The shader module of a pack's program, named `label`: without the runtime checks
-/// [`pack_runtime_checks`] takes off, else as any other module.
+/// `HORIZON_SHADER_PACK_UNCHECKED` takes off (`horizon-hdr`, as this crate forbids unsafe code),
+/// else as any other module.
 fn pack_module(device: &wgpu::Device, label: &str, module: naga::Module) -> wgpu::ShaderModule {
-    let desc = wgpu::ShaderModuleDescriptor {
-        label: Some(label),
-        source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
-    };
-    match pack_runtime_checks() {
-        Some(checks) => horizon_hdr::create_shader_module_trusted(device, desc, checks),
-        None => device.create_shader_module(desc),
-    }
+    horizon_hdr::pack_program_module(
+        device,
+        wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
+        },
+    )
 }
 
 /// A full-screen helper pipeline of ours (`pack_post.wgsl`).
@@ -6617,35 +6566,6 @@ mod tests {
         let g = |name| texture_format(Format::parse(name).unwrap(), all);
         assert_eq!(g("RGBA16"), T::Rgba16Unorm);
         assert_eq!(g("R11F_G11F_B10F"), T::Rg11b10Ufloat);
-    }
-
-    /// `HORIZON_SHADER_PACK_UNCHECKED` takes off the checks it names and keeps the others (ray
-    /// query tracking too, under `all`); unset, `0` or a word it doesn't know keeps them all.
-    #[test]
-    fn unchecked_switch_takes_off_only_the_checks_it_names() {
-        // Whether bounds, loops and integer division stay checked, and ray queries tracked.
-        let kept = |value| {
-            runtime_checks(value).map(|c| {
-                (
-                    c.bounds_checks,
-                    c.force_loop_bounding,
-                    c.int_div_checks,
-                    c.ray_query_initialization_tracking,
-                )
-            })
-        };
-        for value in [None, Some(""), Some("0"), Some("fast")] {
-            assert_eq!(kept(value), None, "{value:?}");
-        }
-        assert_eq!(kept(Some("bounds")), Some((false, true, true, true)));
-        assert_eq!(kept(Some("loops")), Some((true, false, true, true)));
-        assert_eq!(kept(Some("div")), Some((true, true, false, true)));
-        assert_eq!(
-            kept(Some("bounds, loops")),
-            Some((false, false, true, true))
-        );
-        assert_eq!(kept(Some("all")), Some((false, false, false, true)));
-        assert_eq!(kept(Some("1")), Some((false, false, false, true)));
     }
 
     #[test]

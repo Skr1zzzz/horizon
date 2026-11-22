@@ -6,6 +6,9 @@
 #[cfg(target_os = "linux")]
 pub mod wayland;
 
+mod pack_checks;
+pub use pack_checks::pack_program_module;
+
 /// Opens a Vulkan device with `VK_EXT_hdr_metadata` too, when the GPU offers
 /// it, so [`set_metadata`] can tell the compositor the real peak brightness.
 /// `None` leaves opening to wgpu.
@@ -54,24 +57,6 @@ pub fn experimental_features() -> wgpu::ExperimentalFeatures {
     // Safety: wgpu warns that its experimental features may have bugs that reach undefined
     // behaviour through safe calls. Horizon accepts that only on explicit request.
     unsafe { wgpu::ExperimentalFeatures::enabled() }
-}
-
-/// A shader module compiled with only the runtime checks `checks` keeps, which the crates that
-/// forbid unsafe code can't ask for: a shader pack's programs under
-/// `HORIZON_SHADER_PACK_UNCHECKED` (`gfx/pack_post.rs`), a measurement switch, off by default.
-pub fn create_shader_module_trusted(
-    device: &wgpu::Device,
-    desc: wgpu::ShaderModuleDescriptor<'_>,
-    checks: wgpu::ShaderRuntimeChecks,
-) -> wgpu::ShaderModule {
-    // SAFETY: wgpu leaves it to the caller that the shader never indexes out of bounds, never
-    // loops forever and never divides an integer by zero (or `MIN` by -1) once `checks` drops the
-    // guard against it. A shader pack's program is someone else's code that nobody checked for
-    // that, so such an access becomes undefined behaviour (a wrong picture, a driver crash, a lost
-    // device): that is why only an explicit opt-in asks for it. Vulkan's robust buffer and image
-    // access, which wgpu turns on where the GPU has them, still bound buffer and image accesses;
-    // indices into a shader's own arrays and its loops have no such net.
-    unsafe { device.create_shader_module_trusted(desc, checks) }
 }
 
 /// Tells the compositor, through `VK_EXT_hdr_metadata`, that the swapchain's
