@@ -344,9 +344,12 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
     // first: a server's villagers and dropped items each run into the
     // hundreds or thousands.
     let mut near_items = ItemAreas::default();
-    for i in 0..l.mobs().len() {
+    for mut i in 0..l.mobs().len() {
         let p = l.parts();
-        let m = &p.mobs[i];
+        // A pickup's reward function (below) may have removed mobs.
+        let Some(m) = p.mobs.get(i) else {
+            break;
+        };
         if m.species() != Species::Villager
             || !m.can_pick_up_loot()
             || !m.alive()
@@ -392,11 +395,31 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
             }
             let before = l.dropped()[j].clone();
             // `InventoryCarrier.pickUpItem`'s `onItemPickup` comes before the
-            // stack goes in: the advancement of whoever threw it.
+            // stack goes in: the advancement of whoever threw it. Its reward
+            // function may move or remove mobs and items, so the villager and
+            // the item are found again by id; a villager gone from the level
+            // takes nothing more.
             l.on_item_pickup(i, &before);
+            if l.mobs().get(i).is_none_or(|m| m.id != id) {
+                let Some(at) = l.villager_index(id) else {
+                    break;
+                };
+                i = at;
+            }
             let rest = villager::ext_mut(&mut l.parts().mobs[i]).add_item(stack, max);
+            if l.dropped().get(j).is_none_or(|e| e.id != before.id) {
+                // The list changed under the walk: its cells are built again,
+                // and it goes on from the item, or from the start when the
+                // item is gone (`take` and `discard` pass over a removed one).
+                let next_entity = l.parts().next_entity;
+                scan = near_items.scan(l.dropped(), next_entity, reach);
+                let Some(k) = l.dropped().iter().position(|e| e.id == before.id) else {
+                    j = 0;
+                    continue;
+                };
+                j = k;
+            }
             if rest.as_ref().is_none_or(|r| r.count < before.stack.count) {
-                let id = l.mobs()[i].id;
                 l.take(id, before);
             }
             match rest {
@@ -526,6 +549,9 @@ pub fn kick_villager_out_of_bed<L: VillagerLevel + ?Sized>(l: &mut L, head: [i32
     l.wake_villager(id);
     true
 }
+
+#[cfg(test)]
+mod pickup_tests;
 
 #[cfg(test)]
 mod tests {
