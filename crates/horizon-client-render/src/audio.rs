@@ -3988,34 +3988,40 @@ mod tests {
     }
 
     /// A source a client mod paused (`pause_source`) stays paused through the game's own pause
-    /// and resume. A sound of it that starts meanwhile starts paused and keeps its channel, one
-    /// still loading too, so the music manager keeps its track. A source carried on while the
-    /// game is paused waits for the game; carried on, each sound plays, a held one from its start.
+    /// and resume. A streamed, looping or tickable sound of it that starts meanwhile starts
+    /// paused and keeps its channel, one still loading too, so the music manager keeps its track.
+    /// A source carried on while the game is paused waits for the game; carried on, each sound
+    /// plays, a held one from its start.
     #[test]
     fn a_paused_source_stays_paused_through_the_games_pause_and_holds_new_sounds() {
         use crate::sound_engine::{BLOCKS, MUSIC};
         let mut audio = live_audio();
         audio.engine.registry.add_file(
             "minecraft",
-            br#"{"music.game": {"sounds": [{"name": "music/game/calm1"}]},
-                 "music.menu": {"sounds": [{"name": "music/menu/menu1"}]},
+            br#"{"music.game": {"sounds": [{"name": "music/game/calm1", "stream": true}]},
+                 "music.menu": {"sounds": [{"name": "music/menu/menu1", "stream": true}]},
                  "block.stone.break": {"sounds": ["dig/stone1"]}}"#,
             &|_, _| true,
         );
-        // Decoded already, so these start at once; the menu track's file is still loading.
-        for key in ["minecraft:music/game/calm1", "minecraft:dig/stone1"] {
-            audio.insert_cached_sound(key, vec![0.1; 4800], 48_000, 1);
-        }
+        // Decoded already, so it starts at once. The music is streamed, as vanilla's, and its
+        // files never load here: `arrive` stands in for a stream arriving.
+        audio.insert_cached_sound("minecraft:dig/stone1", vec![0.1; 4800], 48_000, 1);
         let state = |audio: &Audio, id: InstanceId| -> Option<State> {
             let channel = audio.engine.channel(id)?;
             let mixer = audio.backend.mixer.lock().unwrap();
             mixer.channels.get(&channel).map(|c| c.state)
+        };
+        let arrive = |audio: &Audio, id: InstanceId| {
+            let channel = audio.engine.channel(id).unwrap();
+            let samples = Some((Arc::new(vec![0.1; 4800]), 48_000, 1));
+            attach(&audio.backend.mixer, channel, samples, false);
         };
         let music = |audio: &mut Audio, event: &str| {
             let instance = SoundInstance::for_music(event, LegacyRandom::new(1));
             audio.play_instance(instance, true).0
         };
         let track = music(&mut audio, "minecraft:music.game");
+        arrive(&audio, track);
         let stone = mod_api::SoundPlay::at(
             "minecraft:block.stone.break",
             mod_api::SoundSource::Blocks,
@@ -4041,36 +4047,38 @@ mod tests {
         );
         assert_eq!(state(&audio, block), Some(State::Playing));
 
-        // Tracks started meanwhile start paused: a decoded one at once, a loading one when its
-        // sound arrives.
-        let next = music(&mut audio, "minecraft:music.game");
-        let arrives = music(&mut audio, "minecraft:music.menu");
+        // Tracks started meanwhile start paused, once their stream arrives.
+        let arrives = music(&mut audio, "minecraft:music.game");
         let late = music(&mut audio, "minecraft:music.menu");
-        assert_eq!(state(&audio, next), Some(State::Paused));
+        assert_eq!(state(&audio, arrives), Some(State::Held));
         assert_eq!(state(&audio, late), Some(State::Held));
-        let channel = audio.engine.channel(arrives).unwrap();
-        let samples = Some((Arc::new(vec![0.1; 4800]), 48_000, 1));
-        attach(&audio.backend.mixer, channel, samples, false);
+        arrive(&audio, arrives);
         assert_eq!(state(&audio, arrives), Some(State::Paused));
         // Their channels are kept: the music manager's track stays active and no other starts.
         let ctx = TickContext::default();
         for _ in 0..40 {
             audio.tick(false, &ctx);
         }
-        for id in [track, next, arrives, late] {
+        for id in [track, arrives, late] {
             assert!(audio.engine.is_active(id), "{id}");
         }
 
-        // Carried on while the game is paused, a source waits for the game's resume.
+        // A mod's sound is tickable, so one started on a paused source is held too: decoded
+        // already, it starts paused at once.
         audio.pause_source(BLOCKS, true);
+        let held = audio.play_mod_sound(&stone, 0);
+        assert_eq!(state(&audio, held), Some(State::Paused));
+        // Carried on while the game is paused, a source waits for the game's resume.
         audio.pause();
         audio.pause_source(BLOCKS, false);
         assert_eq!(state(&audio, block), Some(State::Paused));
         audio.resume();
-        assert_eq!(state(&audio, block), Some(State::Playing));
+        for id in [block, held] {
+            assert_eq!(state(&audio, id), Some(State::Playing), "{id}");
+        }
 
         audio.pause_source(MUSIC, false);
-        for id in [track, next, arrives] {
+        for id in [track, arrives] {
             assert_eq!(state(&audio, id), Some(State::Playing), "{id}");
         }
         assert_eq!(
@@ -4079,6 +4087,43 @@ mod tests {
             "it plays on arrival"
         );
         audio.stop_all();
+    }
+
+    /// While its source is paused, a sound that ends on its own (not streamed, looping or
+    /// tickable) doesn't start, as vanilla's `play` doesn't start one at no volume. Held, each
+    /// would keep its channel until the resume: rain on a paused weather source would take them
+    /// all, and no sound of any source could start.
+    #[test]
+    fn one_shots_of_a_paused_source_take_no_channels() {
+        use crate::sound_engine::{STATIC_CHANNELS, WEATHER};
+        let mut audio = live_audio();
+        audio.engine.registry.add_file(
+            "minecraft",
+            br#"{"weather.rain": {"sounds": ["ambient/weather/rain1"]}}"#,
+            &|_, _| true,
+        );
+        let rain = || {
+            SoundInstance::at(
+                "minecraft:weather.rain",
+                WEATHER,
+                1.0,
+                1.0,
+                LegacyRandom::new(1),
+                [0.0; 3],
+            )
+        };
+        audio.pause_source(WEATHER, true);
+        for _ in 0..=STATIC_CHANNELS {
+            assert_eq!(audio.play_instance(rain(), false).1, PlayResult::NotStarted);
+        }
+        assert_eq!(audio.engine.used_channels(), [0, 0]);
+        // Another source's sound still starts, and so does rain once its source carries on.
+        let random = LegacyRandom::new(1);
+        let click = SoundInstance::for_ui("minecraft:ui.button.click", 1.0, 0.25, random);
+        assert_eq!(audio.play_instance(click, false).1, PlayResult::Started);
+        audio.pause_source(WEATHER, false);
+        assert_eq!(audio.play_instance(rain(), false).1, PlayResult::Started);
+        assert_eq!(audio.engine.used_channels(), [2, 0]);
     }
 
     fn volume_of(audio: &Audio, id: InstanceId) -> Option<f32> {

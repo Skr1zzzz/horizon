@@ -112,8 +112,10 @@ that ticks the world. NeoForge has no counterpart; Java mods change `ClientLevel
 
 `ClientHost::sound_source_pause(source, paused)` pauses every sound of one `SoundSource` (`true`) or resumes them (`false`), for example to pause the game's music while a mod's own player runs:
 
-- The pause lasts until the mod resumes the source. The game's own pause and unpause, and a level change, leave a paused source paused.
-- A sound of a paused source that starts meanwhile starts paused. Paused music therefore keeps its track, and the music manager starts no other. On resume each sound plays on from where it was, and one that started while paused plays from its start.
+- The pause lasts until the source is resumed. The game's own pause and unpause, and a level change, leave a paused source paused.
+- The pause belongs to the client, not to the mod that asked for it. Every mod shares it and nothing counts the pauses: if two mods pause the music, the first one to resume it resumes it for both.
+- A sound of a paused source that starts meanwhile starts paused if it lasts: a streamed sound (music, records), a looping one, a tickable one such as a sound following an entity, or a mod's own `play_local_sound`. Paused music therefore keeps its track, and the music manager starts no other. On resume each sound plays on from where it was, and one that started while paused plays from its start.
+- Any other sound of a paused source, such as a block breaking or a raindrop, doesn't start at all, as vanilla skips a sound whose volume is zero. A paused sound keeps its channel until the resume, and channels are limited: held raindrops on a paused `SoundSource::Weather` would take them all within a minute, and then no sound of any source could start.
 - Only sounds played on that source are affected: `SoundSource::Master` pauses the sounds played on master, not every sound.
 - `SoundRef::state` reads a paused sound as `Playing`.
 

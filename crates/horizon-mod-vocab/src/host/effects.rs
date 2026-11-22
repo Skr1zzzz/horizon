@@ -38,14 +38,19 @@ pub trait EffectsClientHost {
     fn play_local_sound(&self, sound: &SoundPlay, after: u32) -> Option<SoundRef>;
     /// Side: client.
     /// Pauses every sound of `source` (`paused` true) or carries them on (false), as the pause
-    /// menu pauses the world's sounds (`SoundEngine.pauseAllExcept`) but for one source and for
-    /// as long as the mod asks: the game's own pause and resume, and a level change, leave a
-    /// paused source paused. A sound of it that starts meanwhile starts paused, so paused
-    /// `Music` keeps its track and the music manager starts no other; carried on, each plays from
-    /// where it was, one that started paused from its start. Only sounds played on that very
-    /// source: `Master` pauses the sounds played on master, not every sound. It takes `&self`, so
-    /// any client hook can ask: it applies at the next audio update (once a client tick), before
-    /// the `play_local_sound` plays asked with it. False on a server.
+    /// menu pauses the world's sounds (`SoundEngine.pauseAllExcept`) but for one source and until
+    /// it is carried on: the game's own pause and resume, and a level change, leave a paused
+    /// source paused. The pause is the client's, shared by every mod and not counted per mod:
+    /// any mod carrying the source on ends it, another mod's pause included. A sound of it that
+    /// starts meanwhile and lasts (a streamed or looping one, a tickable one such as a sound
+    /// following an entity, or a mod's own `play_local_sound`) starts paused and keeps its
+    /// channel, so paused `Music` keeps its track and the music manager starts no other; carried
+    /// on, each plays from where it was, one that started paused from its start. Any other sound
+    /// of it (a block breaking, a raindrop) doesn't start at all, so a long pause can't use up the
+    /// sound channels. Only sounds played on that very source: `Master` pauses the sounds played
+    /// on master, not every sound. It takes `&self`, so any client hook can ask: it applies at
+    /// the next audio update (once a client tick), before the `play_local_sound` plays asked
+    /// with it. False on a server.
     #[access(ClientSetup)]
     fn sound_source_pause(&self, source: SoundSource, paused: bool) -> bool;
     /// Side: client.

@@ -190,13 +190,14 @@ impl Game<'_> {
         }
     }
     /// For a client mod: from the next audio update, every sound of `source` pauses (`paused`)
-    /// or carries on, for as long as the mod asks: the game's own pause and resume leave a
-    /// paused source paused, and so does a level change. A sound of it that starts meanwhile
-    /// starts paused and keeps its channel, so paused music keeps its track and the music
-    /// manager starts no other (`MusicManager.tick` waits while its track `isActive`); carried
-    /// on, each plays from where it was, one that started paused from its start. Only the sounds
-    /// played on that very source: `Master` is the sounds played on master, not every sound.
-    /// False on a server.
+    /// or carries on. The pause is the client's, shared by every mod, so any mod's carry-on ends
+    /// it; the game's own pause and resume leave a paused source paused, and so does a level
+    /// change. A streamed, looping or tickable sound of it that starts meanwhile starts paused
+    /// and keeps its channel, so paused music keeps its track and the music manager starts no
+    /// other (`MusicManager.tick` waits while its track `isActive`); any other doesn't start, so
+    /// held sounds can't use up the channels. Carried on, each plays from where it was, one that
+    /// started paused from its start. Only the sounds played on that very source: `Master` is the
+    /// sounds played on master, not every sound. False on a server.
     pub(super) fn sound_source_pause(&self, source: SoundSource, paused: bool) -> bool {
         self.change_sound_source(source, SourceChange::Pause(paused))
     }

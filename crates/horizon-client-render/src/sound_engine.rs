@@ -1580,6 +1580,14 @@ impl SoundEngine {
             }
             silently = true;
         }
+        // Its source is paused (`pause_source`): a sound that ends on its own doesn't start, as
+        // one at no volume doesn't. Held, its channel would stay taken until the resume, and rain
+        // every few ticks would take them all. A stream, a loop or a tickable sound starts held
+        // below, keeping its channel: paused music keeps its track.
+        let lasting = sound.stream || instance.looping || instance.tickable();
+        if !lasting && self.source_paused(source) {
+            return PlayResult::NotStarted;
+        }
         let position = instance.position;
         let looping = instance.looping && instance.delay <= 0;
         let unmuffled = self.unmuffled.contains(&instance.identifier);
@@ -1926,14 +1934,16 @@ impl SoundEngine {
         self.paused_sources & source_bit(source) != 0
     }
     /// A client mod's `sound_source_pause`: every channel of `source` pauses (`paused`) or
-    /// carries on. Until the source carries on, a sound of it that starts starts paused and
-    /// keeps its channel, as one paused while playing does, so it stays `is_active`: the music
-    /// manager keeps a paused track as its current one and picks no other (`MusicManager.tick`).
-    /// Carrying on, each plays on from where it was, one that started paused from its start;
-    /// while the game's own pause (`pause_all_except`) holds the source they wait for the
-    /// game's `resume`, which in turn leaves a paused source paused. Only the sounds played on
-    /// that very source: `MASTER` is the sounds played on master, as in `stop_matching`. The
-    /// pause outlasts `stop_all` (a new level, a device change, a reload).
+    /// carries on. One pause per source for the whole client, whichever mod asks: a carry-on
+    /// ends it for all. Until the source carries on, a streamed, looping or tickable sound of it
+    /// that starts starts paused and keeps its channel, as one paused while playing does, so it
+    /// stays `is_active`: the music manager keeps a paused track as its current one and picks no
+    /// other (`MusicManager.tick`). Any other sound of it doesn't start (`play_inner`): held, its
+    /// channel would never end. Carrying on, each plays on from where it was, one that started
+    /// paused from its start; while the game's own pause (`pause_all_except`) holds the source
+    /// they wait for the game's `resume`, which in turn leaves a paused source paused. Only the
+    /// sounds played on that very source: `MASTER` is the sounds played on master, as in
+    /// `stop_matching`. The pause outlasts `stop_all` (a new level, a device change, a reload).
     pub fn pause_source(&mut self, source: usize, paused: bool, backend: &mut impl Backend) {
         let bit = source_bit(source);
         if paused {
