@@ -83,10 +83,12 @@ pub fn init(m: &mut Mob) {
         m.extra.anger_end = -1;
     }
 }
-/// `NeutralMob.stopBeingAngry`'s anger: no countdown, end time -1.
+/// `NeutralMob.stopBeingAngry`'s anger: no countdown, end time -1, and no
+/// anger target (`setPersistentAngerTarget(null)`).
 pub fn stop(m: &mut Mob) {
     m.extra.anger = 0;
     m.extra.anger_end = -1;
+    m.extra.angry_at = None;
 }
 /// One tick of a mob: a `NeutralMob`'s countdown resumes from its end time
 /// before, and the end time is settled after.
@@ -264,6 +266,20 @@ mod tests {
         assert!(angry_at_player(&m, true));
         // Calm: at no one.
         m.extra.anger = 0;
+        assert!(!angry_at_player(&m, true));
+    }
+    /// `NeutralMob.stopBeingAngry` also forgets the anger target
+    /// (`setPersistentAngerTarget(null)`). A zombified piglin whose anger at a
+    /// player stopped (they went into creative: `updatePersistentAnger`) is not
+    /// angry at them once they are back, so it no longer keeps them awake.
+    #[test]
+    fn stopped_anger_forgets_its_target() {
+        let mut m = neutral(Species::ZombifiedPiglin, "minecraft:zombified_piglin");
+        m.extra.anger = 400;
+        m.extra.angry_at = Some(Who::Player);
+        stop(&mut m);
+        assert_eq!(m.extra.angry_at, None);
+        assert!(!angry_at_player(&m, false));
         assert!(!angry_at_player(&m, true));
     }
     /// The constructors: a wolf's synched data starts at -1, the plain long
