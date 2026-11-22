@@ -2,6 +2,7 @@
 //! affect the client-side nameplate.
 use super::{Game, snapshot_value};
 use horizon_client::entities::nameplate::NameplateDistances;
+use horizon_client::mobs::Species;
 use horizon_protocol::packets::play;
 
 /// `Strider.SUFFOCATING_MODIFIER_ID`: the cold strider's slowdown, which the
@@ -10,8 +11,8 @@ use horizon_protocol::packets::play;
 /// modifier over the server's copy.
 const STRIDER_SUFFOCATING: &str = "minecraft:suffocating";
 
-/// The movement speed a rider's client moves its mount at: the server's
-/// instance without the modifier the mount applies again on top of this base.
+/// The movement speed a rider's client moves a strider at: the server's
+/// instance without the modifier the strider applies again on top of this base.
 /// Counted twice, a cold strider went at 0.66 of its speed on a server (#19135).
 fn mount_speed(snapshot: &play::AttributeSnapshot) -> f64 {
     if !snapshot
@@ -24,6 +25,19 @@ fn mount_speed(snapshot: &play::AttributeSnapshot) -> f64 {
     let mut own = snapshot.clone();
     own.modifiers.retain(|m| m.id != STRIDER_SUFFOCATING);
     snapshot_value(&own)
+}
+
+/// How a rider's client values the synced movement speed of a mount of this
+/// species: a strider leaves out the cold modifier it applies itself
+/// (`mount_speed`); any other mount keeps every synced modifier, as vanilla's
+/// `handleUpdateAttributes` does, even one a command named
+/// `minecraft:suffocating`.
+fn mount_speed_for(species: Species) -> fn(&play::AttributeSnapshot) -> f64 {
+    if species == Species::Strider {
+        mount_speed
+    } else {
+        snapshot_value
+    }
 }
 
 impl Game<'_> {
@@ -77,7 +91,11 @@ impl Game<'_> {
     ) {
         let max_health = self.remote_attribute_value("minecraft:max_health", values);
         let scale = self.remote_attribute_value("minecraft:scale", values);
-        let speed = self.remote_attribute("minecraft:movement_speed", values, mount_speed);
+        let speed = self
+            .mob_index
+            .get(&self.mobs, id as u32)
+            .map(|m| mount_speed_for(m.species()))
+            .and_then(|value| self.remote_attribute("minecraft:movement_speed", values, value));
         let jump = self.remote_attribute_value("minecraft:jump_strength", values);
         let nameplate = self.remote_nameplate_values(values);
         let Some(m) = self.mob_index.get_mut(&mut self.mobs, id as u32) else {
@@ -176,5 +194,32 @@ mod tests {
         finalize::set_base(&mut m, finalize::Attr::MovementSpeed, mount_speed(&synced));
         // AttributeInstance.calculateValue: base + base * amount.
         assert_eq!(m.movement_speed(), base + base * cold);
+    }
+
+    /// A server can give any mob a modifier with the strider's id (`/attribute
+    /// … modifier add minecraft:suffocating`), and vanilla's client keeps every
+    /// synced modifier (`handleUpdateAttributes`). Only `Strider.tick` replaces
+    /// or removes that id, so a pig or a horse counts the server's modifier once.
+    #[test]
+    fn only_a_strider_leaves_the_synced_suffocating_modifier_out() {
+        // Pig.createAttributes' 0.25, halved by an add_multiplied_base modifier.
+        let (base, amount) = (0.25, -0.5);
+        let synced = play::AttributeSnapshot {
+            attribute: 0,
+            base,
+            modifiers: vec![play::AttributeModifier {
+                id: "minecraft:suffocating".into(),
+                amount,
+                operation: 1,
+            }],
+        };
+        for species in [Species::Pig, Species::Horse] {
+            assert_eq!(
+                mount_speed_for(species)(&synced),
+                base + base * amount,
+                "{species:?}"
+            );
+        }
+        assert_eq!(mount_speed_for(Species::Strider)(&synced), base);
     }
 }
