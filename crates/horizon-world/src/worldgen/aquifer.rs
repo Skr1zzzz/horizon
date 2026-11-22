@@ -19,10 +19,20 @@ impl FluidStatus {
 }
 pub trait FluidPicker: std::fmt::Debug + Send + Sync {
     fn compute(&self, position: [i32; 3]) -> FluidStatus;
+    /// A y above which `top`'s column holds no global fluid up to `top`: there
+    /// `compute([x, y, z]).level <= y`, so the terrain fill can skip asking.
+    /// `None`, the default, promises nothing, and the fill asks at every block,
+    /// as vanilla's `computeSubstance` does.
+    fn air_above_y(&self, _top: [i32; 3]) -> Option<i32> {
+        None
+    }
 }
 impl<P: FluidPicker + ?Sized> FluidPicker for &P {
     fn compute(&self, position: [i32; 3]) -> FluidStatus {
         P::compute(self, position)
+    }
+    fn air_above_y(&self, top: [i32; 3]) -> Option<i32> {
+        P::air_above_y(self, top)
     }
 }
 /// State IDs must come from one immutable block registry. Default fluid can be
@@ -70,6 +80,12 @@ impl FluidPicker for GlobalFluidPicker {
                 state: self.default_fluid,
             }
         }
+    }
+    /// The level at `top`: the level depends only on y, and no y above the one
+    /// at `top` holds fluid (lava below `min(-54, sea level)`, the sea above).
+    /// A hook on `compute` that adds fluid above that level replaces this too.
+    fn air_above_y(&self, top: [i32; 3]) -> Option<i32> {
+        Some(self.compute(top).level)
     }
 }
 #[derive(Debug)]

@@ -268,14 +268,14 @@ impl<P: FluidPicker, F: PositionalRandom, B: AquiferBlockStates> NoiseBasedAquif
         self.schedule = false;
     }
     /// The y above which a non-positive density in the column whose highest
-    /// block is `top` is the global fluid's air: above `skipSamplingAboveY`,
-    /// vanilla's `NoiseBasedAquifer.computeSubstance` answers
-    /// `globalFluid.at(y)`. The picker is asked at that column, so its level may
-    /// vary with x/z. It may vary with y as long as no level above the skip
-    /// height is higher than the one at `top`, as vanilla's (lava below -54,
-    /// the sea above) is.
-    pub fn air_above_y(&self, top: [i32; 3]) -> i32 {
-        self.skip_above_y.max(self.picker.compute(top).level)
+    /// block is `top` is the global fluid's air, when the picker bounds that
+    /// column's fluid: above `skipSamplingAboveY`, vanilla's
+    /// `NoiseBasedAquifer.computeSubstance` answers `globalFluid.at(y)` block by
+    /// block. `None` keeps that per-block call.
+    pub fn air_above_y(&self, top: [i32; 3]) -> Option<i32> {
+        self.picker
+            .air_above_y(top)
+            .map(|level| self.skip_above_y.max(level))
     }
     fn sample(
         &self,

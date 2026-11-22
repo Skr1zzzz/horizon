@@ -74,7 +74,7 @@ impl<P: FluidPicker, F: PositionalRandom, B: AquiferBlockStates> TerrainAquifer
         NoiseBasedAquifer::should_schedule_fluid_update(self)
     }
     fn air_above_y(&self, top: [i32; 3]) -> Option<i32> {
-        Some(NoiseBasedAquifer::air_above_y(self, top))
+        NoiseBasedAquifer::air_above_y(self, top)
     }
     fn note_skipped(&mut self) {
         NoiseBasedAquifer::note_skipped(self);
@@ -1136,6 +1136,75 @@ mod tests {
                 let level = if x >= 100 { 250 } else { 63 };
                 for y in skip + 1..320 {
                     let want = if y < level { water } else { air };
+                    assert_eq!(chunk.block(x, y, z), want, "{x} {y} {z}");
+                }
+            }
+        }
+    }
+
+    /// Vanilla's picker, except that a mod lays water at y 250..300, under the
+    /// top of the world: the level at the top stays the sea's.
+    #[derive(Debug)]
+    struct Sheet(GlobalFluidPicker);
+    impl FluidPicker for Sheet {
+        fn compute(&self, position: [i32; 3]) -> FluidStatus {
+            let status = self.0.compute(position);
+            if (250..300).contains(&position[1]) {
+                FluidStatus {
+                    level: 300,
+                    ..status
+                }
+            } else {
+                status
+            }
+        }
+    }
+
+    /// A picker that bounds no column keeps vanilla's per-block answer above
+    /// the skip height: water it puts below the column's top is filled, not
+    /// skipped as air above the level it gives at the top.
+    #[test]
+    fn fill_noise_keeps_a_fluid_band_below_the_column_top() {
+        let registry = test_registry();
+        let [air, water, lava] = [BlockStateId(0), BlockStateId(3), BlockStateId(4)];
+        let constant = |value| Arc::new(ConstantSampler(value)) as Arc<dyn DensitySampler>;
+        // Barrier, floodedness, spread, lava, exclusion; a surface at y 40.
+        let samplers = AquiferSamplers::new([
+            constant(0.),
+            constant(0.),
+            constant(0.),
+            constant(0.),
+            constant(0.),
+            constant(40.),
+        ]);
+        let volume = DensityVolume::new([16, 384, 16], [0, -64, 0], [1, 1, 1]).unwrap();
+        let mut context = SamplerContext::sparse();
+        let mut aquifer = NoiseBasedAquifer::new(
+            samplers,
+            Sheet(GlobalFluidPicker::new(63, water, lava, air)),
+            LegacyPositionalRandom::new(7),
+            RegistryAquiferBlockStates::new(&registry).unwrap(),
+            volume,
+            &mut context,
+        )
+        .unwrap();
+        let skip = aquifer.skip_sampling_above_y();
+        assert!(skip < 250, "skip height {skip}");
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(0, 0), -64, 384, &registry, Properties).unwrap();
+        fill_noise(
+            &mut chunk,
+            volume,
+            &ConstantSampler(-1.0),
+            &mut context,
+            &mut aquifer,
+            BlockStateId(2),
+        )
+        .unwrap();
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in skip + 1..320 {
+                    let want = if (250..300).contains(&y) { water } else { air };
                     assert_eq!(chunk.block(x, y, z), want, "{x} {y} {z}");
                 }
             }
