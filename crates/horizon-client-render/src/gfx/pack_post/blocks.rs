@@ -13,48 +13,64 @@
 /// Bytes of each buffer, unless a block needs more.
 const CHUNK: usize = 64 << 10;
 
-/// The buffers, each with its bytes (`Staged`), and the alignment of every place: the device's
-/// `min_uniform_buffer_offset_alignment`, at least 16 bytes.
+/// The buffers, each with its bytes (`Staged`, one for each buffer), and the alignment of every
+/// place: the device's `min_uniform_buffer_offset_alignment`, at least 16 bytes.
 pub(super) struct Blocks {
-    chunks: Vec<(wgpu::Buffer, Staged)>,
+    buffers: Vec<wgpu::Buffer>,
+    staged: Vec<Staged>,
     align: usize,
 }
 
 impl Blocks {
     pub(super) fn new(device: &wgpu::Device) -> Self {
-        let align = device.limits().min_uniform_buffer_offset_alignment as usize;
+        Self::aligned(device.limits().min_uniform_buffer_offset_alignment as usize)
+    }
+
+    /// No buffers yet, and places aligned to `align` bytes, at least 16.
+    pub(super) fn aligned(align: usize) -> Self {
         Self {
-            chunks: Vec::new(),
+            buffers: Vec::new(),
+            staged: Vec::new(),
             align: align.max(16),
         }
     }
 
     /// A place of its own for a block bound as `size` bytes: its buffer, and its offset there.
     pub(super) fn place(&mut self, device: &wgpu::Device, size: u64) -> (usize, usize) {
+        let place = self.reserve(size);
+        // `reserve` adds at most one buffer's bytes.
+        if let Some(staged) = self.staged.get(self.buffers.len()) {
+            self.buffers
+                .push(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Shader pack uniform blocks"),
+                    size: staged.bytes.len() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+        }
+        place
+    }
+
+    /// The place [`place`](Self::place) gives, in the buffers' bytes alone: when no buffer has
+    /// room, it adds a new buffer's bytes, and `place` makes the buffer.
+    pub(super) fn reserve(&mut self, size: u64) -> (usize, usize) {
         let size = (size as usize).next_multiple_of(self.align);
-        for (k, (_, staged)) in self.chunks.iter_mut().enumerate() {
+        for (k, staged) in self.staged.iter_mut().enumerate() {
             if let Some(offset) = staged.place(size) {
                 return (k, offset);
             }
         }
-        let capacity = size.max(CHUNK);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Shader pack uniform blocks"),
-            size: capacity as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut staged = Staged::new(capacity);
+        let mut staged = Staged::new(size.max(CHUNK));
         let offset = staged
             .place(size)
             .expect("a new buffer holds its first block");
-        self.chunks.push((buffer, staged));
-        (self.chunks.len() - 1, offset)
+        self.staged.push(staged);
+        (self.staged.len() - 1, offset)
     }
 
     /// `block` into its place, for the frame's [`upload`](Self::upload).
     pub(super) fn write(&mut self, (k, offset): (usize, usize), block: &[u8]) {
-        self.chunks[k].1.write(offset, block);
+        self.staged[k].write(offset, block);
     }
 
     /// The binding of the `size` bytes at a place.
@@ -64,7 +80,7 @@ impl Blocks {
         size: u64,
     ) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-            buffer: &self.chunks[k].0,
+            buffer: &self.buffers[k],
             offset: offset as u64,
             size: wgpu::BufferSize::new(size),
         })
@@ -72,7 +88,7 @@ impl Blocks {
 
     /// What the frame's passes wrote, into the buffers: one write for each buffer written.
     pub(super) fn upload(&mut self, queue: &wgpu::Queue) {
-        for (buffer, staged) in &mut self.chunks {
+        for (buffer, staged) in self.buffers.iter().zip(&mut self.staged) {
             if let Some((offset, bytes)) = staged.take() {
                 queue.write_buffer(buffer, offset as u64, bytes);
             }
