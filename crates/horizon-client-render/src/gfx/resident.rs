@@ -421,8 +421,10 @@ impl<T> Resident<T> {
 /// A section in view.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Visible {
-    /// Its centre's squared distance from the camera, as bits: non-negative
-    /// floats order like their bits, so sorting compares integers.
+    /// What its list sorts by, as an integer: its centre's squared distance
+    /// from the camera, as bits (non-negative floats order like their bits).
+    /// In a shader pack's shadow list (`Renderer::shadow_visible`), its place
+    /// in the light's order instead (`external::sort_shadow_sections`).
     pub distance: u64,
     pub key: SectionKey,
     pub slot: u32,
