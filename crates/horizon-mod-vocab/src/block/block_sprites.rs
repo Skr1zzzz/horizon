@@ -129,18 +129,21 @@ pub struct BlockSprites {
 }
 
 /// One quad of a block state's baked model, as `ClientHost::block_model_quads` gives it: what the chunk mesher
-/// draws for the state, whether or not the quad lies flat on a side (a flower's crossed planes, an element turned
-/// by 22.5 or 45 degrees). A mod drawing the block where no block is (a schematic's ghost blocks, through
-/// `add_section_geometry`) moves its corners to the block's place and adds it as a `SectionQuad`.
+/// draws for the state at a position, whether or not the quad lies flat on a side (a flower's crossed planes, an
+/// element turned by 22.5 or 45 degrees). A mod drawing the block where no block is (a schematic's ghost blocks,
+/// through `add_section_geometry`) moves its corners to the block's place and adds it as a `SectionQuad`.
 /// Mods receive it from the game; they do not construct it.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(horizon_mod_api_macros::Wire)]
 pub struct BlockModelQuad {
-    /// The corners in blocks from the block's lowest corner, 0 to 1 across the block (a model can reach past it),
-    /// counterclockwise seen from the side the quad faces, as `SectionQuad::positions` takes them.
+    /// The corners in blocks from the block's lowest corner, counterclockwise seen from the side the quad faces,
+    /// as `SectionQuad::positions` takes them: 0 to 1 across the block, moved by the offset the mesher gives the
+    /// block at that position (short grass, flowers and bamboo shift within their column). A model can reach past
+    /// its block, and so can an offset one.
     pub positions: [[f32; 3]; 4],
-    /// Each corner's texture coordinate within the sprite, 0 to 1, as `SectionQuad::uvs` takes them.
+    /// Each corner's texture coordinate within the sprite, 0 to 1, as `SectionQuad::uvs` takes them. A model's
+    /// UV past its sprite (an OBJ or loader model's can be) is clamped to the sprite's edge.
     pub uvs: [[f32; 2]; 4],
     /// The sprite in the block sprite arrays, as `WorldDrawn::block_sprites` cuts them.
     pub sprite: SpriteRef,

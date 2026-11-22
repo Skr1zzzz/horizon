@@ -81,22 +81,24 @@ pub trait ClientRenderClientHost {
     /// where it lies on the side, how its texture runs across it (`FaceSprite::quad_on` draws it on another
     /// block's box, turned as its model turns it), its tint source and index (`block_tint_color`) and
     /// whether it is cut out, translucent or animated; its particle sprite; whether it is a plain
-    /// cube. None for a block the game does not know. The model is the state's first random variant. API
-    /// 380.
+    /// cube. None for a block the game does not know. The model is the variant the mesher draws at 0, 0, 0
+    /// (`block_model_quads` takes a position). API 380.
     #[access(PublishedResources)]
     fn block_sprites(&self, blocks: &[BlockState]) -> Vec<Option<BlockSprites>>;
     /// Side: client.
     /// Published asset/data read: available in Setup, Reloading and World.
     /// For a client mod drawing a block where none is (a schematic's ghost blocks, added through
-    /// `add_section_geometry`): every quad of `state`'s baked model, in the order the chunk mesher draws them,
-    /// from the same models. Those `block_sprites` leaves out are included: a flower's crossed planes, an
-    /// element turned on an axis. Each gives its corners and UVs, its sprite and that sprite's atlas name, the
-    /// side it faces, its cull face, its tint index and source, its shade and whether it is translucent. The
-    /// model is the variant `block_sprites` reads. Empty for a state with no model quads (air, a fluid, a block
-    /// drawn only as a block entity); None for a state the game does not know. Ask again when
-    /// `block_sprites_version` changes.
+    /// `add_section_geometry`): every quad of `state`'s baked model as the chunk mesher draws it at block `pos`,
+    /// in its order, from the same models: the variant it picks there (stone and grass blocks turn from block
+    /// to block), with the corners moved by the offset it gives the block there (short grass, flowers and
+    /// bamboo shift within their column), so a ghost matches the block it stands for; ask again for a block
+    /// that moves. Those `block_sprites` leaves out are included: a flower's crossed planes, an element turned
+    /// on an axis. Each gives its corners and UVs (within the sprite, 0 to 1), its sprite and that sprite's
+    /// atlas name, the side it faces, its cull face, its tint index and source, its shade and whether it is
+    /// translucent. Empty for a state the mesher draws no model for (air, a fluid, a block drawn only as a
+    /// block entity); None for a state the game does not know. Ask again when `block_sprites_version` changes.
     #[access(PublishedResources)]
-    fn block_model_quads(&self, state: BlockState) -> Option<Vec<BlockModelQuad>>;
+    fn block_model_quads(&self, state: BlockState, pos: [i32; 3]) -> Option<Vec<BlockModelQuad>>;
     /// Side: client.
     /// Published asset/data read: available in Setup, Reloading and World.
     /// For a client mod: each texture's sprite by name (`minecraft:block/stone`, `block/stone`), none for one no

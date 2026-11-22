@@ -230,36 +230,62 @@ water colour, including resource-pack water colormaps; other water indices retur
 ## Ghost blocks
 
 A schematic or a build planner draws blocks where none are: see-through copies of each block's own model,
-part of the section meshes (`add_section_geometry`), so there is no cap on how many. Two calls make it:
+part of the section meshes (`add_section_geometry`), as many as each section's budget holds
+([below](#section-budgets)). Two calls make it:
 
-- `block_model_quads(state)` gives every quad the chunk mesher draws for a state, from the same baked
-  models: the faces on its sides and also those `block_sprites` leaves out, such as a flower's crossed planes
-  and elements turned on an axis. Each `BlockModelQuad` has its corners (in blocks, 0 to 1 across the block,
-  counterclockwise seen from the side it faces), its UVs within the sprite, its `sprite` and `sprite_name` (the
-  block atlas name `SectionGeometryContext::add` takes), the side it is `facing`, its `cull` face, its
-  `tint_index` and `tint` source, its `shade` side and whether it is `translucent`. The model is the variant
-  `block_sprites` reads. Air, fluids and blocks drawn only as block entities have no quads; a state the game
-  doesn't know is `None`. Read them on the client thread, when the schematic loads, and again when
-  `block_sprites_version` changes.
+- `block_model_quads(state, pos)` gives every quad the chunk mesher draws for a state at block `pos`, from
+  the same baked models: the faces on its sides and also those `block_sprites` leaves out, such as a flower's
+  crossed planes and elements turned on an axis. The quads are the block as the mesher draws it at that
+  position: the model variant it picks there (stone and grass blocks turn from block to block) and the offset it
+  gives the block there (short grass, flowers and bamboo shift within their column), so a ghost matches the
+  block it stands for. Each `BlockModelQuad` has its corners (in blocks from the block's lowest corner, 0 to 1
+  across the block plus that offset, counterclockwise seen from the side it faces), its UVs within the sprite (0
+  to 1; a model's UV past its sprite is clamped to the edge), its `sprite` and `sprite_name` (the block atlas
+  name `SectionGeometryContext::add` takes), the side it is `facing`, its `cull` face, its `tint_index` and
+  `tint` source, its `shade` side and whether it is `translucent`. Air, fluids and blocks drawn only as block
+  entities have no quads; a state the game doesn't know is `None`. Read them on the client thread, for each
+  block at its place when the schematic loads or moves, and again when `block_sprites_version` changes.
 - `remesh_sections(min, max)` meshes again every loaded section that the block box reaches, both corners
   included, so your renderer is asked for those sections again. Call it when the schematic moves, turns or
   changes, with the box it left and the box it covers now, not every frame: each section costs the workers a
   mesh. Columns the client hasn't loaded are left out; they mesh when they load.
 
-The renderer runs on the meshing workers with no `Host`, so keep the quads where it can read them:
+The renderer runs on the meshing workers with no `Host`, so keep the quads where it can read them. It leaves
+out what the mesher would not draw and what would refuse its section: a face whose `cull` side another ghost
+cube covers, a quad that reaches past the section, and everything once the section's budget is spent.
 
 ```rust,ignore
+/// One schematic block, read on the client thread when the schematic loads or moves.
+struct Ghost {
+    /// `host.block_model_quads(state, pos)`: the block as the mesher draws it at its place.
+    quads: Vec<BlockModelQuad>,
+    /// `host.block_sprites(&[state])[0]`'s `cube`: a whole cube hides the faces against it.
+    cube: bool,
+}
+
 struct Ghosts(Arc<RwLock<Schematic>>);
 impl SectionGeometry for Ghosts {
     fn add(&self, origin: [i32; 3], context: &mut dyn SectionGeometryContext) {
         let schematic = self.0.read().unwrap();
-        for (pos, quads) in schematic.blocks_in_section(origin) {
+        for (pos, ghost) in schematic.blocks_in_section(origin) {
             let at = [0, 1, 2].map(|i| (pos[i] - origin[i]) as f32);
-            for quad in quads {
+            for quad in &ghost.quads {
+                // Hidden by the ghost cube on its cull side, as the mesher hides a face its neighbour covers.
+                if let Some(side) = quad.cull {
+                    let n = side.normal();
+                    let next = [pos[0] + n[0], pos[1] + n[1], pos[2] + n[2]];
+                    if schematic.get(next).is_some_and(|other| other.cube) {
+                        continue;
+                    }
+                }
                 let positions = quad.positions.map(|p| [0, 1, 2].map(|i| p[i] + at[i]));
-                // One corner past the section refuses all of this renderer's quads there.
+                // One corner past the section would refuse everything this renderer adds there.
                 if positions.iter().flatten().any(|c| !(0.0..=16.0).contains(c)) {
                     continue;
+                }
+                // So would one quad past the section's budget: stop while what was added still fits.
+                if context.remaining() == 0 {
+                    return;
                 }
                 let shade = quad.shade.map_or(1.0, |side| context.level().shade(side));
                 let grey = (255.0 * shade) as u32;
@@ -275,9 +301,13 @@ impl SectionGeometry for Ghosts {
     }
 }
 
-// On the client thread, when the player moves the schematic:
+// On the client thread, when the player moves the schematic. The quads follow the position, so read them
+// again at the new place, then mesh the sections it left and those it covers now.
 let (old_min, old_max) = schematic.bounds();
 schematic.move_by(offset);
+for (pos, state, ghost) in schematic.blocks_mut() {
+    ghost.quads = host.block_model_quads(state, pos).unwrap_or_default();
+}
 let (new_min, new_max) = schematic.bounds();
 host.remesh_sections(old_min, old_max);
 host.remesh_sections(new_min, new_max);
@@ -285,8 +315,24 @@ host.remesh_sections(new_min, new_max);
 
 A tinted quad (`tint` set) is multiplied by its source's colour where the ghost block stands:
 `context.level().block_tint(pos, ColorResolver::Grass)` for `TintSource::Grass` (and the same for foliage,
-dry foliage and water), `Fixed` as it is. A quad of a model that reaches past its block's cell (a tall
-model at a section's edge) has to be left out or cut, as above.
+dry foliage and water), `Fixed` as it is. A quad that reaches past its block's cell (a tall model, or a plant
+offset toward the section's edge) has to be left out or cut there, as above.
+
+### Section budgets
+
+What a renderer adds to a section is taken whole or refused whole, so one quad too many costs it the section:
+
+- A section's mesh holds at most 262,144 quads and 32 MiB of mesh data, its own blocks' and every renderer's
+  together. `context.remaining()` says how many more quads it takes.
+- All the sections meshing at the same time share 128 MiB of added quads that are not in their meshes yet.
+- A quad past either budget, a corner outside the section (0 to 16), a UV outside 0 to 1 or not a number, or a
+  sprite the block atlas lacks refuses everything the renderer added to that section: none of it is drawn,
+  `context.add` answers false from then on, and the section keeps its own blocks and the other renderers' quads.
+- Only a renderer's first refusal is logged, and nothing retries the section: it stays without your quads until
+  it meshes again (its blocks change, the resources reload, or you call `remesh_sections` for it).
+
+A large schematic in view can still meet the shared budget while many sections mesh at once: `context.add`
+answers false then, and a later `remesh_sections` over those sections asks for them again.
 
 ## Texture pixels on the CPU
 

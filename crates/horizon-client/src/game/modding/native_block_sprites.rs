@@ -15,7 +15,7 @@ impl Game<'_> {
     /// block's default) draws on each of its six sides, as the mesher bakes its model: each face's sprite (array and
     /// layer, as `WorldDrawn::block_sprites` cuts them), where it lies on the side, how its texture runs across it,
     /// its tint source and whether it is cut out, translucent or animated; its particle sprite; whether it is a plain
-    /// cube. None for a block the game does not know. The model is the state's first random variant. API
+    /// cube. None for a block the game does not know. The model is the variant the mesher draws at 0, 0, 0. API
     /// 380.
     pub(super) fn block_sprites(
         &self,
@@ -31,14 +31,17 @@ impl Game<'_> {
             .collect()
     }
     /// For a client mod drawing a block where none is (a schematic's ghost blocks): every quad of `state`'s model
-    /// as the mesher draws it, those `block_sprites` leaves out included (`Lookup::model_quads`). None for a state
-    /// the game does not know.
+    /// as the mesher draws it at block `pos`, its variant and offset there, those `block_sprites` leaves out
+    /// included (`Lookup::model_quads`). None for a state the game does not know.
     pub(super) fn block_model_quads(
         &self,
         state: BlockStateId,
+        pos: [i32; 3],
     ) -> Option<Vec<mod_api::BlockModelQuad>> {
         self.pack.context.assets.registry.state(state)?;
-        Some(self.native_sprite_lookup().model_quads(state))
+        let [x, y, z] = pos;
+        let pos = horizon_core::position::BlockPos::new(x, y, z);
+        Some(self.native_sprite_lookup().model_quads(state, pos))
     }
     /// For a client mod: each texture's sprite by name (`minecraft:block/stone`, `block/stone`), none for one no
     /// model uses. API 380.

@@ -1269,6 +1269,11 @@ impl MeshTables {
             .get(state.0 as usize)
             .is_some_and(|i| i.opaque_cube)
     }
+    /// Whether the mesher draws `state`'s model (`RenderShape.MODEL`): air, a fluid's own block and the blocks
+    /// drawn only as block entities have none.
+    pub fn draws_model(&self, state: BlockStateId) -> bool {
+        self.info.get(state.0 as usize).is_some_and(|i| i.model)
+    }
     /// `BlockTintSource.color(state)`: block-model colour without a level.
     /// `grass` is `GrassColor.getDefaultColor()` from the active pack's colormap.
     /// Untinted faces, blank sources and invalid tint indices return `None`.

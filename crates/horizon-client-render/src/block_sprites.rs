@@ -6,7 +6,11 @@
 //!
 //! Each sprite is a whole layer of a square texture array (`sprites::Sprites`), so a face's UVs run
 //! 0 to 1 within its layer; the renderer's split (`Renderer::sprite_split`) layers to an array.
-use crate::{mesher::TintSource, models::catalog::BakedFace, streaming::WorkerContext};
+use crate::{
+    mesher::TintSource,
+    models::catalog::{BakedFace, StateModels},
+    streaming::WorkerContext,
+};
 use horizon_assets::model::Direction;
 use horizon_core::position::BlockPos;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
@@ -214,19 +218,21 @@ impl<'a> Lookup<'a> {
         }
     }
 
-    /// Every quad of `state`'s model as the mesher draws it, flat on a side or not, from the model [`Self::state`]
-    /// reads: none for a block with no model quads (air, a fluid, a block drawn only as a block entity).
-    pub fn model_quads(&self, state: BlockStateId) -> Vec<BlockModelQuad> {
-        let models = self
-            .context
-            .render
-            .model_catalog
-            .collect(state, BlockPos::new(0, 0, 0))
-            .unwrap_or_default();
-        model_quads(
-            models.iter().flat_map(|(_, m)| &m.faces),
+    /// Every quad of `state`'s model as the mesher draws it at block `pos`, flat on a side or not: the variant it
+    /// picks there, moved by the offset it gives the block there (`placed_quads`). Empty for a block it draws no
+    /// model for (air, a fluid, a block drawn only as a block entity).
+    pub fn model_quads(&self, state: BlockStateId, pos: BlockPos) -> Vec<BlockModelQuad> {
+        let tables = &self.context.tables;
+        if !tables.draws_model(state) {
+            return Vec::new();
+        }
+        placed_quads(
+            &self.context.render.model_catalog,
+            state,
+            pos,
+            tables.offset(state, pos.x, pos.z),
             |layer| self.sprite(layer),
-            |tint_index| self.context.tables.tint_source(state, tint_index),
+            |tint_index| tables.tint_source(state, tint_index),
         )
     }
 
@@ -269,16 +275,39 @@ impl<'a> Lookup<'a> {
     }
 }
 
+/// `state`'s quads as the mesher draws the block at `pos` (`Mesher::mesh_reusing`): the models `catalog` picks
+/// there (`StateModels::models_at`: a weighted variant by the position's seed, as stone and grass blocks turn
+/// from block to block), moved by `offset`, the block's offset there (`MeshTables::offset`: short grass, flowers
+/// and bamboo shift within their column). Empty for a state with no models.
+fn placed_quads(
+    catalog: &StateModels,
+    state: BlockStateId,
+    pos: BlockPos,
+    offset: Option<[f64; 3]>,
+    sprite: impl Fn(u32) -> SpriteRef,
+    tint: impl Fn(i32) -> Option<TintSource>,
+) -> Vec<BlockModelQuad> {
+    let mut models = Vec::new();
+    if catalog.models_at(state, pos, &mut models).is_err() {
+        return Vec::new();
+    }
+    model_quads(models.iter().flat_map(|m| &m.faces), offset, sprite, tint)
+}
+
 /// Each of a model's baked `faces` as a mod reads it, in the order the mesher draws them: all of them, flat on a
-/// side or not (a flower's crossed planes, a turned element). `sprite` places a sprite layer in the arrays and
-/// `tint` names the source of a tint index.
+/// side or not (a flower's crossed planes, a turned element), moved by the block's `offset` and with their UVs
+/// in the sprite (`in_sprite`). `sprite` places a sprite layer in the arrays and `tint` names the source of a
+/// tint index.
 fn model_quads<'a>(
     faces: impl Iterator<Item = &'a BakedFace>,
+    offset: Option<[f64; 3]>,
     sprite: impl Fn(u32) -> SpriteRef,
     tint: impl Fn(i32) -> Option<TintSource>,
 ) -> Vec<BlockModelQuad> {
     // Both `Direction`s list their sides down, up, north, south, west, east.
     let side = |d: Direction| mod_api::Direction::ALL[d as usize];
+    // In `f32`, as the mesher adds it to the block's corner (`Mesher::mesh_reusing`'s `origin`).
+    let [dx, dy, dz] = offset.map_or([0.0; 3], |o| o.map(|v| v as f32));
     faces
         .map(|face| {
             let q = &face.quad;
@@ -287,8 +316,8 @@ fn model_quads<'a>(
                 .shade
                 .then(|| side(q.shade_direction_override.unwrap_or(q.facing)));
             mod_api::__private::built::block_model_quad(
-                q.positions,
-                q.uv,
+                q.positions.map(|[x, y, z]| [x + dx, y + dy, z + dz]),
+                q.uv.map(|uv| uv.map(in_sprite)),
                 sprite(face.layer),
                 q.material.sprite.clone(),
                 side(q.facing),
@@ -300,6 +329,14 @@ fn model_quads<'a>(
             )
         })
         .collect()
+}
+
+/// A model's UV within its sprite as `SectionQuad::uvs` takes it, 0 to 1. The mesher packs a model's UVs
+/// clamped (`mesher::baked_uv`): below 0, or not a number, is 0, as here. It keeps them up to 2, but a section
+/// geometry quad with a UV past 1 refuses its renderer's whole section, so here the top is 1: an OBJ or loader
+/// model's UV past its sprite (`horizon_assets::bake` passes theirs through as written) lands on the sprite's edge.
+fn in_sprite(v: f32) -> f32 {
+    if v > 0.0 { v.min(1.0) } else { 0.0 }
 }
 
 /// The affine map from a face's points on its side to its UVs, `[u0, v0, du_u, du_v, dv_u, dv_v]`, from three of
@@ -448,7 +485,7 @@ mod tests {
                 animated: false,
                 cutout: false,
             };
-            model_quads(faces.iter(), sprite, |index| {
+            model_quads(faces.iter(), None, sprite, |index| {
                 (index == 0).then_some(TintSource::Grass)
             })
         };
@@ -517,6 +554,124 @@ mod tests {
             .filter(|q| q.positions.iter().all(|p| near(p[0], p[2])))
             .count();
         assert_eq!(main_diagonal, 2, "one plane on each diagonal: {cross:?}");
+    }
+
+    /// A whole top face of `sprite` with these UVs, drawn in the translucent pass or not.
+    fn top_face(sprite: &str, uv: [[f32; 2]; 4], translucent: bool) -> BakedFace {
+        use horizon_assets::{bake::ModelQuad, model::Material};
+        BakedFace::new(
+            ModelQuad {
+                positions: [
+                    [0.0, 1.0, 0.0],
+                    [0.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                    [1.0, 1.0, 0.0],
+                ],
+                uv,
+                facing: Direction::Up,
+                cull: Some(Direction::Up),
+                material: Material {
+                    sprite: sprite.to_owned(),
+                    force_translucent: false,
+                },
+                tint_index: -1,
+                shade_direction_override: None,
+                light_emission: 0,
+                light: [0; 2],
+                color: None,
+                ambient_occlusion: None,
+                render_type: None,
+                shade: true,
+            },
+            0,
+            false,
+            translucent,
+            None,
+        )
+    }
+
+    fn sprite_at(layer: u32) -> SpriteRef {
+        SpriteRef {
+            array: 0,
+            layer,
+            animated: false,
+            cutout: false,
+        }
+    }
+
+    /// `block_model_quads` keeps each face's pass (`translucent`) and gives UVs a section geometry renderer can add
+    /// as they are, 0 to 1 within the sprite: those inside it unchanged, and an OBJ or loader model's past it
+    /// (below 0, above 1, infinite, not a number) on its edge, where `SectionQuad` would refuse the whole section.
+    #[test]
+    fn a_quads_uvs_stay_in_its_sprite_and_it_keeps_its_pass() {
+        let inside = [[0.0, 0.0], [0.0, 0.75], [0.25, 0.75], [0.25, 0.0]];
+        let outside = [
+            [-0.25, 1.5],
+            [f32::NAN, 0.5],
+            [f32::INFINITY, f32::NEG_INFINITY],
+            [2.0, 1.0],
+        ];
+        let faces = [
+            top_face("t:block/glass", inside, true),
+            top_face("t:block/obj", outside, false),
+        ];
+        let quads = model_quads(faces.iter(), None, sprite_at, |_| None);
+        assert_eq!(quads[0].uvs, inside);
+        assert_eq!(
+            quads[1].uvs,
+            [[0.0, 1.0], [0.0, 0.5], [1.0, 0.0], [1.0, 1.0]]
+        );
+        let passes: Vec<_> = quads.iter().map(|q| q.translucent).collect();
+        assert_eq!(passes, [true, false]);
+    }
+
+    /// `block_model_quads(state, pos)` draws a block as the mesher draws it at `pos`: of its two weighted variants
+    /// the one vanilla's `WeightedVariants` picks there (`nextInt(2)` of a `Random` seeded with `Mth.getSeed(pos)`;
+    /// the expected picks are worked out from vanilla's arithmetic, not from this code), not the same one
+    /// everywhere, and its corners moved by the block's offset there.
+    #[test]
+    fn a_ghost_takes_the_variant_and_offset_of_its_position() {
+        use crate::models::catalog::BakedModel;
+        let whole = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        let variant = |sprite: &str| BakedModel {
+            ambient_occlusion: true,
+            particle: None,
+            faces: vec![top_face(sprite, whole, false)],
+            cube: None,
+        };
+        let catalog = StateModels::weighted(vec![
+            (variant("t:block/first"), 1),
+            (variant("t:block/second"), 1),
+        ]);
+        let at = |[x, y, z]: [i32; 3], offset: Option<[f64; 3]>| {
+            let pos = BlockPos::new(x, y, z);
+            placed_quads(&catalog, BlockStateId(0), pos, offset, sprite_at, |_| None)
+        };
+        // 0, 0, 0 picks the second: a lookup at the origin would show it everywhere.
+        for (pos, picked) in [
+            ([0, 0, 0], "t:block/second"),
+            ([0, 64, 0], "t:block/second"),
+            ([0, 64, 3], "t:block/first"),
+            ([1, 64, 1], "t:block/first"),
+            ([-1, 64, -1], "t:block/first"),
+            ([-16, -64, 31], "t:block/second"),
+            ([5, 64, -3], "t:block/first"),
+        ] {
+            let quads = at(pos, None);
+            assert_eq!(quads.len(), 1, "{pos:?}");
+            assert_eq!(quads[0].sprite_name, picked, "{pos:?}");
+        }
+        // The offset there moves every corner.
+        let moved = at([0, 64, 3], Some([0.125, -0.25, -0.0625]));
+        assert_eq!(
+            moved[0].positions,
+            [
+                [0.125, 0.75, -0.0625],
+                [0.125, 0.75, 0.9375],
+                [1.125, 0.75, 0.9375],
+                [1.125, 0.75, -0.0625]
+            ]
+        );
     }
 
     /// The game's own blocks from real prepared resources: a cube, a grass block's tinted top and overlaid sides, a
@@ -654,13 +809,30 @@ mod tests {
         assert!(flower.particle.is_some_and(|p| p.cutout));
         // The model's quads keep what the sides leave out: the flower's two crossed planes, seen from both sides.
         let state = |name: &str| parse_state(context.assets.registry, name).unwrap();
-        let planes = lookup.model_quads(state("dandelion"));
+        let at =
+            |name: &str, x: i32, z: i32| lookup.model_quads(state(name), BlockPos::new(x, 64, z));
+        let planes = at("dandelion", 0, 0);
         assert_eq!(planes.len(), 4, "{planes:?}");
         assert!(planes.iter().all(|q| {
             q.sprite_name == "minecraft:block/dandelion" && q.cull.is_none() && q.sprite.cutout
         }));
-        assert_eq!(lookup.model_quads(state("stone")).len(), 6);
-        assert!(lookup.model_quads(state("air")).is_empty());
+        // Each where the mesher puts it in its column (`OffsetType.XZ`, a quarter block at most): vanilla's offset
+        // is -0.25, 0, -0.25 at x 0, z 0 and 0.1167, 0, -0.0167 at x 1, z 0.
+        let moved = at("dandelion", 1, 0);
+        assert_eq!(moved.len(), 4);
+        for (a, b) in planes.iter().zip(&moved) {
+            for (p, q) in a.positions.iter().zip(&b.positions) {
+                let d = [0, 1, 2].map(|i| q[i] - p[i]);
+                assert!(
+                    (d[0] - 0.366_666_7).abs() < 1e-5
+                        && d[1] == 0.0
+                        && (d[2] - 0.233_333_3).abs() < 1e-5,
+                    "{d:?}"
+                );
+            }
+        }
+        assert_eq!(at("stone", 0, 0).len(), 6);
+        assert!(at("air", 0, 0).is_empty());
 
         assert_eq!(lookup.block("minecraft:no_such_block"), None);
         assert_eq!(lookup.block("stone[no_such=1]"), None);

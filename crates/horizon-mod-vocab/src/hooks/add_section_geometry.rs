@@ -51,9 +51,10 @@ mod calls `ClientHost::remesh_sections(min, max)` with a block box that reaches 
 renderer adds changes, with the box it left and the box it now covers.
 
 A block's own model drawn where no block is (a schematic's ghost blocks) comes from
-`ClientHost::block_model_quads(state)`: every quad the mesher draws for the state, a flower's crossed planes
-included, with its corners, UVs and sprite name. Read them on the client thread, keep them where the renderer
-reads them, and add each quad moved to its block's place in the section."#]
+`ClientHost::block_model_quads(state, pos)`: every quad the mesher draws for the state at that block, its variant
+and offset there, a flower's crossed planes included, with its corners, UVs and sprite name. Read them on the
+client thread, keep them where the renderer reads them, and add each quad moved to its block's place in the
+section, leaving out a quad whose `cull` side another ghost block covers."#]
     #[hook(
         side = "client",
         contract = "listen",

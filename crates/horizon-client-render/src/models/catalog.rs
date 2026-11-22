@@ -694,6 +694,48 @@ impl StateModels {
     }
 }
 
+#[cfg(test)]
+impl StateModels {
+    /// One block state, id 0, whose blockstate lists `models` as weighted variants (`test:0`, `test:1`...), as
+    /// stone's does: for tests elsewhere that need positions to pick among models without resources.
+    pub(crate) fn weighted(models: Vec<(BakedModel, i32)>) -> Self {
+        let entries: Vec<Value> = models
+            .iter()
+            .enumerate()
+            .map(|(i, (_, weight))| {
+                serde_json::json!({"model": format!("test:{i}"), "weight": weight})
+            })
+            .collect();
+        let json = serde_json::json!({"variants": {"": entries}}).to_string();
+        let definition = BlockStateDefinition::from_json(&json).expect("weighted variants");
+        let choices = CompiledChoices::new(&definition)
+            .expect("positive weights")
+            .map(|v| {
+                v.model["test:".len()..]
+                    .parse::<u32>()
+                    .expect("a test model")
+            });
+        let baked = models
+            .into_iter()
+            .enumerate()
+            .map(|(i, (model, _))| {
+                let variant = Variant {
+                    model: format!("test:{i}"),
+                    rotations: [0; 3],
+                    uv_lock: false,
+                };
+                (variant, model)
+            })
+            .collect();
+        Self {
+            choices: vec![choices],
+            states: vec![Some((0, SelectedModels::Variant(0)))],
+            baked,
+            ..Self::default()
+        }
+    }
+}
+
 pub fn descriptor(name: &str, overrides: &[(&str, &str)]) -> BlockState {
     BlockState {
         name: format!("minecraft:{name}"),
