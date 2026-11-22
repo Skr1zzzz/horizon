@@ -74,6 +74,8 @@ pub struct HudAtlas {
     pictures: std::sync::Mutex<pictures::Cache>,
     /// Identity of this packed atlas, used to invalidate cached model UV data
     /// even when a resource reload places sprites at the same coordinates.
+    /// Client mods' dynamic textures (`dynamic_textures`) add and remove
+    /// sprites without changing it.
     pub revision: u64,
     /// RGBA8, `width` by `height`, as built: empty once `pack_pixels` has
     /// compressed them (read them through `pixels()`).
@@ -971,7 +973,7 @@ impl HudAtlas {
     /// The atlas above, with a slot for a client mod's own image
     /// (`horizon/modimage`) and the page of client mods' dynamic textures
     /// (`dynamic_texture_page`) only when `mod_image` says a client mod is
-    /// loaded, native or wasm: the slot costs 4 MiB of pixels and the page 8,
+    /// loaded, native or wasm: the slot costs 4 MiB of pixels and the page 8.5,
     /// so a game without mods holds none of them.
     pub fn build_over_with_image(
         root: &ResourceSource,

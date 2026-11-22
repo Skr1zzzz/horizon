@@ -1,6 +1,7 @@
 //! A client mod's dynamic textures through the game (#11138): with a native mod loaded and no
 //! mixin, an image the mod creates draws under its id on the real HUD pipeline from the next
-//! frame's patches, with no resource reload, until the mod frees it.
+//! frame's patches, with no resource reload, goes up again for a new renderer, and lasts until
+//! the mod frees it.
 use horizon_client::{gfx::entity_pixel_test::render_hud, hud::HudBatch};
 use mod_api::{
     DynamicTextureError, Hooks, Identifier, ModEntry,
@@ -52,12 +53,19 @@ fn a_mods_dynamic_texture_draws_under_its_id_until_it_is_freed() {
             game.create_dynamic_texture(&id, 16, 16, &rgba).unwrap();
             let mut batch = HudBatch::scratch(SIZE);
             game.dynamic_textures
-                .patches(&game.gui.atlas, &mut batch.patches);
+                .patches(&mut game.gui.atlas, &mut batch.patches);
             let (src, dst) = ([0.0, 0.0, 16.0, 16.0], [16.0, 16.0, 32.0, 32.0]);
             assert!(game.native_sprite(&mut batch, name, src, dst, None));
             let pixels = render_hud(&batch, &game.gui.atlas, SIZE).expect("software Vulkan draw");
             assert_eq!(pixel(&pixels, 32, 32), GREEN, "the mod's image");
             assert_eq!(pixel(&pixels, 4, 4), BLACK, "outside the sprite");
+            // A new renderer's atlas texture holds only the packed pixels: the image goes up
+            // again with the next frame.
+            game.forget_atlas_slots();
+            let mut again = Vec::new();
+            game.dynamic_textures
+                .patches(&mut game.gui.atlas, &mut again);
+            assert_eq!(again.len(), 1, "a new renderer gets the image again");
             game.free_dynamic_texture(&id).unwrap();
             let mut batch = HudBatch::scratch(SIZE);
             assert!(!game.native_sprite(&mut batch, name, src, dst, None));

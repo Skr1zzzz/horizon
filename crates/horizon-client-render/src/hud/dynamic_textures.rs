@@ -1,24 +1,35 @@
 //! Client mods' dynamic textures (`ClientRenderClientHost::create_dynamic_texture`, #11138),
 //! vanilla's `DynamicTexture` registered in the `TextureManager` under an id. Here every image
 //! lives in one page of the HUD atlas ([`PAGE`] texels) that the atlas packs only when a client
-//! mod is loaded ([`super::HudAtlas::build_over_with_image`]), placed by a shelf packer. Its id
-//! names its rect among the atlas's sprites, so `DrawContext::sprite` (`native_sprite`),
-//! `gui_sprite` and an inline `TextObject::Atlas` of `minecraft:gui` draw it as any other GUI
-//! sprite, and no resource reload is needed. An update rewrites the image in place when it still
-//! fits there; a free drops the name and gives the room back. The last pixels of each image stay
-//! here, counted in the mod's byte budget, to patch the atlas texture again after a resource
-//! reload or for a new renderer.
+//! mod is loaded ([`super::HudAtlas::build_over_with_image`]). The page is two halves, and each
+//! mod packs all its images into one of them ([`DynamicTextures::create`] says which), so two
+//! mods never take room from each other. An image's id names its rect among the atlas's sprites,
+//! so `DrawContext::sprite` (`native_sprite`), `gui_sprite` and an inline `TextObject::Atlas` of
+//! `minecraft:gui` draw it as any other GUI sprite, and no resource reload is needed. An update
+//! rewrites the image in place when it still fits there; a free drops the name and gives the
+//! room back. None of it changes the atlas's `revision`, which says which atlas it is: what
+//! draws these names looks them up as it draws (name tags and text displays keep no laid-out
+//! line that holds an inline object). The last pixels of each image stay here, counted in the
+//! mod's byte budget, to patch the atlas texture again after a resource reload or for a new
+//! renderer.
 use super::{HudAtlas, Rect, gui_sprite::atlas_key_of_gui_sprite};
 use mod_api::{
     DYNAMIC_TEXTURE_MAX_SIDE, DYNAMIC_TEXTURE_MOD_BYTES, DYNAMIC_TEXTURE_MOD_IMAGES,
     DynamicTextureBudget, DynamicTextureError, Identifier,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// The page's size in texels: two mods' whole byte budgets (`DYNAMIC_TEXTURE_MOD_BYTES`), 8 MiB
-/// of atlas, paid only by a game with a client mod loaded. It is wide rather than tall: the
-/// atlas packs its tallest images first and rounds its height up to whole 1024-row bands.
-pub const PAGE: [u32; 2] = [2048, 1024];
+/// A half of the page, in texels a side: 32 rows of 32 images of 32 x 32, each with the
+/// transparent column and row it keeps ([`need`]). So a half holds 1024 images of one size up to
+/// 32 x 32, or a whole byte budget (`DYNAMIC_TEXTURE_MOD_BYTES`) of images of one size whose sides
+/// are powers of two from 32 to 1024 (`DYNAMIC_TEXTURE_MAX_SIDE`): 1024 of 32 x 32, 256 of
+/// 64 x 64, ..., one of 1024 x 1024.
+const HALF: u32 = 32 * 33;
+
+/// The page's size in texels: two halves side by side, 8.5 MiB of atlas, paid only by a game with
+/// a client mod loaded. Its 1056 rows are 32 more than the atlas's 1024-row slots; the atlas
+/// rounds its height up to whole 1024-row bands, so whether they cost a band depends on the packs.
+pub const PAGE: [u32; 2] = [2 * HALF, HALF];
 
 /// The atlas sprite of the page while the atlas is packed; [`Page::take`] then takes it out of
 /// the sprites, so no mod draws the page by name and sees another mod's images.
@@ -54,10 +65,21 @@ impl Page {
             atlas: [width, height],
         })
     }
+    /// Each half's size: half the page's width, all its height.
+    fn half(&self) -> [u32; 2] {
+        [self.size[0] / 2, self.size[1]]
+    }
+    /// The atlas texel at `space`'s top left corner.
+    fn corner(&self, space: Space) -> [u32; 2] {
+        [
+            self.origin[0] + space.side as u32 * self.half()[0] + space.at[0],
+            self.origin[1] + space.at[1],
+        ]
+    }
     /// The sprite of a `size` image at `space`: its texels from the space's corner, its GUI size
     /// the image's.
     fn rect(&self, space: Space, size: [u32; 2]) -> Rect {
-        let (x, y) = (self.origin[0] + space.x, self.origin[1] + space.y);
+        let [x, y] = self.corner(space);
         let [width, height] = self.atlas.map(|side| side as f32);
         Rect {
             u0: x as f32 / width,
@@ -68,20 +90,21 @@ impl Page {
             h: size[1],
         }
     }
-    /// `image`'s pixels as a patch at its space, with a transparent column to its right and row
-    /// below it where its space has them: the gap keeps a neighbour's texels, or those of an
-    /// image freed there before, from bleeding in at the sprite's edges.
+    /// `image`'s pixels as a patch at its space, with the transparent column to its right and row
+    /// below it that its space holds: the gap keeps a neighbour's texels, or those of an image
+    /// freed there before, from bleeding in at the sprite's edges.
     fn patch(&self, image: &Image) -> crate::font::Patch {
         let [w, h] = image.size.map(|side| side as usize);
-        let width = (w + 1).min(image.space.width as usize);
-        let height = (h + 1).min(image.space.height as usize);
+        let width = (w + 1).min(image.space.size[0] as usize);
+        let height = (h + 1).min(image.space.size[1] as usize);
         let mut rgba = vec![0; width * height * 4];
         for (row, src) in image.pixels.chunks_exact(w * 4).enumerate() {
             rgba[row * width * 4..][..w * 4].copy_from_slice(src);
         }
+        let [x, y] = self.corner(image.space);
         crate::font::Patch {
-            x: self.origin[0] + image.space.x,
-            y: self.origin[1] + image.space.y,
+            x,
+            y,
             width: width as u32,
             height: height as u32,
             rgba,
@@ -89,115 +112,143 @@ impl Page {
     }
 }
 
-/// A place in the page, in texels from its corner: the columns an image took of its shelf, and
-/// the shelf's rows.
+/// Where an image lies: its half (0 the left, 1 the right), the node of that half's [`Cuts`]
+/// that holds it, and that node's corner and size in texels from the half's corner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Space {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+    side: usize,
+    node: usize,
+    at: [u32; 2],
+    size: [u32; 2],
 }
 
-/// The texels an image of `size` takes in a page of `page`: one more each way for the gap, but
-/// never more than the page (at its edge the atlas's own gap is there).
-fn need(page: [u32; 2], size: [u32; 2]) -> [u32; 2] {
-    [(size[0] + 1).min(page[0]), (size[1] + 1).min(page[1])]
+/// The texels an image of `size` takes: one more each way, for the transparent column to its
+/// right and row below it, which stay inside its half.
+fn need(size: [u32; 2]) -> [u32; 2] {
+    size.map(|side| side + 1)
 }
 
-/// The page's shelf packer: rows of images, each as tall as the first image that opened it, and
-/// the free runs of columns of each. An image takes the shortest shelf tall enough that wastes at
-/// most half its height, else a new shelf below the last, else any shelf tall enough; a freed
-/// image's columns go back to its shelf, and emptied shelves at the bottom close.
+/// A half's packer: a tree of rectangles, each free, held by one image, or cut in two. An image
+/// takes the smallest free rectangle it fits (the topmost, then the leftmost, of equal ones),
+/// cut across at the image's height and then along at its width: images of one size fill a half
+/// row by row, and an image shorter than a row starts rows of its own in the room beside the
+/// tall one, rather than holding a column as tall as that row. A freed rectangle joins its free
+/// neighbour back into the rectangle they were cut from, and so on up, so a half emptied is one
+/// free rectangle again.
 #[derive(Clone, Debug, Default)]
-struct Shelves {
-    rows: Vec<Shelf>,
+struct Cuts {
+    nodes: Vec<Node>,
+    /// Nodes that joined back into their parent, for the next cuts to reuse.
+    spare: Vec<usize>,
 }
 
-#[derive(Clone, Debug)]
-struct Shelf {
-    y: u32,
-    height: u32,
-    /// Free runs of columns, `[x, width]`, left to right, none touching another.
-    free: Vec<[u32; 2]>,
+#[derive(Clone, Copy, Debug)]
+struct Node {
+    /// Its corner and size in texels from the half's corner.
+    at: [u32; 2],
+    size: [u32; 2],
+    /// The node it was cut from; none for the half itself.
+    parent: Option<usize>,
+    state: State,
 }
 
-impl Shelves {
-    /// A space of `w` x `h` texels in a page of `page`, or none when no shelf has room and no new
-    /// shelf fits below the last.
-    fn alloc(&mut self, page: [u32; 2], [w, h]: [u32; 2]) -> Option<Space> {
-        if w > page[0] || h > page[1] {
-            return None;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Free,
+    Held,
+    Cut([usize; 2]),
+    Spare,
+}
+
+impl Cuts {
+    /// A rectangle of `room` texels in a half of `half`: the node that now holds it, and its
+    /// corner; none when no free rectangle is that large.
+    fn alloc(&mut self, half: [u32; 2], room: [u32; 2]) -> Option<(usize, [u32; 2])> {
+        if self.nodes.is_empty() {
+            self.nodes.push(Node {
+                at: [0, 0],
+                size: half,
+                parent: None,
+                state: State::Free,
+            });
         }
-        let row = match shortest(&self.rows, [w, h], true) {
-            Some(row) => row,
-            None => {
-                let top = self.rows.last().map_or(0, |shelf| shelf.y + shelf.height);
-                if top + h <= page[1] {
-                    self.rows.push(Shelf {
-                        y: top,
-                        height: h,
-                        free: vec![[0, page[0]]],
-                    });
-                    self.rows.len() - 1
-                } else {
-                    shortest(&self.rows, [w, h], false)?
-                }
+        let (mut held, _) = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.state == State::Free && node.size[0] >= room[0] && node.size[1] >= room[1]
+            })
+            .min_by_key(|(_, node)| {
+                let area = u64::from(node.size[0]) * u64::from(node.size[1]);
+                (area, node.at[1], node.at[0])
+            })?;
+        let Node {
+            at: [x, y],
+            size: [width, height],
+            ..
+        } = self.nodes[held];
+        let [w, h] = room;
+        if height > h {
+            held = self.cut(
+                held,
+                [[x, y], [width, h]],
+                [[x, y + h], [width, height - h]],
+            );
+        }
+        if width > w {
+            held = self.cut(held, [[x, y], [w, h]], [[x + w, y], [width - w, h]]);
+        }
+        self.nodes[held].state = State::Held;
+        Some((held, [x, y]))
+    }
+    /// `node` cut into two free nodes, `first` and `second` (corner and size each): the first.
+    fn cut(&mut self, node: usize, first: [[u32; 2]; 2], second: [[u32; 2]; 2]) -> usize {
+        let a = self.add(node, first);
+        let b = self.add(node, second);
+        self.nodes[node].state = State::Cut([a, b]);
+        a
+    }
+    /// A free node of `parent` at `at`, `size` texels.
+    fn add(&mut self, parent: usize, [at, size]: [[u32; 2]; 2]) -> usize {
+        let node = Node {
+            at,
+            size,
+            parent: Some(parent),
+            state: State::Free,
+        };
+        match self.spare.pop() {
+            Some(spare) => {
+                self.nodes[spare] = node;
+                spare
             }
-        };
-        let shelf = &mut self.rows[row];
-        let run = shelf.free.iter().position(|run| run[1] >= w)?;
-        let [x, width] = shelf.free[run];
-        if width == w {
-            shelf.free.remove(run);
-        } else {
-            shelf.free[run] = [x + w, width - w];
-        }
-        Some(Space {
-            x,
-            y: shelf.y,
-            width: w,
-            height: shelf.height,
-        })
-    }
-    /// `space`'s columns back to its shelf in a page `page_width` wide.
-    fn free(&mut self, page_width: u32, space: Space) {
-        let Some(shelf) = self.rows.iter_mut().find(|shelf| shelf.y == space.y) else {
-            return;
-        };
-        let free = &mut shelf.free;
-        let at = free.partition_point(|run| run[0] < space.x);
-        free.insert(at, [space.x, space.width]);
-        if at + 1 < free.len() && free[at][0] + free[at][1] == free[at + 1][0] {
-            free[at][1] += free[at + 1][1];
-            free.remove(at + 1);
-        }
-        if at > 0 && free[at - 1][0] + free[at - 1][1] == free[at][0] {
-            free[at - 1][1] += free[at][1];
-            free.remove(at);
-        }
-        while self
-            .rows
-            .last()
-            .is_some_and(|shelf| shelf.free == [[0, page_width]])
-        {
-            self.rows.pop();
+            None => {
+                self.nodes.push(node);
+                self.nodes.len() - 1
+            }
         }
     }
-}
-
-/// The shortest of `rows` tall enough for `w` x `h` with a free run that wide, and when `snug`,
-/// no more than half as tall again.
-fn shortest(rows: &[Shelf], [w, h]: [u32; 2], snug: bool) -> Option<usize> {
-    rows.iter()
-        .enumerate()
-        .filter(|(_, shelf)| {
-            shelf.height >= h
-                && (!snug || shelf.height <= h + h / 2)
-                && shelf.free.iter().any(|run| run[1] >= w)
-        })
-        .min_by_key(|(_, shelf)| shelf.height)
-        .map(|(row, _)| row)
+    /// `node`'s room back, joined with its free neighbours into what they were cut from.
+    fn free(&mut self, mut node: usize) {
+        self.nodes[node].state = State::Free;
+        while let Some(parent) = self.nodes[node].parent {
+            let State::Cut(children) = self.nodes[parent].state else {
+                break;
+            };
+            if children
+                .iter()
+                .any(|&child| self.nodes[child].state != State::Free)
+            {
+                break;
+            }
+            for child in children {
+                self.nodes[child].state = State::Spare;
+                self.spare.push(child);
+            }
+            self.nodes[parent].state = State::Free;
+            node = parent;
+        }
+    }
 }
 
 /// Every mod's dynamic textures: where each lies in the page, and its last pixels.
@@ -205,8 +256,12 @@ fn shortest(rows: &[Shelf], [w, h]: [u32; 2], snug: bool) -> Option<usize> {
 pub struct DynamicTextures {
     /// Each image by its id (`mymod:emoji/smile`), the name it has among the atlas's sprites.
     images: BTreeMap<String, Image>,
-    shelves: Shelves,
+    /// The halves' packers, the left's first.
+    halves: [Cuts; 2],
     limits: Limits,
+    /// The `revision` of the atlas whose sprites name the images: a call that changes the atlas or
+    /// patches it first binds them to one it has not seen ([`DynamicTextures::rebind`]).
+    bound: u64,
 }
 
 struct Image {
@@ -217,7 +272,7 @@ struct Image {
     /// The last pixels given, `size` RGBA: what the atlas gets again after a rebuild.
     pixels: Vec<u8>,
     /// Whether its id is among the atlas's sprites as this image: a sprite the packs brought
-    /// under the same name after a resource reload keeps the name.
+    /// under the same id after a resource reload keeps the name.
     named: bool,
     /// Whether the atlas texture lacks these pixels yet: set by a create, an update, a rebuilt
     /// atlas or a new renderer, cleared when [`DynamicTextures::patches`] hands them to a frame.
@@ -249,9 +304,12 @@ struct Held {
 
 impl DynamicTextures {
     /// Mod `owner` (none outside a mod's call) creates image `id` of `size` (width, height) from
-    /// `rgba`, `width * height` pixels of four bytes, in room of `atlas`'s page, and names it
-    /// among the atlas's sprites. Every refusal comes before the pixels are copied, and changes
-    /// nothing.
+    /// `rgba`, `width * height` pixels of four bytes, in its half of `atlas`'s page, and names it
+    /// among the atlas's sprites. A mod's first image takes the half fewer mods hold images in
+    /// (the left on a tie) and its later ones follow it there, so a second mod always gets the
+    /// half the first does not use, and a mod shares a half only when both halves hold other
+    /// mods' images as it takes one. Every refusal comes before the pixels are copied, and
+    /// changes nothing.
     pub fn create(
         &mut self,
         atlas: &mut HudAtlas,
@@ -265,20 +323,22 @@ impl DynamicTextures {
             .ok_or(DynamicTextureError::Unavailable)?;
         let owner = owned(owner, id)?;
         let bytes = self.sized(size, rgba.len())?;
+        self.rebind(atlas);
         let name = id.to_string();
-        if self.images.contains_key(&name) || taken(&atlas.sprites, &name) {
+        if clashes(&name, |key| {
+            self.images.contains_key(key) || atlas.sprites.contains_key(key)
+        }) {
             return Err(DynamicTextureError::NameTaken);
         }
         let held = self.held(owner);
         if held.images >= self.limits.images || held.bytes + bytes > self.limits.bytes {
             return Err(DynamicTextureError::OverBudget);
         }
+        let side = self.side(owner);
         let space = self
-            .shelves
-            .alloc(page.size, need(page.size, size))
+            .alloc(page, side, size)
             .ok_or(DynamicTextureError::NoSlot)?;
         atlas.sprites.insert(name.clone(), page.rect(space, size));
-        atlas.revision = HudAtlas::next_revision();
         self.images.insert(
             name,
             Image {
@@ -293,8 +353,8 @@ impl DynamicTextures {
         Ok(())
     }
     /// Mod `owner` gives its image `id` new pixels of `size`: in the space it holds when they fit
-    /// there, else in new room, the old given back. Every refusal comes before any copy, and
-    /// changes nothing.
+    /// there, else in new room of its half, the old given back. Every refusal comes before any
+    /// copy, and changes nothing.
     pub fn update(
         &mut self,
         atlas: &mut HudAtlas,
@@ -307,6 +367,7 @@ impl DynamicTextures {
             .dynamic_texture_page
             .ok_or(DynamicTextureError::Unavailable)?;
         let owner = owned(owner, id)?;
+        self.rebind(atlas);
         let name = id.to_string();
         let held = self.held(owner);
         let (old, kept) = match self.images.get(&name) {
@@ -320,15 +381,14 @@ impl DynamicTextures {
         if held.bytes - kept + bytes > self.limits.bytes {
             return Err(DynamicTextureError::OverBudget);
         }
-        let [w, h] = need(page.size, size);
-        let space = if w <= old.width && h <= old.height {
+        let [w, h] = need(size);
+        let space = if w <= old.size[0] && h <= old.size[1] {
             old
         } else {
             let space = self
-                .shelves
-                .alloc(page.size, [w, h])
+                .alloc(page, old.side, size)
                 .ok_or(DynamicTextureError::NoSlot)?;
-            self.shelves.free(page.size[0], old);
+            self.halves[old.side].free(old.node);
             space
         };
         let image = self.images.get_mut(&name).expect("the image checked above");
@@ -342,7 +402,6 @@ impl DynamicTextures {
             image.size = size;
             if image.named {
                 atlas.sprites.insert(name, page.rect(space, size));
-                atlas.revision = HudAtlas::next_revision();
             }
         }
         image.dirty = true;
@@ -356,10 +415,11 @@ impl DynamicTextures {
         owner: Option<&str>,
         id: &Identifier,
     ) -> Result<(), DynamicTextureError> {
-        let page = atlas
+        atlas
             .dynamic_texture_page
             .ok_or(DynamicTextureError::Unavailable)?;
         let owner = owned(owner, id)?;
+        self.rebind(atlas);
         let name = id.to_string();
         match self.images.get(&name) {
             None => return Err(DynamicTextureError::Unknown),
@@ -369,10 +429,9 @@ impl DynamicTextures {
             Some(_) => {}
         }
         let image = self.images.remove(&name).expect("the image checked above");
-        self.shelves.free(page.size[0], image.space);
+        self.halves[image.space.side].free(image.space.node);
         if image.named {
             atlas.sprites.remove(&name);
-            atlas.revision = HudAtlas::next_revision();
         }
         Ok(())
     }
@@ -392,28 +451,38 @@ impl DynamicTextures {
             self.limits.bytes.saturating_sub(held.bytes),
         ))
     }
-    /// A rebuilt atlas (a resource reload): every image keeps its place in the new atlas's page,
-    /// its name goes back among the sprites and its kept pixels are patched again. A sprite the
-    /// new packs have under the name keeps it. An atlas with no page leaves the names out and
-    /// the pixels kept, until one has a page again.
+    /// The images bound to `atlas`, a rebuilt one (a resource reload): every image keeps its place
+    /// in the new atlas's page, its name goes back among the sprites and its kept pixels are
+    /// patched again. A sprite the packs have under the image's id, in either form ([`clashes`]),
+    /// keeps the name. An atlas with no page leaves the names out and the pixels kept, until one
+    /// has a page again. A create, an update, a free and the frame's [`DynamicTextures::patches`]
+    /// first bind the images to an atlas they have not seen (by its `revision`), so the images
+    /// follow a rebuilt atlas without this call too; the game makes it as the atlas comes, so the
+    /// names are there before anything draws.
     pub fn rebind(&mut self, atlas: &mut HudAtlas) {
+        if self.bound == atlas.revision {
+            return;
+        }
+        self.bound = atlas.revision;
         let page = atlas.dynamic_texture_page;
+        // Each against the packs' sprites alone, before any image's name goes in.
         for (name, image) in &mut self.images {
             image.dirty = true;
-            image.named = page.is_some() && !taken(&atlas.sprites, name);
-            match page {
-                Some(page) if image.named => {
-                    atlas
-                        .sprites
-                        .insert(name.clone(), page.rect(image.space, image.size));
-                }
-                Some(_) => log::warn!(
-                    "GUI atlas: dynamic texture {name} is hidden by a resource pack's sprite of that name"
-                ),
-                None => {}
+            image.named = page.is_some() && !clashes(name, |key| atlas.sprites.contains_key(key));
+            if page.is_some() && !image.named {
+                log::warn!(
+                    "GUI atlas: dynamic texture {name} is hidden by a resource pack's sprite of that id"
+                );
             }
         }
-        atlas.revision = HudAtlas::next_revision();
+        let Some(page) = page else {
+            return;
+        };
+        for (name, image) in self.images.iter().filter(|(_, image)| image.named) {
+            atlas
+                .sprites
+                .insert(name.clone(), page.rect(image.space, image.size));
+        }
     }
     /// A new renderer, whose atlas texture holds only the packed pixels: every image is patched
     /// again.
@@ -423,8 +492,9 @@ impl DynamicTextures {
         }
     }
     /// The images `atlas`'s texture lacks, as patches into its page, each once until it changes
-    /// again.
-    pub fn patches(&mut self, atlas: &HudAtlas, patches: &mut Vec<crate::font::Patch>) {
+    /// again; bound to `atlas` first ([`DynamicTextures::rebind`]).
+    pub fn patches(&mut self, atlas: &mut HudAtlas, patches: &mut Vec<crate::font::Patch>) {
+        self.rebind(atlas);
         let Some(page) = atlas.dynamic_texture_page else {
             return;
         };
@@ -442,6 +512,29 @@ impl DynamicTextures {
                 images: held.images + 1,
                 bytes: held.bytes + image.pixels.len() as u64,
             })
+    }
+    /// The half `owner`'s images lie in; for a mod with none, the half fewer mods hold images in,
+    /// the left on a tie.
+    fn side(&self, owner: &str) -> usize {
+        let mut mods: [BTreeSet<&str>; 2] = Default::default();
+        for image in self.images.values() {
+            if image.owner.as_ref() == owner {
+                return image.space.side;
+            }
+            mods[image.space.side].insert(&*image.owner);
+        }
+        usize::from(mods[1].len() < mods[0].len())
+    }
+    /// Room for an image of `size` in half `side` of `page`.
+    fn alloc(&mut self, page: Page, side: usize, size: [u32; 2]) -> Option<Space> {
+        let room = need(size);
+        let (node, at) = self.halves[side].alloc(page.half(), room)?;
+        Some(Space {
+            side,
+            node,
+            at,
+            size: room,
+        })
     }
     /// The bytes of a `[width, height]` image of `len` bytes: `BadSize` for a side of 0 or
     /// pixels that are not `width * height * 4` bytes, `TooLarge` past the longest side. The
@@ -461,11 +554,19 @@ impl DynamicTextures {
     }
 }
 
-/// Whether the atlas has a sprite under `name`, or the GUI sprite an inline `TextObject::Atlas`
-/// of `minecraft:gui` finds first for it (`mymod:gui/sprites/emoji/smile` for
-/// `mymod:emoji/smile`): an image never shadows a pack's sprite, nor a pack's sprite an image.
-fn taken(sprites: &HashMap<String, Rect>, name: &str) -> bool {
-    sprites.contains_key(name) || sprites.contains_key(&atlas_key_of_gui_sprite(name))
+/// Whether `holds` holds `name` or the other form of its id. `DrawContext::sprite` and
+/// `gui_sprite` find `ns:path` itself, and an inline `TextObject::Atlas` of `minecraft:gui` finds
+/// `ns:gui/sprites/path` first and `ns:path` after it, so the two are one id's two forms
+/// (`mymod:emoji/smile` and `mymod:gui/sprites/emoji/smile`). An image never takes a form that a
+/// pack's sprite or another image holds, whichever came first, so one id draws one picture.
+fn clashes(name: &str, holds: impl Fn(&str) -> bool) -> bool {
+    let plain = name.split_once(':').and_then(|(namespace, path)| {
+        let path = path.strip_prefix("gui/sprites/")?;
+        Some(format!("{namespace}:{path}"))
+    });
+    holds(name)
+        || holds(atlas_key_of_gui_sprite(name).as_str())
+        || plain.is_some_and(|plain| holds(plain.as_str()))
 }
 
 /// `owner`, when `id` is in a namespace `owner` owns (its own or its manifest's other
@@ -484,7 +585,7 @@ mod tests {
     use super::*;
     use DynamicTextureError::*;
 
-    /// A 64 x 32 page at (512, 600) of the 1024 x 1024 boot atlas.
+    /// A page of two 40 x 40 halves at (512, 600) of the 1024 x 1024 boot atlas.
     const ORIGIN: [u32; 2] = [512, 600];
 
     fn id(text: &str) -> Identifier {
@@ -494,7 +595,7 @@ mod tests {
         let mut atlas = HudAtlas::boot();
         atlas.dynamic_texture_page = Some(Page {
             origin,
-            size: [64, 32],
+            size: [80, 40],
             atlas: [atlas.width, atlas.height],
         });
         atlas
@@ -525,48 +626,98 @@ mod tests {
             rect.h,
         ]
     }
-    fn drained(textures: &mut DynamicTextures, atlas: &HudAtlas) -> Vec<crate::font::Patch> {
+    fn drained(textures: &mut DynamicTextures, atlas: &mut HudAtlas) -> Vec<crate::font::Patch> {
         let mut patches = Vec::new();
         textures.patches(atlas, &mut patches);
         patches
     }
 
     #[test]
-    fn the_shelves_pack_reuse_freed_room_and_refuse_a_full_page() {
-        let page = [64, 32];
-        let mut shelves = Shelves::default();
-        let at = |space: Option<Space>| space.map(|s| [s.x, s.y, s.width, s.height]);
-        // Three 17-texel squares share a shelf; a fourth fits neither it nor a shelf below.
-        assert_eq!(at(shelves.alloc(page, [17, 17])), Some([0, 0, 17, 17]));
-        let second = shelves.alloc(page, [17, 17]).unwrap();
-        assert_eq!([second.x, second.y], [17, 0]);
-        assert_eq!(at(shelves.alloc(page, [17, 17])), Some([34, 0, 17, 17]));
-        assert_eq!(shelves.alloc(page, [17, 17]), None, "a full page");
-        // A shorter image opens a shelf below rather than waste the tall one.
-        assert_eq!(at(shelves.alloc(page, [8, 4])), Some([0, 17, 8, 4]));
-        // A freed image's columns take the next image of its size.
-        shelves.free(64, second);
-        assert_eq!(at(shelves.alloc(page, [17, 17])), Some([17, 0, 17, 17]));
-        // Emptied shelves at the bottom close, so the whole page is free again.
-        for space in [
-            [0, 17, 8, 4],
-            [0, 0, 17, 17],
-            [17, 0, 17, 17],
-            [34, 0, 17, 17],
-        ] {
-            let [x, y, width, height] = space;
-            shelves.free(
-                64,
-                Space {
-                    x,
-                    y,
-                    width,
-                    height,
-                },
-            );
+    fn the_cuts_fill_rows_reuse_freed_room_and_join_it_back() {
+        let half = [64, 32];
+        assert_eq!(
+            Cuts::default().alloc(half, [65, 1]),
+            None,
+            "wider than the half"
+        );
+        let mut cuts = Cuts::default();
+        // Three 17-texel squares fill a row; a fourth fits neither it nor below it.
+        let first = cuts.alloc(half, [17, 17]).unwrap();
+        let second = cuts.alloc(half, [17, 17]).unwrap();
+        let third = cuts.alloc(half, [17, 17]).unwrap();
+        assert_eq!([first.1, second.1, third.1], [[0, 0], [17, 0], [34, 0]]);
+        assert_eq!(cuts.alloc(half, [17, 17]), None, "a full half");
+        // A short image takes the smallest room it fits, the row's end, and starts rows there.
+        let short = cuts.alloc(half, [8, 4]).unwrap();
+        assert_eq!(short.1, [51, 0]);
+        let below = cuts.alloc(half, [8, 4]).unwrap();
+        assert_eq!(below.1, [51, 4]);
+        // A freed square's room takes the next square.
+        cuts.free(second.0);
+        let again = cuts.alloc(half, [17, 17]).unwrap();
+        assert_eq!(again.1, [17, 0]);
+        // Freed rooms join back into what they were cut from: the whole half is free again.
+        for (node, _) in [first, again, third, short, below] {
+            cuts.free(node);
         }
-        assert_eq!(at(shelves.alloc(page, [64, 32])), Some([0, 0, 64, 32]));
-        assert_eq!(shelves.alloc(page, [65, 1]), None, "wider than the page");
+        assert_eq!(cuts.alloc(half, [64, 32]).map(|(_, at)| at), Some([0, 0]));
+    }
+
+    /// Two mods never take room from each other: whatever the first holds in its half, the second
+    /// fills its whole budget in the other and is refused only past it. These are the worst
+    /// shapes for a page the mods share: one 1024 x 1024 image, and 1 x 1024 strips, which take
+    /// twice their pixels in room.
+    #[test]
+    fn two_mods_fill_their_budgets_in_their_own_halves() {
+        let page = Some(Page {
+            origin: [0, 0],
+            size: PAGE,
+            atlas: [4096, 4096],
+        });
+        let (big, strip, emoji) = (
+            pixels([1024, 1024], [1; 4]),
+            pixels([1, 1024], [2; 4]),
+            pixels([32, 32], [3; 4]),
+        );
+        // How many images of one size mod `owner` creates before a refusal, and the refusal.
+        let fill = |textures: &mut DynamicTextures,
+                    atlas: &mut HudAtlas,
+                    owner: &str,
+                    size: [u32; 2],
+                    rgba: &[u8]| {
+            let mut made = 0;
+            loop {
+                let name = id(&format!("{owner}:image/{made}"));
+                match textures.create(atlas, Some(owner), &name, size, rgba) {
+                    Ok(()) => made += 1,
+                    Err(refusal) => return (made, refusal),
+                }
+            }
+        };
+        let mut atlas = HudAtlas::boot();
+        atlas.dynamic_texture_page = page;
+        let mut textures = DynamicTextures::default();
+        let one = fill(&mut textures, &mut atlas, "a", [1024, 1024], &big);
+        assert_eq!(
+            one,
+            (1, OverBudget),
+            "one 1024 x 1024 image is a whole budget"
+        );
+        let set = fill(&mut textures, &mut atlas, "b", [32, 32], &emoji);
+        assert_eq!(set, (1024, OverBudget), "beside it, a whole emoji set");
+        let mut atlas = HudAtlas::boot();
+        atlas.dynamic_texture_page = page;
+        let mut textures = DynamicTextures::default();
+        let strips = fill(&mut textures, &mut atlas, "a", [1, 1024], &strip);
+        assert_eq!(strips, (528, NoSlot), "strips fill their own half first");
+        let set = fill(&mut textures, &mut atlas, "b", [32, 32], &emoji);
+        assert_eq!(
+            set,
+            (1024, OverBudget),
+            "the other half still holds a whole set"
+        );
+        let third = fill(&mut textures, &mut atlas, "c", [32, 32], &emoji);
+        assert_eq!(third, (0, NoSlot), "a third mod shares the left half");
     }
 
     #[test]
@@ -585,7 +736,7 @@ mod tests {
                 &pixels([16, 16], red),
             )
             .unwrap();
-        assert_ne!(atlas.revision, revision, "cached text layouts look again");
+        assert_eq!(atlas.revision, revision, "still the same atlas");
         // `DrawContext::sprite` and `gui_sprite` read the name; the inline object its GUI atlas.
         let expected = [512, 600, 528, 616, 16, 16];
         assert_eq!(texels(atlas.sprites["a:emoji/smile"]), expected);
@@ -594,7 +745,7 @@ mod tests {
             .unwrap();
         assert_eq!(texels(inline), expected);
         // The next frame uploads it once, with a transparent gap right and below.
-        let patches = drained(&mut textures, &atlas);
+        let patches = drained(&mut textures, &mut atlas);
         assert_eq!(patches.len(), 1);
         let patch = &patches[0];
         assert_eq!(
@@ -605,10 +756,12 @@ mod tests {
         assert_eq!(texel(15, 15), red);
         assert_eq!(texel(16, 0), [0; 4]);
         assert_eq!(texel(0, 16), [0; 4]);
-        assert!(drained(&mut textures, &atlas).is_empty(), "uploaded once");
-        let revision = atlas.revision;
+        assert!(
+            drained(&mut textures, &mut atlas).is_empty(),
+            "uploaded once"
+        );
         textures.free(&mut atlas, Some("a"), &smile).unwrap();
-        assert_ne!(atlas.revision, revision);
+        assert_eq!(atlas.revision, revision);
         assert!(!atlas.sprites.contains_key("a:emoji/smile"));
         // The boot atlas has no missing sprite to fall back to.
         assert!(
@@ -616,6 +769,45 @@ mod tests {
                 .inline_sprite("minecraft:gui", "a:emoji/smile")
                 .is_none()
         );
+    }
+
+    /// `a:x` and `a:gui/sprites/x` are one id's two forms (an inline atlas object finds the
+    /// second first): an image never takes one while an image or a pack's sprite holds the
+    /// other, in either order, and a rebuilt atlas names every image again.
+    #[test]
+    fn an_id_and_its_gui_sprites_form_draw_one_picture() {
+        let mut atlas = atlas(ORIGIN);
+        let mut textures = textures();
+        let square = pixels([4, 4], [7; 4]);
+        let create = |textures: &mut DynamicTextures, atlas: &mut HudAtlas, name| {
+            textures.create(atlas, Some("a"), &id(name), [4, 4], &square)
+        };
+        create(&mut textures, &mut atlas, "a:x").unwrap();
+        let other = create(&mut textures, &mut atlas, "a:gui/sprites/x");
+        assert_eq!(other, Err(NameTaken));
+        create(&mut textures, &mut atlas, "a:gui/sprites/y").unwrap();
+        assert_eq!(create(&mut textures, &mut atlas, "a:y"), Err(NameTaken));
+        // A resource reload names both images again, each its own id's picture.
+        let mut rebuilt = self::atlas([100, 700]);
+        textures.rebind(&mut rebuilt);
+        let inline =
+            |atlas: &HudAtlas, sprite| atlas.inline_sprite("minecraft:gui", sprite).map(texels);
+        let x = texels(rebuilt.sprites["a:x"]);
+        assert_eq!(inline(&rebuilt, "a:x"), Some(x));
+        let y = texels(rebuilt.sprites["a:gui/sprites/y"]);
+        assert_eq!(inline(&rebuilt, "a:y"), Some(y));
+        // A pack's sprite under the other form hides an image while that atlas is up, no longer.
+        let mut packed = self::atlas(ORIGIN);
+        let white = packed.white;
+        packed.sprites.insert("a:gui/sprites/x".into(), white);
+        packed.sprites.insert("a:y".into(), white);
+        textures.rebind(&mut packed);
+        assert!(!packed.sprites.contains_key("a:x"));
+        assert!(!packed.sprites.contains_key("a:gui/sprites/y"));
+        let mut unpacked = self::atlas(ORIGIN);
+        textures.rebind(&mut unpacked);
+        assert!(unpacked.sprites.contains_key("a:x"));
+        assert!(unpacked.sprites.contains_key("a:gui/sprites/y"));
     }
 
     #[test]
@@ -662,10 +854,11 @@ mod tests {
             )
         };
         let before = state(&textures, &atlas);
-        let (wide, long, big) = (
+        let (wide, long, big, bar) = (
             pixels([32, 14], [5; 4]),
             pixels([33, 1], [0; 4]),
             pixels([32, 32], [0; 4]),
+            pixels([30, 8], [6; 4]),
         );
         type Call<'a> = (
             Option<&'a str>,
@@ -674,6 +867,7 @@ mod tests {
             &'a [u8],
             DynamicTextureError,
         );
+        // `c` shares `a`'s half, the left: both halves held another mod's images when it came.
         let refusals: [Call<'_>; 12] = [
             (None, "a:x", [1, 1], &tiny, NotOwned),
             (Some("b"), "a:x", [1, 1], &tiny, NotOwned),
@@ -703,7 +897,7 @@ mod tests {
             (Some("c"), "c:none", [1, 1], &tiny, Unknown),
             (Some("a"), "a:one", [16, 16], &square[..16], BadSize),
             (Some("a"), "a:one", [32, 32], &big, OverBudget),
-            (Some("b"), "b:p0", [32, 14], &wide, NoSlot),
+            (Some("a"), "a:one", [30, 8], &bar, NoSlot),
         ];
         for (owner, name, size, rgba, refusal) in updates {
             let got = textures.update(&mut atlas, owner, &id(name), size, rgba);
@@ -741,24 +935,23 @@ mod tests {
         };
         create(&mut textures, &mut atlas, "a:img").unwrap();
         create(&mut textures, &mut atlas, "a:next").unwrap();
-        drained(&mut textures, &atlas);
-        // The same size: new pixels in the same place, and no layout looks again.
+        drained(&mut textures, &mut atlas);
+        // The same size: new pixels in the same place.
         let revision = atlas.revision;
         textures
             .update(&mut atlas, Some("a"), &img, [8, 8], &pixels([8, 8], green))
             .unwrap();
-        assert_eq!(atlas.revision, revision);
         assert_eq!(texels(atlas.sprites["a:img"]), [512, 600, 520, 608, 8, 8]);
-        let patches = drained(&mut textures, &atlas);
+        let patches = drained(&mut textures, &mut atlas);
         assert_eq!([patches[0].x, patches[0].y], [512, 600]);
         assert_eq!(patches[0].rgba[..4], green);
-        // Smaller: still its place, the sprite its new size.
+        // Smaller: still its place, the sprite its new size, and still the same atlas.
         textures
             .update(&mut atlas, Some("a"), &img, [6, 4], &pixels([6, 4], green))
             .unwrap();
-        assert_ne!(atlas.revision, revision);
         assert_eq!(texels(atlas.sprites["a:img"]), [512, 600, 518, 604, 6, 4]);
-        // Larger than its place: it moves past `a:next`, and its old columns come back.
+        assert_eq!(atlas.revision, revision);
+        // Larger than its place: it moves past `a:next`, and its old room comes back.
         textures
             .update(
                 &mut atlas,
@@ -769,7 +962,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(texels(atlas.sprites["a:img"]), [530, 600, 546, 608, 16, 8]);
-        let patches = drained(&mut textures, &atlas);
+        assert_eq!(atlas.revision, revision);
+        let patches = drained(&mut textures, &mut atlas);
         let at = [
             patches[0].x,
             patches[0].y,
@@ -791,25 +985,33 @@ mod tests {
         textures
             .create(&mut atlas, Some("a"), &one, [4, 2], &pixels([4, 2], blue))
             .unwrap();
-        drained(&mut textures, &atlas);
+        drained(&mut textures, &mut atlas);
         // A resource reload: the page lies elsewhere in the new atlas.
         let mut rebuilt = self::atlas([100, 700]);
         textures.rebind(&mut rebuilt);
         assert_eq!(texels(rebuilt.sprites["a:one"]), [100, 700, 104, 702, 4, 2]);
-        let patches = drained(&mut textures, &rebuilt);
+        let patches = drained(&mut textures, &mut rebuilt);
         assert_eq!(patches.len(), 1);
         assert_eq!([patches[0].x, patches[0].y], [100, 700]);
         assert_eq!(patches[0].rgba[..4], blue);
         // A new renderer's texture has only the packed pixels.
         textures.forget_uploads();
-        assert_eq!(drained(&mut textures, &rebuilt).len(), 1);
+        assert_eq!(drained(&mut textures, &mut rebuilt).len(), 1);
+        // The frame's patches bind an atlas the images have not seen, with no `rebind` call.
+        let mut later = self::atlas([200, 800]);
+        let patches = drained(&mut textures, &mut later);
+        assert_eq!(texels(later.sprites["a:one"]), [200, 800, 204, 802, 4, 2]);
+        assert_eq!(
+            [patches.len() as u32, patches[0].x, patches[0].y],
+            [1, 200, 800]
+        );
         // An atlas with no page names nothing and refuses every call, keeping the image.
         let mut bare = self::atlas(ORIGIN);
         bare.dynamic_texture_page = None;
         textures.rebind(&mut bare);
         assert!(!bare.sprites.contains_key("a:one"));
         assert_eq!(textures.free(&mut bare, Some("a"), &one), Err(Unavailable));
-        assert!(drained(&mut textures, &bare).is_empty());
+        assert!(drained(&mut textures, &mut bare).is_empty());
         // A pack's sprite of the same name keeps it, through the image's free too.
         let mut shadowed = self::atlas(ORIGIN);
         let white = shadowed.white;

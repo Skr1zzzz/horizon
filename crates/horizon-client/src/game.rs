@@ -8654,8 +8654,8 @@ impl Game<'_> {
         // map_patches any earlier leaves them a frame behind.
         hud.patches.append(&mut self.map_patches);
         // Client mods' dynamic textures created, updated or lost by a rebuilt atlas texture.
-        let atlas = &self.gui.atlas;
-        self.dynamic_textures.patches(atlas, &mut hud.patches);
+        self.dynamic_textures
+            .patches(&mut self.gui.atlas, &mut hud.patches);
         hud.patches.append(self.text_patches.get_mut());
         let entity_spans = std::mem::take(self.entity_spans.get_mut());
         let entity_motion = std::mem::take(self.entity_motion.get_mut());
