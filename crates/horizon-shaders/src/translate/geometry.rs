@@ -892,6 +892,8 @@ mod tests {
             "void main() { for (int i = 0; i < 3; i++) { step(i); EmitVertex(); } }".into(),
             "void main() { for (int i = 0; i < 3; i++) { EmitVertex(); if (c) i--; } }".into(),
             "void main() { for (int i = 0; i < 3; i++) { EmitVertex(); if (c) i.x = -1; } }".into(),
+            "void main() { for (int i = 0; i < 3; i++) { EmitVertex(); if (c && i == 2) i -= 3; } }"
+                .into(),
             // A strip not ended before the next one, and one in a loop of another kind.
             format!("void main() {{ if (c) {{ {strip} }} {strip} EndPrimitive(); }}"),
             format!("void main() {{ do {{ {strip} EndPrimitive(); }} while (++n < 2); }}"),
