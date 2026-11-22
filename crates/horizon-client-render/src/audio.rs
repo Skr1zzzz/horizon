@@ -733,6 +733,11 @@ impl MixerBackend {
     /// nothing marks two copies of one event. Two different events alike in all four (two
     /// players' steps on grass, side by side, within 150 ms) are heard once. That is accepted:
     /// at that distance and timing they sound like one; a doubled sound is the louder fault.
+    ///
+    /// A copy held for a source a client mod paused (`Backend::hold`), or paused since it started,
+    /// is not heard, so it never counts as the copy heard. A held copy still looks for one: when
+    /// another player's copy is heard it is dropped, or it would play the sound a second time
+    /// once its source carries on.
     fn duplicate(&self, channel: ChannelId, (namespace, path): (&str, &str)) -> bool {
         // Alone: nobody else's copy, and no lock taken for it.
         if self.shares.load(std::sync::atomic::Ordering::Relaxed) == 0 {
@@ -748,6 +753,7 @@ impl MixerBackend {
         if m.listeners.is_empty() {
             return false;
         }
+        let held = c.state == State::Held;
         let key = format!("{namespace}:{path}");
         let key = variantless(&key);
         let at = c.at;
@@ -756,6 +762,7 @@ impl MixerBackend {
             o.owner != self.owner
                 && o.world == world
                 && !o.relative
+                && !matches!(o.state, State::Held | State::Paused)
                 && o.started
                     .as_ref()
                     .is_some_and(|(k, t)| k == key && t.elapsed() < SAME_SOUND)
@@ -764,7 +771,7 @@ impl MixerBackend {
         if let Some(c) = m.channels.get_mut(&channel) {
             if twin {
                 c.state = State::Stopped;
-            } else {
+            } else if !held {
                 c.started = Some((key.to_owned(), std::time::Instant::now()));
             }
         }
@@ -3549,6 +3556,78 @@ mod tests {
                 .values()
                 .all(|c| c.owner == 0)
         );
+    }
+
+    #[test]
+    fn a_copy_nobody_hears_does_not_drop_another_players() {
+        let mixer = Arc::new(Mutex::new(Mixer::default()));
+        let shares = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let backend = |owner| MixerBackend {
+            mixer: mixer.clone(),
+            root: ResourceSource::indexed(Default::default()),
+            cache: Arc::default(),
+            decoder: None,
+            next: (u64::from(owner)) << 40,
+            live: true,
+            owner,
+            world: 0,
+            shares: shares.clone(),
+        };
+        let (mut p1, mut p2) = (backend(0), backend(1));
+        mixer
+            .lock()
+            .unwrap()
+            .listeners
+            .insert(1, ([0.0; 3], 0.0, 0.0));
+        let at = |b: &mut MixerBackend, at: [f64; 3]| {
+            let id = b.create(false).unwrap();
+            b.set_position(id, at);
+            id
+        };
+        let sound = ("minecraft", "mob/creeper/say1.ogg");
+        // P1's source is paused by a client mod: its copy is held, and P2's copy still plays.
+        let held = at(&mut p1, [5.0, 64.0, 5.0]);
+        p1.hold(held);
+        assert!(!p1.duplicate(held, sound));
+        let heard = at(&mut p2, [5.2, 64.0, 5.0]);
+        assert!(!p2.duplicate(heard, sound));
+        assert_eq!(state_of(&mixer, held), Some(State::Held));
+        assert_eq!(state_of(&mixer, heard), Some(State::Initial));
+        // A copy that started and was paused since is not heard either.
+        let first = at(&mut p1, [40.0, 64.0, 5.0]);
+        assert!(!p1.duplicate(first, sound));
+        mixer
+            .lock()
+            .unwrap()
+            .channels
+            .get_mut(&first)
+            .unwrap()
+            .state = State::Playing;
+        p1.pause(first);
+        let second = at(&mut p2, [40.0, 64.0, 5.0]);
+        assert!(!p2.duplicate(second, sound));
+        // Playing, it is the copy heard, as before.
+        p1.unpause(first);
+        let third = at(&mut p2, [40.0, 64.0, 5.0]);
+        assert!(p2.duplicate(third, sound));
+        // Held after P2's copy started: P2's is heard and P1's is dropped, or the sound would play
+        // a second time once P1's source carries on.
+        let audible = at(&mut p2, [80.0, 64.0, 5.0]);
+        assert!(!p2.duplicate(audible, sound));
+        let held_after = at(&mut p1, [80.0, 64.0, 5.0]);
+        p1.hold(held_after);
+        assert!(p1.duplicate(held_after, sound));
+        assert_eq!(state_of(&mixer, held_after), Some(State::Stopped));
+        assert_eq!(state_of(&mixer, audible), Some(State::Initial));
+    }
+
+    fn state_of(mixer: &Mutex<Mixer>, channel: ChannelId) -> Option<State> {
+        mixer
+            .lock()
+            .unwrap()
+            .channels
+            .get(&channel)
+            .map(|c| c.state)
     }
 
     #[test]
