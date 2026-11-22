@@ -434,11 +434,27 @@ impl World {
         }
         let mask = SectionMask::below(top as usize + 1).from(bottom as usize);
         let (columns_x, columns_z) = (lo[0] >> 4..=hi[0] >> 4, lo[2] >> 4..=hi[2] >> 4);
+        // The box's own columns when there are fewer of them than loaded ones (a schematic's handful among a view
+        // distance's), else the loaded ones it holds: the same columns either way. In i64: an i32 box spans 2^28
+        // columns a side.
+        let span =
+            |r: &std::ops::RangeInclusive<i32>| i64::from(*r.end()) - i64::from(*r.start()) + 1;
         let mut marked = 0;
-        for &(x, z) in self.chunks.keys() {
-            if columns_x.contains(&x) && columns_z.contains(&z) {
-                self.dirty_sections.insert_column_mask((x, z), mask);
-                marked += mask.len();
+        if span(&columns_x) * span(&columns_z) < self.chunks.len() as i64 {
+            for x in columns_x {
+                for z in columns_z.clone() {
+                    if self.chunks.contains_key(&(x, z)) {
+                        self.dirty_sections.insert_column_mask((x, z), mask);
+                        marked += mask.len();
+                    }
+                }
+            }
+        } else {
+            for &(x, z) in self.chunks.keys() {
+                if columns_x.contains(&x) && columns_z.contains(&z) {
+                    self.dirty_sections.insert_column_mask((x, z), mask);
+                    marked += mask.len();
+                }
             }
         }
         marked
@@ -983,8 +999,9 @@ mod tests {
     }
 
     /// `remesh_sections`: a box marks every section of the loaded columns it reaches, from its lowest block's
-    /// section to its highest's, whichever corner comes first; columns it misses or that aren't loaded and
-    /// heights past the level are left out, and a box as large as an i32 allows marks the whole level.
+    /// section to its highest's, whichever corner comes first, and whether it walks its own columns or the loaded
+    /// ones; columns it misses or that aren't loaded and heights past the level are left out, and a box as large as
+    /// an i32 allows marks the whole level.
     #[test]
     fn a_box_marks_the_loaded_sections_it_reaches() {
         let mut world = World::new(BlockStateId(0), 0);
@@ -1008,6 +1025,20 @@ mod tests {
                 ((1, 0), vec![8, 9])
             ]
         );
+        // Among more loaded columns than the box spans (its six), the same box marks the same sections.
+        let mut crowded = World::new(BlockStateId(0), 0);
+        let far = (10..20).map(|x| (x, 10));
+        for (x, z) in [(0, 0), (1, 0), (-1, -1), (5, 5)].into_iter().chain(far) {
+            crowded.chunks.insert((x, z), Arc::new(Chunk::empty(x, z)));
+        }
+        assert_eq!(crowded.mark_box_dirty([17, 90, 5], [-3, 70, -3]), 6);
+        let mut again: Vec<_> = crowded
+            .dirty_sections
+            .columns()
+            .map(|(column, mask)| (column, mask.iter().collect::<Vec<_>>()))
+            .collect();
+        again.sort_unstable();
+        assert_eq!(again, got);
 
         world.dirty_sections.clear();
         let top = MIN_Y + SECTIONS as i32 * 16;
