@@ -3988,10 +3988,10 @@ mod tests {
     }
 
     /// A source a client mod paused (`pause_source`) stays paused through the game's own pause
-    /// and resume. A streamed, looping or tickable sound of it that starts meanwhile starts
-    /// paused and keeps its channel, one still loading too, so the music manager keeps its track.
-    /// A source carried on while the game is paused waits for the game; carried on, each sound
-    /// plays, a held one from its start.
+    /// and resume. A streamed or looping sound of it that starts meanwhile starts paused and
+    /// keeps its channel, one still loading too, so the music manager keeps its track. A source
+    /// carried on while the game is paused waits for the game; carried on, each sound plays, a
+    /// held one from its start.
     #[test]
     fn a_paused_source_stays_paused_through_the_games_pause_and_holds_new_sounds() {
         use crate::sound_engine::{BLOCKS, MUSIC};
@@ -4063,10 +4063,10 @@ mod tests {
             assert!(audio.engine.is_active(id), "{id}");
         }
 
-        // A mod's sound is tickable, so one started on a paused source is held too: decoded
-        // already, it starts paused at once.
+        // A looping sound started on a paused source is held too: decoded already, it starts
+        // paused at once.
         audio.pause_source(BLOCKS, true);
-        let held = audio.play_mod_sound(&stone, 0);
+        let held = audio.play_mod_sound(&stone.clone().looping(0), 0);
         assert_eq!(state(&audio, held), Some(State::Paused));
         // Carried on while the game is paused, a source waits for the game's resume.
         audio.pause();
@@ -4089,17 +4089,21 @@ mod tests {
         audio.stop_all();
     }
 
-    /// While its source is paused, a sound that ends on its own (not streamed, looping or
-    /// tickable) doesn't start, as vanilla's `play` doesn't start one at no volume. Held, each
-    /// would keep its channel until the resume: rain on a paused weather source would take them
-    /// all, and no sound of any source could start.
+    /// While its source is paused, a sound that ends on its own doesn't start, as vanilla's
+    /// `play` doesn't start one at no volume: one not streamed, not looping and not of music, a
+    /// mod's own (tickable) one-shot and a note block on records too. Held, each would keep its
+    /// channel until the resume: rain on a paused weather source would take them all, and no
+    /// sound of any source could start. A track is held even when its pack doesn't stream it,
+    /// and starts silently, so the music manager keeps it and shows no Now Playing toast for it.
     #[test]
     fn one_shots_of_a_paused_source_take_no_channels() {
-        use crate::sound_engine::{STATIC_CHANNELS, WEATHER};
+        use crate::sound_engine::{MUSIC, RECORDS, STATIC_CHANNELS, WEATHER};
         let mut audio = live_audio();
         audio.engine.registry.add_file(
             "minecraft",
-            br#"{"weather.rain": {"sounds": ["ambient/weather/rain1"]}}"#,
+            br#"{"weather.rain": {"sounds": ["ambient/weather/rain1"]},
+                 "block.note_block.harp": {"sounds": ["note/harp"]},
+                 "music.game": {"sounds": ["music/game/calm1"]}}"#,
             &|_, _| true,
         );
         let rain = || {
@@ -4116,14 +4120,37 @@ mod tests {
         for _ in 0..=STATIC_CHANNELS {
             assert_eq!(audio.play_instance(rain(), false).1, PlayResult::NotStarted);
         }
+        let raindrop = mod_api::SoundPlay::at(
+            "minecraft:weather.rain",
+            mod_api::SoundSource::Weather,
+            [0.0; 3],
+        );
+        let sound = audio.play_mod_sound(&raindrop, 0);
+        assert_eq!(audio.mod_sound_state(sound), mod_api::SoundState::Stopped);
+        audio.pause_source(RECORDS, true);
+        let note = SoundInstance::at(
+            "minecraft:block.note_block.harp",
+            RECORDS,
+            3.0,
+            1.0,
+            LegacyRandom::new(1),
+            [0.0; 3],
+        );
+        assert_eq!(audio.play_instance(note, false).1, PlayResult::NotStarted);
         assert_eq!(audio.engine.used_channels(), [0, 0]);
+        // A track its pack doesn't stream is held all the same, and starts silently.
+        audio.pause_source(MUSIC, true);
+        let music = SoundInstance::for_music("minecraft:music.game", LegacyRandom::new(1));
+        let (track, result) = audio.play_instance(music, true);
+        assert_eq!(result, PlayResult::StartedSilently);
+        assert!(audio.engine.is_active(track));
         // Another source's sound still starts, and so does rain once its source carries on.
         let random = LegacyRandom::new(1);
         let click = SoundInstance::for_ui("minecraft:ui.button.click", 1.0, 0.25, random);
         assert_eq!(audio.play_instance(click, false).1, PlayResult::Started);
         audio.pause_source(WEATHER, false);
         assert_eq!(audio.play_instance(rain(), false).1, PlayResult::Started);
-        assert_eq!(audio.engine.used_channels(), [2, 0]);
+        assert_eq!(audio.engine.used_channels(), [3, 0]);
     }
 
     fn volume_of(audio: &Audio, id: InstanceId) -> Option<f32> {

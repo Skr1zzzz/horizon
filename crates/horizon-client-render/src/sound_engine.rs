@@ -1580,11 +1580,13 @@ impl SoundEngine {
             }
             silently = true;
         }
-        // Its source is paused (`pause_source`): a sound that ends on its own doesn't start, as
-        // one at no volume doesn't. Held, its channel would stay taken until the resume, and rain
-        // every few ticks would take them all. A stream, a loop or a tickable sound starts held
-        // below, keeping its channel: paused music keeps its track.
-        let lasting = sound.stream || instance.looping || instance.tickable();
+        // Its source is paused (`pause_source`): only a stream, a loop or a sound of music starts,
+        // held below with its channel. Music starts even when a pack doesn't stream it, as vanilla
+        // starts music silently at no volume, so the music manager keeps its track. Any other
+        // sound doesn't start, as one at no volume doesn't, a mod's tickable one-shot or a note
+        // block (on records) too: held, its channel would stay taken until the resume, and rain
+        // every few ticks would take them all.
+        let lasting = sound.stream || instance.looping || source == MUSIC;
         if !lasting && self.source_paused(source) {
             return PlayResult::NotStarted;
         }
@@ -1646,8 +1648,11 @@ impl SoundEngine {
             relative,
             unmuffled,
         );
-        // Its source is paused (`pause_source`): it starts paused, keeping its channel.
-        if self.source_paused(source) {
+        // Its source is paused (`pause_source`): it starts paused, keeping its channel, and
+        // silently, as at no volume: the music manager shows no Now Playing toast for a track
+        // nobody hears.
+        let held = self.source_paused(source);
+        if held {
             backend.hold(channel);
         }
         backend.start(channel, &sound, looping);
@@ -1655,7 +1660,7 @@ impl SoundEngine {
         if tickable {
             self.ticking.push(id);
         }
-        if silently {
+        if silently || held {
             PlayResult::StartedSilently
         } else {
             PlayResult::Started
@@ -1935,15 +1940,16 @@ impl SoundEngine {
     }
     /// A client mod's `sound_source_pause`: every channel of `source` pauses (`paused`) or
     /// carries on. One pause per source for the whole client, whichever mod asks: a carry-on
-    /// ends it for all. Until the source carries on, a streamed, looping or tickable sound of it
-    /// that starts starts paused and keeps its channel, as one paused while playing does, so it
-    /// stays `is_active`: the music manager keeps a paused track as its current one and picks no
-    /// other (`MusicManager.tick`). Any other sound of it doesn't start (`play_inner`): held, its
-    /// channel would never end. Carrying on, each plays on from where it was, one that started
-    /// paused from its start; while the game's own pause (`pause_all_except`) holds the source
-    /// they wait for the game's `resume`, which in turn leaves a paused source paused. Only the
-    /// sounds played on that very source: `MASTER` is the sounds played on master, as in
-    /// `stop_matching`. The pause outlasts `stop_all` (a new level, a device change, a reload).
+    /// ends it for all. Until the source carries on, a streamed or looping sound of it that
+    /// starts, and any sound of music, starts paused (and silently) and keeps its channel, as
+    /// one paused while playing does, so it stays `is_active`: the music manager keeps a paused
+    /// track as its current one and picks no other (`MusicManager.tick`). Any other sound of it
+    /// doesn't start (`play_inner`): held, its channel would never end. Carrying on, each plays
+    /// on from where it was, one that started paused from its start; while the game's own pause
+    /// (`pause_all_except`) holds the source they wait for the game's `resume`, which in turn
+    /// leaves a paused source paused. Only the sounds played on that very source: `MASTER` is
+    /// the sounds played on master, as in `stop_matching`. The pause outlasts `stop_all` (a new
+    /// level, a device change, a reload).
     pub fn pause_source(&mut self, source: usize, paused: bool, backend: &mut impl Backend) {
         let bit = source_bit(source);
         if paused {

@@ -82,8 +82,9 @@ impl Game<'_> {
     /// Plays the sounds client mods asked for since the last update, then applies their stops
     /// and fades, and forgets the instances the engine let go. A play stopped (or faded to 0 at
     /// once) before this update never reaches the engine. Pauses and stops of whole sources
-    /// apply first: a sound asked for with them starts after the stop, and paused on a paused
-    /// source. Called from the audio update (`tick_sound_engine`), before the engine's own tick.
+    /// apply first: a sound asked for with them starts after the stop, and on a paused source
+    /// it starts paused or not at all (`SoundEngine::pause_source`). Called from the audio
+    /// update (`tick_sound_engine`), before the engine's own tick.
     pub(super) fn apply_mod_sounds(&mut self) {
         for (source, change) in self.mod_sounds.sources.get_mut().drain(..) {
             match change {
@@ -192,12 +193,13 @@ impl Game<'_> {
     /// For a client mod: from the next audio update, every sound of `source` pauses (`paused`)
     /// or carries on. The pause is the client's, shared by every mod, so any mod's carry-on ends
     /// it; the game's own pause and resume leave a paused source paused, and so does a level
-    /// change. A streamed, looping or tickable sound of it that starts meanwhile starts paused
-    /// and keeps its channel, so paused music keeps its track and the music manager starts no
-    /// other (`MusicManager.tick` waits while its track `isActive`); any other doesn't start, so
-    /// held sounds can't use up the channels. Carried on, each plays from where it was, one that
-    /// started paused from its start. Only the sounds played on that very source: `Master` is the
-    /// sounds played on master, not every sound. False on a server.
+    /// change. A streamed or looping sound of it that starts meanwhile, and any sound of music,
+    /// starts paused and keeps its channel, so paused music keeps its track and the music
+    /// manager starts no other (`MusicManager.tick` waits while its track `isActive`); any
+    /// other doesn't start, a mod's one-shot too, so held sounds can't use up the channels.
+    /// Carried on, each plays from where it was, one that started paused from its start. Only
+    /// the sounds played on that very source: `Master` is the sounds played on master, not every
+    /// sound. False on a server.
     pub(super) fn sound_source_pause(&self, source: SoundSource, paused: bool) -> bool {
         self.change_sound_source(source, SourceChange::Pause(paused))
     }
