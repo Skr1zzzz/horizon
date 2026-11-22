@@ -116,6 +116,9 @@ pub(super) struct SculkState {
     /// The vibration the sensor `activate_sensor` activates for, as it was
     /// heard (`activate_sensor_by`): its relayed events keep that source.
     heard: Option<Info>,
+    /// The served player who threw the projectile whose landing
+    /// `projectile_landed_event` posts, by UUID (`projectile_landed_by`).
+    thrower: Option<[i32; 4]>,
     /// The wardens' and allays' slots in the mob list, and the list they were
     /// read from: see `listener_slots`.
     listeners: Vec<u32>,
@@ -2137,13 +2140,31 @@ impl Game<'_> {
         owner: Option<Who>,
         at: [f64; 3],
     ) {
-        let ctx = Context {
-            source: (id != 0).then_some(EventSource::Entity(id)),
-            owner,
-            player: owner == Some(Who::Player) || self.rides_player(owner),
-            ..Context::default()
-        };
+        let player = owner == Some(Who::Player) || self.rides_player(owner);
+        // Taken, so an event posted while this one is heard doesn't name them.
+        let thrower = self.sculk.thrower.take();
+        let ctx = sculk::projectile_land_context(id, owner, thrower, player);
         self.post_game_event("minecraft:projectile_land", at, ctx);
+    }
+    /// [`Self::projectile_landed_event`] for a projectile the served player
+    /// `guest` threw, named by their UUID (`VibrationInfo.projectileOwnerUuid`):
+    /// a trident lands outside their turn, and a projectile that hits another
+    /// player lands in that player's turn, where `Who::Player` is someone
+    /// else. A shrieker a sensor's click sets off from it then warns by the
+    /// thrower's own tracker.
+    pub(in crate::game) fn projectile_landed_by(
+        &mut self,
+        id: u32,
+        owner: Option<Who>,
+        guest: Option<u32>,
+        at: [f64; 3],
+    ) {
+        let thrower = guest
+            .and_then(|conn| self.lan.as_ref()?.hub.guest(conn))
+            .map(|g| horizon_client::lan::playerdata::uuid_ints(g.uuid));
+        let outer = std::mem::replace(&mut self.sculk.thrower, thrower);
+        self.projectile_landed_event(id, owner, at);
+        self.sculk.thrower = outer;
     }
     /// A projectile's own event (`gameEvent(event)`, `Context.of(this, state)`):
     /// its owner as the projectile's owner, `state` the affected state. A

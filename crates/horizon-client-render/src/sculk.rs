@@ -210,6 +210,27 @@ pub fn relayed_context(mut ctx: Context, heard: &Info, owner_is_player: bool) ->
     ctx.player |= owner_is_player;
     ctx
 }
+/// The context `Projectile.onHit` posts `PROJECTILE_LAND` with,
+/// `GameEvent.Context.of(projectile)`: the projectile `id` (0: not tracked,
+/// no entity to name) and its `owner`. `thrower` is the UUID of the served
+/// player who threw it (`Projectile.getOwner`), which
+/// `VibrationInfo.projectileOwnerUuid` takes: it lands outside their turn, or
+/// in the turn of the player it hit, where the player is someone else.
+/// `owner_is_player`: `tryGetPlayer` finds a player through that owner.
+pub fn projectile_land_context(
+    id: u32,
+    owner: Option<Who>,
+    thrower: Option<[i32; 4]>,
+    owner_is_player: bool,
+) -> Context {
+    Context {
+        source: (id != 0).then_some(EventSource::Entity(id)),
+        owner,
+        owner_uuid: thrower,
+        player: owner_is_player,
+        ..Context::default()
+    }
+}
 
 impl Selector {
     pub fn add_candidate(&mut self, new: Info, tick: i64) {
@@ -1029,6 +1050,37 @@ mod tests {
             (Some(Who::Player), Some(guest))
         );
         assert!(click.player);
+    }
+
+    /// A served player's trident lands outside their turn, and a projectile
+    /// that hits another served player lands in that one's turn, where the
+    /// player is someone else: the landing names who threw it by their UUID
+    /// (`VibrationInfo.projectileOwnerUuid`), and so does the click a sensor
+    /// relays from it on its tick, by which the shrieker it sets off picks
+    /// whose warden spawn tracker to warn.
+    #[test]
+    fn a_projectile_landing_names_the_player_who_threw_it() {
+        let thrower = [0, 0, 0, 12];
+        let landed = projectile_land_context(40, Some(Who::Player), Some(thrower), true);
+        assert_eq!(landed.source, Some(EventSource::Entity(40)));
+        assert_eq!(
+            (landed.owner, landed.owner_uuid),
+            (Some(Who::Player), Some(thrower))
+        );
+        // What the sensor hears (`sculk_listen`), and the click it relays.
+        let heard = Info {
+            source: landed.source,
+            owner: landed.owner,
+            source_uuid: landed.source_uuid,
+            owner_uuid: landed.owner_uuid,
+            ..info("minecraft:projectile_land", 3.0)
+        };
+        let trident = Context {
+            source: landed.source,
+            ..Context::default()
+        };
+        let click = relayed_context(trident, &heard, landed.player);
+        assert_eq!((click.owner_uuid, click.player), (Some(thrower), true));
     }
 
     #[test]

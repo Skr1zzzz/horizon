@@ -5478,8 +5478,9 @@ impl Game<'_> {
             return Ok(());
         }
         let atp = [at.x, at.y, at.z];
-        // Projectile.onHit: the landing is heard.
-        self.projectile_landed_event(p.id, p.owner, atp);
+        // Projectile.onHit: the landing is heard, as the shooter's, even in
+        // the turn of the player it hit.
+        self.projectile_landed_by(p.id, p.owner, p.guest, atp);
         let source_kind = self.projectile_damage_kind(p);
         let attacker_species = match p.owner {
             Some(Who::Mob(id)) => self.mobs.iter().find(|m| m.id == id).map(|m| m.species()),

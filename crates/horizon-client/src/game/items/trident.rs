@@ -855,9 +855,10 @@ impl Game<'_> {
                             self.thrower_hit(t.guest, &victim, direct, damage);
                         }
                         // Projectile.onHit: the landing is heard, at the hit.
-                        self.projectile_landed_event(
+                        self.projectile_landed_by(
                             t.id,
                             Some(Who::Player),
+                            t.guest,
                             [t.position.x, t.position.y, t.position.z],
                         );
                         self.audio.play(
@@ -906,9 +907,10 @@ impl Game<'_> {
                     } else if let Some((stop, block, _)) = clip {
                         // Projectile.onHit on a block: PROJECTILE_LAND at the
                         // block's centre.
-                        self.projectile_landed_event(
+                        self.projectile_landed_by(
                             t.id,
                             Some(Who::Player),
+                            t.guest,
                             [
                                 f64::from(block.x) + 0.5,
                                 f64::from(block.y) + 0.5,
