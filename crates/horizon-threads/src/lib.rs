@@ -495,6 +495,21 @@ fn far_back() -> bool {
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL) != 0 }
 }
 
+/// Puts a thread [`favour_current`] raised back at the default priority, the
+/// one a new thread has on Windows (the default quality of service on macOS):
+/// for the tick's helpers, which take the render thread's priority only while
+/// frames can share them. Nothing elsewhere, where nothing was raised. Whether
+/// the OS took it.
+#[cfg(any(target_vendor = "apple", windows))]
+pub fn unfavour_current() -> bool {
+    far_back()
+}
+
+#[cfg(not(any(target_vendor = "apple", windows)))]
+pub fn unfavour_current() -> bool {
+    false
+}
+
 /// Run the calling thread only on a core nothing else wants: work that may
 /// take seconds and that nothing waits for yet (the stronghold rings while a
 /// world opens). The idle class on Linux, background quality of service on
@@ -1009,6 +1024,26 @@ mod tests {
             }
         );
         assert_eq!(frame, THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+
+    /// A thread `favour_current` raised goes back to the ordinary priority a
+    /// new thread has: a tick helper once frames stop sharing it.
+    #[cfg(windows)]
+    #[test]
+    fn an_unfavoured_thread_is_back_at_the_ordinary_priority() {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_NORMAL,
+        };
+        let priority = std::thread::spawn(|| {
+            super::favour_current();
+            assert!(super::unfavour_current());
+            // SAFETY: reads the priority of the thread it runs on; the
+            // pseudo handle needs no closing.
+            unsafe { GetThreadPriority(GetCurrentThread()) }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(priority, THREAD_PRIORITY_NORMAL);
     }
 
     /// A helper goes behind only once a dedicated server asks for it, and

@@ -8,11 +8,12 @@
 //! ([`after_tick`]) and never during one. `HORIZON_PARALLEL_TICK` wins over the setting, and is
 //! all a dedicated server follows (`server.toml`'s `parallel_tick`).
 //!
-//! A window's frames share the same helpers for their long loops ([`frame_lanes`],
-//! [`frame_pool`]) while the server tick doesn't; `HORIZON_SERIAL_FRAME=1` keeps those on the
-//! render thread.
+//! A window's frames share the same helpers for their long loops ([`hand_to_frames`]) while the
+//! server tick doesn't, and only then do the helpers run at the render thread's priority;
+//! `HORIZON_SERIAL_FRAME=1` keeps those loops on the render thread and the helpers as they were.
 use crate::graphics::ParallelTickMode;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// `HORIZON_PARALLEL_TICK`, whatever the setting says: `0` keeps every tick serial, `1` turns the
@@ -54,6 +55,7 @@ pub fn set_setting(mode: ParallelTickMode) {
             u8::from(mode == ParallelTickMode::On as u8),
             Ordering::Relaxed,
         );
+        follow_frames();
     }
 }
 
@@ -76,6 +78,8 @@ pub fn after_tick(ms: f32, cpu_ms: Option<f32>) {
             log::info!("Horizon: the tick takes {ms:.1} ms, back on one thread");
         }
         SHARED.store(u8::from(shared), Ordering::Relaxed);
+        drop(auto);
+        follow_frames();
     }
 }
 
@@ -289,27 +293,31 @@ pub fn lanes() -> usize {
 /// phase's lanes (the server thread takes parts too). `None` if its threads couldn't start.
 static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
 
-/// [`POOL`], made now if it isn't yet.
-///
-/// Its threads ask for the priority the server and render threads have (`favour_current`): the
-/// tick or the frame waits for each part they take, and behind the chunk workers, which
-/// outnumber the cores while terrain loads, a part could wait 10 to 200 ms for a core.
+/// [`POOL`], made now if it isn't yet. Its threads start at the ordinary priority and take the
+/// render thread's only while frames can share them ([`follow_frames`]).
 fn try_pool() -> Option<&'static rayon::ThreadPool> {
-    POOL.get_or_init(|| {
-        log::info!("Horizon: starting the tick's helper threads");
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(horizon_threads::sizing::for_pool(
-                horizon_threads::sizing::Pool::TickHelper,
-            ))
-            .thread_name(|i| format!("tick-helper-{i}"))
-            .start_handler(|_| {
-                horizon_threads::favour_current();
-            })
-            .build()
-            .inspect_err(|e| log::warn!("Horizon: the tick's helper threads didn't start: {e}"))
-            .ok()
-    })
-    .as_ref()
+    let mut made = false;
+    let pool = POOL
+        .get_or_init(|| {
+            made = true;
+            log::info!("Horizon: starting the tick's helper threads");
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(horizon_threads::sizing::for_pool(
+                    horizon_threads::sizing::Pool::TickHelper,
+                ))
+                .thread_name(|i| format!("tick-helper-{i}"))
+                .build()
+                .inspect_err(|e| log::warn!("Horizon: the tick's helper threads didn't start: {e}"))
+                .ok()
+        })
+        .as_ref();
+    // A change `follow_frames` made while the pool was being made found no pool to tell.
+    if let Some(pool) = pool.filter(|_| made)
+        && *RAISE.lock().unwrap_or_else(PoisonError::into_inner)
+    {
+        pool.spawn_broadcast(|_| follow_priority());
+    }
+    pool
 }
 
 /// [`try_pool`] for a tick phase, which stops the game when its helpers can't start, as it
@@ -348,17 +356,121 @@ fn share_out(lanes: usize, work: &(dyn Fn() + Sync)) {
 /// thread's priority there (`favour_current`), and would wait behind the chunk workers.
 const FRAME_MIN_THREADS: usize = 5;
 
+/// The hardware threads frames count by: `horizon_threads::worker_count`, which
+/// `HORIZON_WORKER_THREADS` caps, never more than the machine's own count, the one
+/// `favour_current` goes by. So frames share only where the helpers' raise takes, and a run
+/// capped under [`FRAME_MIN_THREADS`] keeps them on the render thread like a machine that small.
+fn frame_threads() -> usize {
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let machine = std::thread::available_parallelism().map_or(1, |n| n.get());
+        horizon_threads::worker_count().min(machine)
+    })
+}
+
+/// Whether this process draws frames ([`hand_to_frames`]): a window's game. A dedicated server
+/// never does, and its helpers keep the ordinary priority.
+static FRAMES: AtomicBool = AtomicBool::new(false);
+
+/// What decides whether a frame's loops may share the helpers ([`frame_lanes`]), and with it
+/// whether the helpers run at the render thread's priority ([`follow_frames`]). A frame waits
+/// for every helper it wakes, so the helpers go ahead of the chunk workers while frames can wake
+/// them, and keep the ordinary priority otherwise, the tick's phases included.
+#[derive(Clone, Copy)]
+struct FrameGate {
+    /// A window's game handed its frames the helpers ([`hand_to_frames`]).
+    frames: bool,
+    /// `HORIZON_SERIAL_FRAME=1`: every frame loop on the render thread, the helpers as before.
+    serial_frame: bool,
+    /// `HORIZON_PARALLEL_TICK`, when set to a value it reads ([`forced`]): an A/B run of the
+    /// tick has the helpers to itself.
+    forced: Option<u8>,
+    /// The tick's phases share the helpers now (Parallel Tick On, Auto during heavy ticks): they
+    /// are the tick's then.
+    tick_shares: bool,
+    /// [`frame_threads`].
+    threads: usize,
+}
+
+impl FrameGate {
+    fn now() -> Self {
+        Self {
+            frames: FRAMES.load(Ordering::Relaxed),
+            serial_frame: crate::par::serial_frame(),
+            forced: forced(),
+            tick_shares: SHARED.load(Ordering::Relaxed) > 0,
+            threads: frame_threads(),
+        }
+    }
+
+    /// Whether frames may share the helpers now, and the helpers run at the render thread's
+    /// priority.
+    fn open(self) -> bool {
+        self.frames
+            && !self.serial_frame
+            && self.forced.is_none()
+            && !self.tick_shares
+            && self.threads >= FRAME_MIN_THREADS
+    }
+}
+
 /// How many threads a frame's loop may share now, the render thread among them
-/// (`horizon_client::par::FramePool::lanes`, handed over as a window's game starts). Unlike
-/// [`par_map`] it does not wait for the Parallel Tick setting, which is the server's; but while
-/// the tick's phases share the helpers ([`parallel_tick`]: Parallel Tick On, Auto while a tick is
-/// heavy, `HORIZON_PARALLEL_TICK`), they are the tick's, and frames keep to the render thread
-/// rather than wait behind a phase's parts. 1 then, and on a small machine.
+/// (`horizon_client::par::FramePool::lanes`, handed over by [`hand_to_frames`]): the helpers and
+/// the render thread while `FrameGate` is open, else 1.
 pub fn frame_lanes() -> usize {
-    if parallel_tick() > 0 || horizon_threads::worker_count() < FRAME_MIN_THREADS {
-        1
-    } else {
+    if FrameGate::now().open() {
         horizon_threads::sizing::for_pool(horizon_threads::sizing::Pool::TickHelper) + 1
+    } else {
+        1
+    }
+}
+
+/// Hands a window's frames the helpers for their long loops (`horizon_client::par::extend_frame`),
+/// as its game starts. They share them from then on whenever they may (Parallel Tick isn't
+/// sharing the tick, no `HORIZON_PARALLEL_TICK` or `HORIZON_SERIAL_FRAME=1`, five hardware
+/// threads or more), and the helpers run at the render thread's priority for as long.
+pub fn hand_to_frames() {
+    FRAMES.store(true, Ordering::Relaxed);
+    crate::par::set_frame_pool(crate::par::FramePool {
+        lanes: frame_lanes,
+        run: frame_pool,
+    });
+    follow_frames();
+}
+
+/// Whether the helpers should run at the render thread's priority: [`FrameGate::open`] as
+/// [`follow_frames`] last found it. Its lock keeps two changes from crossing.
+static RAISE: Mutex<bool> = Mutex::new(false);
+
+/// After a change to what [`FrameGate`] reads: the helpers' priority follows it. Each helper
+/// asks for it between jobs ([`follow_priority`]), before any tick phase or frame queued after
+/// this call, since a pool thread takes the jobs broadcast to it before queued ones.
+fn follow_frames() {
+    let mut raise = RAISE.lock().unwrap_or_else(PoisonError::into_inner);
+    let open = FrameGate::now().open();
+    if std::mem::replace(&mut *raise, open) != open
+        && let Some(Some(pool)) = POOL.get()
+    {
+        pool.spawn_broadcast(|_| follow_priority());
+    }
+}
+
+thread_local! {
+    /// Whether this helper asked for the render thread's priority ([`follow_priority`]).
+    static RAISED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// On a helper: the priority [`follow_frames`] decided last, asked of the system only when it
+/// changes. A helper it never raised keeps the priority it started with, as on a dedicated
+/// server and with `HORIZON_SERIAL_FRAME=1`; one it raised goes back to the ordinary priority.
+fn follow_priority() {
+    let raise = *RAISE.lock().unwrap_or_else(PoisonError::into_inner);
+    if RAISED.with(|raised| raised.replace(raise)) != raise {
+        if raise {
+            horizon_threads::favour_current();
+        } else {
+            horizon_threads::unfavour_current();
+        }
     }
 }
 
@@ -607,7 +719,6 @@ mod tests {
     /// hanging) until another has started, and each item is still handled exactly once.
     #[test]
     fn chunks_overlap_and_run_once() {
-        use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
         let active = AtomicUsize::new(0);
         let overlapped = AtomicBool::new(false);
@@ -637,7 +748,6 @@ mod tests {
     /// part waits, bounded, until another has started), and in order on the caller with one lane.
     #[test]
     fn frame_parts_run_once_each() {
-        use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
         let runs: Vec<AtomicUsize> = (0..64).map(|_| AtomicUsize::new(0)).collect();
         let (active, overlapped) = (AtomicUsize::new(0), AtomicBool::new(false));
@@ -690,6 +800,69 @@ mod tests {
             order.lock().unwrap().push(k);
         });
         assert_eq!(order.into_inner().unwrap(), [0, 1, 2, 3, 4, 5]);
+    }
+
+    /// A window's frames on a machine of five threads or more, nothing in the way.
+    const OPEN: FrameGate = FrameGate {
+        frames: true,
+        serial_frame: false,
+        forced: None,
+        tick_shares: false,
+        threads: 5,
+    };
+
+    /// The helpers are raised exactly while frames can share them: not on a dedicated server,
+    /// not with `HORIZON_SERIAL_FRAME=1`, not while the tick's phases share them, and not under
+    /// five threads.
+    #[test]
+    fn helpers_are_raised_only_while_frames_can_share_them() {
+        assert!(OPEN.open());
+        assert!(
+            FrameGate {
+                threads: 16,
+                ..OPEN
+            }
+            .open()
+        );
+        for (gate, case) in [
+            (
+                FrameGate {
+                    frames: false,
+                    ..OPEN
+                },
+                "a dedicated server",
+            ),
+            (
+                FrameGate {
+                    serial_frame: true,
+                    ..OPEN
+                },
+                "HORIZON_SERIAL_FRAME=1",
+            ),
+            (
+                FrameGate {
+                    tick_shares: true,
+                    ..OPEN
+                },
+                "the tick's phases share the helpers",
+            ),
+            (FrameGate { threads: 4, ..OPEN }, "four threads"),
+        ] {
+            assert!(!gate.open(), "{case}");
+        }
+    }
+
+    /// `HORIZON_PARALLEL_TICK` keeps frames on the render thread and the helpers unraised
+    /// whatever it says, `0` included: an A/B run of the tick has the helpers to itself.
+    #[test]
+    fn horizon_parallel_tick_keeps_frames_off_the_helpers() {
+        for forced in [0, 1, 2] {
+            let gate = FrameGate {
+                forced: Some(forced),
+                ..OPEN
+            };
+            assert!(!gate.open(), "HORIZON_PARALLEL_TICK as {forced}");
+        }
     }
 
     /// A panic in a part reaches the caller instead of being lost on a helper.
