@@ -7,8 +7,8 @@ use std::io::{Cursor, Write};
 
 /// A composite program reading colortex0 and colortex6 at level 0 alone (`texelFetch` and
 /// `textureLod` at level 0, `textureSize` of level 0, a function's `textureLod` at 0), and
-/// colortex3, 5 and 7 where lower levels may answer (an implicit level, a level from a uniform, a
-/// function's implicit level).
+/// colortex2, 3, 4, 5, 7 and 8 where lower levels may answer or are counted (a bias, an implicit
+/// level, gradients, a level from a uniform, a function's implicit level, `textureQueryLevels`).
 fn composite() -> horizon_shaders::Program {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let mut add = |name: &str, source: &str| {
@@ -27,15 +27,18 @@ fn composite() -> horizon_shaders::Program {
     add(
         "composite.fsh",
         "#version 330 compatibility\n\
-         uniform sampler2D colortex0;\nuniform sampler2D colortex3;\nuniform sampler2D colortex5;\n\
-         uniform sampler2D colortex6;\nuniform sampler2D colortex7;\nuniform float viewWidth;\n\
+         uniform sampler2D colortex0;\nuniform sampler2D colortex2;\nuniform sampler2D colortex3;\n\
+         uniform sampler2D colortex4;\nuniform sampler2D colortex5;\nuniform sampler2D colortex6;\n\
+         uniform sampler2D colortex7;\nuniform sampler2D colortex8;\nuniform float viewWidth;\n\
          in vec2 uv;\n/* RENDERTARGETS: 1 */\nlayout(location = 0) out vec4 o;\n\
          vec4 atBase(sampler2D s, vec2 p) { return texture2DLod(s, p, 0.0); }\n\
          vec4 filtered(sampler2D s, vec2 p) { return texture2D(s, p); }\n\
          void main() {\n    \
              vec4 base = texelFetch(colortex0, ivec2(gl_FragCoord.xy), 0) + texture2DLod(colortex0, uv, 0.0)\n        \
                  + float(textureSize(colortex0, 0).x) + atBase(colortex6, uv);\n    \
-             o = base + texture2D(colortex3, uv) + texture2DLod(colortex5, uv, viewWidth) + filtered(colortex7, uv);\n}\n",
+             o = base + texture2D(colortex3, uv) + texture2DLod(colortex5, uv, viewWidth) + filtered(colortex7, uv)\n        \
+                 + texture2D(colortex2, uv, 1.0) + textureGrad(colortex4, uv, dFdx(uv), dFdy(uv))\n        \
+                 + float(textureQueryLevels(colortex8));\n}\n",
     );
     let pack = horizon_shaders::Pack::from_zip_bytes(
         "original-deep-reads",
@@ -52,7 +55,8 @@ fn composite() -> horizon_shaders::Program {
 }
 
 /// Level 0 named outright, in the program or in a function it hands the texture to, keeps a read
-/// on the first level; an implicit level or one worked out at run time may leave it.
+/// on the first level; an implicit, biased or computed level, gradients and a count of the levels
+/// may leave it.
 #[test]
 fn only_reads_that_may_leave_the_first_level_count() {
     let program = composite();
@@ -62,8 +66,40 @@ fn only_reads_that_may_leave_the_first_level_count() {
         .map(|s| s.name.as_str())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["colortex3", "colortex5", "colortex7"]);
+    assert_eq!(
+        names,
+        [
+            "colortex2",
+            "colortex3",
+            "colortex4",
+            "colortex5",
+            "colortex7",
+            "colortex8"
+        ]
+    );
     assert_eq!(deep_bindings(&program.vertex), Some(Vec::new()));
+}
+
+/// A call to a function the analysis hasn't been through (one declared after its caller) may read
+/// any texture past the first level, so no read of the program is told apart.
+#[test]
+fn a_call_it_cannot_follow_counts_as_every_read() {
+    let mut fragment = composite().fragment;
+    let (caller, _) = (fragment.functions.iter())
+        .find(|(_, f)| f.name.as_deref() == Some("hz_main"))
+        .expect("the pack's main");
+    let callee = fragment
+        .functions
+        .append(naga::Function::default(), naga::Span::UNDEFINED);
+    fragment.functions[caller].body.push(
+        naga::Statement::Call {
+            function: callee,
+            arguments: Vec::new(),
+            result: None,
+        },
+        naga::Span::UNDEFINED,
+    );
+    assert_eq!(deep_bindings(&fragment), None);
 }
 
 /// A chain is made when a pass reads it past the first level before something writes the
