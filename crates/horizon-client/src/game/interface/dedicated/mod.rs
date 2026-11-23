@@ -742,8 +742,10 @@ impl Lists {
         if !self.whitelisted(user) {
             return Some(translatable("multiplayer.disconnect.not_whitelisted", &[]));
         }
-        let ip = address.ip().to_string();
-        if self.ip_bans.contains(&ip)
+        let entries = self.ip_bans.entries();
+        let key =
+            ip_ban_key(entries.iter().map(|e| e.user.as_str()), address.ip()).map(str::to_owned);
+        if let Some(ip) = key
             && let Some(ban) = self.ip_bans.get(&ip).cloned()
         {
             let mut reason = translatable_tag(
@@ -763,6 +765,20 @@ impl Lists {
         }
         None
     }
+}
+
+/// The `banned-ips.json` key that bans `ip`: its own text or another spelling of the same address, as a
+/// file written by vanilla has it (Java writes `::1` as `0:0:0:0:0:0:0:1`) or an IPv4 address in its
+/// `::ffff:` form. Keys that are not addresses never match.
+fn ip_ban_key<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+    ip: std::net::IpAddr,
+) -> Option<&'a str> {
+    let ip = ip.to_canonical();
+    keys.into_iter().find(|key| {
+        key.parse::<std::net::IpAddr>()
+            .is_ok_and(|k| k.to_canonical() == ip)
+    })
 }
 
 /// DedicatedServerProperties.LEGACY_PRESET_NAMES: the old `level-type`
@@ -1053,6 +1069,10 @@ impl Game<'_> {
     fn run_dedicated_inner(&mut self, startup_began: &mut bool) -> Result<()> {
         // This thread ticks the server (MinecraftServer.spin's priority).
         horizon_threads::favour_current();
+        // Multiple hosted servers would otherwise all select the same core.
+        let _core = horizon_threads::server_core::dedicated_enabled()
+            .then(super::integrated::take_server_core)
+            .flatten();
         self.join_world_rest()?;
         let Setup {
             props,
@@ -1661,10 +1681,10 @@ impl Game<'_> {
         if self.is_dedicated_server() {
             if self.level.spawn.is_none() {
                 let [x, y, z] = loop {
-                    self.update_world();
                     if let Some(pos) = self.find_world_spawn()? {
                         break pos;
                     }
+                    self.update_world();
                     if Instant::now() > deadline {
                         return Err("the spawn area did not load".into());
                     }
@@ -1681,8 +1701,11 @@ impl Game<'_> {
             return Ok(());
         }
         while self.player.is_none() {
-            self.update_world();
             self.spawn_player()?;
+            if self.player.is_some() {
+                break;
+            }
+            self.update_world();
             if Instant::now() > deadline {
                 return Err("the spawn area did not load".into());
             }
@@ -2773,6 +2796,33 @@ mod tests {
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    /// `banned-ips.json` holds addresses as text: one written by vanilla spells `::1` as Java does
+    /// (`0:0:0:0:0:0:0:1`), and an IPv4 player may arrive in its `::ffff:` form. The same address bans
+    /// whatever its spelling; other addresses and keys that are no address do not.
+    #[test]
+    fn an_ip_ban_matches_the_address_not_its_spelling() {
+        use super::ip_ban_key;
+        let keys = [
+            "203.0.113.7",
+            "0:0:0:0:0:0:0:1",
+            "::ffff:198.51.100.2",
+            "not an address",
+        ];
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert_eq!(ip_ban_key(keys, ip("203.0.113.7")), Some("203.0.113.7"));
+        assert_eq!(
+            ip_ban_key(keys, ip("::ffff:203.0.113.7")),
+            Some("203.0.113.7")
+        );
+        assert_eq!(ip_ban_key(keys, ip("::1")), Some("0:0:0:0:0:0:0:1"));
+        assert_eq!(
+            ip_ban_key(keys, ip("198.51.100.2")),
+            Some("::ffff:198.51.100.2")
+        );
+        assert_eq!(ip_ban_key(keys, ip("203.0.113.8")), None);
+        assert_eq!(ip_ban_key(keys, ip("::2")), None);
+    }
 
     /// `/restart` without `horizon-server` refuses and stops nothing; with it, it asks the server loop to end.
     #[test]

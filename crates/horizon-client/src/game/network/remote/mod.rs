@@ -849,7 +849,7 @@ mod use_prediction;
 mod wire;
 
 // The `Game` methods moved into the files above stay here as the mod points they were, by name, module path and
-// signature (docs/layers.md#mod-points-stay-put); each forwards to its body in its file.
+// signature; each forwards to its body in its file.
 impl Game<'_> {
     // connection.rs
     pub(super) fn remote_sound_name(
@@ -904,6 +904,9 @@ impl Game<'_> {
     }
     pub(super) fn leave_server(&mut self, reason: Option<Text>) -> Result<()> {
         self.leave_server_body(reason)
+    }
+    pub(super) fn leave_server_for_transfer(&mut self) -> Result<()> {
+        self.leave_server_for_transfer_body()
     }
 
     // wire.rs
@@ -1253,7 +1256,7 @@ impl Game<'_> {
     }
 
     // tick.rs
-    fn tick_client_load(&mut self) {
+    pub(in crate::game) fn tick_client_load(&mut self) {
         self.tick_client_load_body()
     }
     pub(super) fn tick_remote(&mut self) -> Result<()> {
@@ -1310,6 +1313,14 @@ impl Game<'_> {
     ) {
         self.remote_player_eating_body(item, ticks, at, eye, pitch, yaw)
     }
+    pub(in crate::game) fn send_export_view_position(&mut self) {
+        if !self.replay.playing()
+            && let Some(remote) = &self.remote
+        {
+            self.remote_send_state(remote.last_input);
+        }
+    }
+
     fn remote_send_state(&mut self, input: u8) {
         self.remote_send_state_body(input)
     }

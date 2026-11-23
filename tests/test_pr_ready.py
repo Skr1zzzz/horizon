@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from tools import pr_ready
+from tools import lab, pr_ready
 
 PACKAGES = {"horizon-core": "crates/horizon-core", "horizon-client": "crates/horizon-client",
             "horizon-theme": "crates/horizon-theme", "xtask": "xtask"}
@@ -184,7 +184,7 @@ class PrReadyTests(unittest.TestCase):
                 return pr_ready.block(args(), "origin/main", "abcdef123", [], {}, [step], "skip-release", 0,
                                       ("a" * 40, "", ""))
             self.assertIn("data-backed tests not run: no prepared data here", render())
-            prepared = pr_ready.ROOT / ".local/horizon-client/26.3"
+            prepared = pr_ready.ROOT / lab.RESOURCES.relative_to(lab.ROOT)
             prepared.mkdir(parents=True)
             self.assertIn("data-backed tests not run: no prepared data here", render())
             (prepared / "gameplay-facts.json").write_text("{}")
@@ -204,12 +204,14 @@ class PrReadyTests(unittest.TestCase):
             "dispatch tests tests",
             "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} cargo test --manifest-path a/Cargo.toml --locked",
         )
-        with mock.patch.object(pr_ready.subprocess, "Popen") as popen, \
+        with mock.patch.object(pr_ready.process_tree, "popen") as popen, \
                 mock.patch.object(pr_ready, "finish"), mock.patch.dict(os.environ):
             os.environ.pop("CARGO_BUILD_JOBS", None)
-            popen.return_value.__enter__.return_value.stdout = []
-            popen.return_value.__enter__.return_value.wait.return_value = 0
-            popen.return_value.__enter__.return_value.returncode = 0
+            process = popen.return_value.__enter__.return_value
+            process.stdout = []
+            process.wait.return_value = 0
+            process.returncode = 0
+            process.job = None
             pr_ready.run_windows([step], False)
         self.assertEqual(popen.call_args.args[0],
                          ["cargo", "test", "--manifest-path", "a/Cargo.toml", "--locked"])

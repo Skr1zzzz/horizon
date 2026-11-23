@@ -138,7 +138,7 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonMaterialOut {
-    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[vertex >> 8u]];
+    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[vertex >> 6u]];
     return horizon_material_vertex(position, horizon_terrain_terrain_uv(uv, origin.w), layer,
         color, light, origin, vertex, vertex & 3u);
 }
@@ -300,7 +300,7 @@ fn horizon_look_ao(look: vec2<u32>, corner: u32) -> f32 {
 alias HorizonCorner = horizon_terrain_CornerInputs;
 // A flat draw's origin of the corner: its block's slot's.
 fn horizon_corner_origin(s: horizon_terrain_SectionCorner) -> vec4<f32> {
-    return horizon_terrain_slot_origins[horizon_terrain_block_slots[s.slot >> 8u]];
+    return horizon_terrain_slot_origins[horizon_terrain_block_slots[s.slot >> 6u]];
 }
 ";
 
@@ -426,6 +426,9 @@ pub(super) fn terrain_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     ];
     entries.extend((5..=11).map(|binding| entry(binding, sprite_array)));
     entries.push(entry(12, texture(wgpu::TextureViewDimension::D2)));
+    // The arrays past the first eight, where a pack needs them (gfx.rs `MORE_SPRITE_ARRAYS`).
+    let more = super::bound_sprite_arrays().saturating_sub(super::SPRITE_ARRAYS);
+    entries.extend((0..more).map(|i| entry(super::MORE_ARRAYS_BINDING + i, sprite_array)));
     entries
 }
 

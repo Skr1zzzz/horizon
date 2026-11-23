@@ -197,6 +197,30 @@ fn nightly_of(commit: &str) -> Option<String> {
         })
 }
 
+/// How the mod's pinned build compares to the instance's build, using locally known Nightlies.
+pub(super) fn age(made_for: &str, build: &str) -> super::fit::Age {
+    let made_for = nightly_of(made_for);
+    let build = nightly_of(build);
+    nightly_age(made_for.as_deref(), build.as_deref())
+}
+
+fn nightly_age(made_for: Option<&str>, build: Option<&str>) -> super::fit::Age {
+    use super::fit::Age;
+    use std::cmp::Ordering;
+
+    let (Some(made_for), Some(build)) = (made_for, build) else {
+        return Age::Unknown;
+    };
+    if crate::nightly::date_of(made_for).is_none() || crate::nightly::date_of(build).is_none() {
+        return Age::Unknown;
+    }
+    match crate::backend::compare_versions(made_for, build) {
+        Ordering::Greater => Age::Newer,
+        Ordering::Less => Age::Older,
+        Ordering::Equal => Age::Unknown,
+    }
+}
+
 /// Build `commit`'s name as the Versions page gives it, when it is known here (a kept index, or
 /// an installed version). `commit` may come from a mod's manifest: anything but a build id is
 /// never looked up.
@@ -517,22 +541,6 @@ pub(super) fn surface(sdk: &Sdk, base: &Base) -> Result<mod_surface::Surface, Re
         }
     };
     mod_surface::Surface::read(&bytes).map_err(|error| refused(error.to_string()))
-}
-
-/// The folder of `sdk`'s build data (`points.json`, `internals.json`, `loops.json`,
-/// `functions.json`): unpacked once, then used again on its stamp. `stop` as [`slices`] asks it
-/// (a build's own check; planning outside a build never stops).
-pub(super) fn build_data(
-    sdk: &Sdk,
-    base: &Base,
-    stop: &dyn Fn() -> Result<(), String>,
-) -> Result<PathBuf, Refusal> {
-    const NAME: &str = "build-data.tar.xz";
-    let into = sdk.dir.join("build-data");
-    let mut fetched = Fetched::default();
-    // Route checks fetch it without the build lease, maybe beside a build: their own download.
-    fetch_into(sdk, base, NAME, &into, true, &mut fetched, &|_| {}, stop)?;
-    Ok(into)
 }
 
 /// What a download reports as it goes: bytes done of the whole route's.

@@ -203,13 +203,6 @@ pub trait LodSampler: Send {
     fn reduced_column(&mut self, x: i32, z: i32, _width: i32) -> crate::lod::Column {
         self.column(x, z)
     }
-    /// Whether a column since the last call was left empty because its data
-    /// is still on its way (a BlueMap tile downloading, nothing coarser to
-    /// stand in): that sample isn't drawn, what it would replace is
-    /// (`Lod::finish_any_sample`), and it is taken again later.
-    fn waited(&mut self) -> bool {
-        false
-    }
     /// `side` x `side` columns from (`x`, `z`), `stride` blocks apart; none
     /// when sampling failed and should be tried again later.
     fn grid(&mut self, x: i32, z: i32, stride: i32, side: usize) -> Vec<crate::lod::Column> {
@@ -288,6 +281,7 @@ struct MeshSettings {
     cutout_leaves: bool,
     opaque_ice: bool,
     translucent_layers: Arc<[bool]>,
+    block_layers: Arc<crate::mesher::BlockLayerTable>,
     leaf_culling: LeafCullingMode,
 }
 enum Job {
@@ -418,6 +412,56 @@ fn decoration_queue(
         ranked.push(std::cmp::Reverse((order.rank_or_append(x, z), x, z)));
     }
     std::collections::BinaryHeap::from(ranked)
+}
+
+/// Keep only decoration ranks that can still matter: within the active ranges
+/// (where arriving protos are kept) or already held in `protos`. Out-of-range
+/// `generating` chunks are dropped on arrival (`Done::Proto`), so keeping
+/// their old ranks would let them override a later band's row-by-row order.
+fn retain_decoration_order(
+    order: &mut DecorationOrder,
+    ranges: &Ranges<'_>,
+    protos: &FxHashMap<(i32, i32), Option<Proto>>,
+) {
+    order.retain(|x, z| {
+        ranges.in_range(x, z, 4) || ranges.near_finished(x, z, 2) || protos.contains_key(&(x, z))
+    });
+}
+
+/// Inputs to the decoration blocking predicate (`waits_for`): whether an
+/// undecorated chunk can still be decorated and therefore must hold back
+/// higher-ranked overlapping neighbours within Chebyshev distance 2.
+struct DecorationWait<'a> {
+    ranges: &'a Ranges<'a>,
+    world: &'a World,
+    decorated: &'a FxHashSet<(i32, i32)>,
+    protos: &'a FxHashMap<(i32, i32), Option<Proto>>,
+    generating: &'a FxHashSet<(i32, i32)>,
+    saves_beside_final: bool,
+}
+
+impl DecorationWait<'_> {
+    fn wants(&self, x: i32, z: i32) -> bool {
+        !self.decorated.contains(&(x, z))
+            && !self.world.chunks.contains_key(&(x, z))
+            && (self.ranges.in_range(x, z, 2) || self.ranges.near_finished(x, z, 1))
+    }
+
+    fn waits_for(&self, x: i32, z: i32) -> bool {
+        self.wants(x, z)
+            && (-1..=1).all(|dz| {
+                (-1..=1).all(|dx| {
+                    let n = (x + dx, z + dz);
+                    if self.world.chunks.contains_key(&n) {
+                        self.saves_beside_final
+                    } else {
+                        self.protos.contains_key(&n)
+                            || self.generating.contains(&n)
+                            || self.ranges.requested(n.0, n.1, true)
+                    }
+                })
+            })
+    }
 }
 
 /// Finished jobs, from the workers to the game thread, in the order they
@@ -658,6 +702,8 @@ pub struct Streaming {
     /// Sprite layers a shader pack draws in the translucent pass (`[[materials]]
     /// translucent`), by layer; empty without one.
     pub translucent_layers: Arc<[bool]>,
+    /// Per-state shader-pack model/fluid layer overrides; empty without a pack.
+    pub block_layers: Arc<crate::mesher::BlockLayerTable>,
     /// What the mesher does with leaf faces inside a canopy (`LeafCullingMode`).
     pub leaf_culling: LeafCullingMode,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
@@ -698,6 +744,11 @@ pub struct Streaming {
     /// The columns and the next row the band's decoration ranks were given
     /// for (`set_band`).
     band_ranked: Option<(i32, i32, i32)>,
+    /// Cached face visibility and scratch buffers for synchronous edit meshing (`mesh_immediate`).
+    immediate_faces: Faces,
+    immediate_scratch: MeshScratch,
+    /// Frames left before nearby sections are meshed synchronously again (`NEARBY_COOLDOWN_FRAMES`).
+    nearby_cooldown: immediate_mesh::NearbyCooldown,
 }
 /// Snapshot only after a scan found no missing candidates. Public range fields
 /// and `World::chunks` can change without going through Streaming, so compare
@@ -1148,12 +1199,14 @@ mod queue_census;
 pub use queue_census::QueueCensus;
 mod forced_cover;
 mod forced_ring;
+pub mod immediate_mesh;
 mod mesh_job;
 mod relight_now;
 mod viewed_meshing;
 use bounded::nearest_first;
 use dynamic_emission::light_region_ready;
 use forced_cover::ForcedCover;
+pub use immediate_mesh::IMMEDIATE_MESH_LIMIT;
 use mesh_job::{Faces, mesh_section};
 pub use viewed_meshing::{
     MAX_VIEWED_SECTIONS, MeshSource, VIEWED_LINGER, VIEWED_MESH_WORKERS, VIEWED_UPLOADS_PER_FRAME,
@@ -1260,6 +1313,7 @@ impl Streaming {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: Arc::from([]),
+            block_layers: Arc::default(),
             leaf_culling: LeafCullingMode::Off,
             light_tables,
             light_log: Vec::new(),
@@ -1276,6 +1330,9 @@ impl Streaming {
             mesh: true,
             band: None,
             band_ranked: None,
+            immediate_faces: None,
+            immediate_scratch: MeshScratch::default(),
+            nearby_cooldown: Default::default(),
         }
     }
     /// Shares generation resources, but gives distant work its own worker state.
@@ -2117,34 +2174,23 @@ impl Streaming {
                 forced_cover: self.forced_cover.as_ref().filter(|_| self.cover_current),
                 band: self.band.as_ref(),
             };
-            let (protos, generating) = (&self.protos, &self.generating);
-            self.decoration_order.retain(|x, z| {
-                ranges.in_range(x, z, 4)
-                    || ranges.near_finished(x, z, 2)
-                    || protos.contains_key(&(x, z))
-                    || generating.contains(&(x, z))
-            });
+            retain_decoration_order(&mut self.decoration_order, &ranges, &self.protos);
         }
         if self.decorates && self.decorating < workers * 2 && !self.protos.is_empty() {
-            let wants = |s: &Self, x: i32, z: i32| {
-                !s.decorated.contains(&(x, z))
-                    && !world.chunks.contains_key(&(x, z))
-                    && (s.in_range(x, z, 2) || s.near_finished(x, z, 1))
-            };
             // A wanted chunk holds back higher-ranked ones only if it can be
-            // decorated: its 3x3 neighbourhood is (or will be) generated as
-            // protos, none of them already final.
+            // decorated: every neighbour in its 3x3 is either final (when the
+            // generator decorates beside final chunks) or generated as a proto.
             let waits_for = |s: &Self, x: i32, z: i32| {
-                wants(s, x, z)
-                    && (-1..=1).all(|dz| {
-                        (-1..=1).all(|dx| {
-                            let n = (x + dx, z + dz);
-                            !world.chunks.contains_key(&n)
-                                && (s.protos.contains_key(&n)
-                                    || s.generating.contains(&n)
-                                    || s.ranges().requested(n.0, n.1, true))
-                        })
-                    })
+                let ranges = s.ranges();
+                DecorationWait {
+                    ranges: &ranges,
+                    world,
+                    decorated: &s.decorated,
+                    protos: &s.protos,
+                    generating: &s.generating,
+                    saves_beside_final: s.saves_beside_final,
+                }
+                .waits_for(x, z)
             };
             // Out for the call: ranking reads the streamer's ranges.
             let mut order = std::mem::take(&mut self.decoration_order);
@@ -2287,6 +2333,7 @@ impl Streaming {
         // A server draws nothing: its sections are never meshed.
         if !self.mesh {
             world.dirty_sections.clear();
+            world.immediate_sections.clear();
             self.cover_current = false;
             self.light_scratch = light;
             self.gone_scratch = gone;
@@ -2727,6 +2774,18 @@ impl Streaming {
             }
         }
     }
+    /// Make a column resident for an immediate read.
+    /// The temporary request serves the same purpose as `ServerChunkCache.getChunk(FULL)`.
+    pub fn load_full_chunk(&mut self, world: &mut World, key: (i32, i32)) {
+        if world.chunks.contains_key(&key) {
+            return;
+        }
+        self.rank_full_task(key.0, key.1);
+        // Full columns finish out to radius + 1. This request is for one column.
+        self.extra.push((key, -1));
+        self.wait_for_full_chunk(world, key);
+        self.extra.pop();
+    }
     pub fn band(&self) -> Option<Band> {
         self.band
     }
@@ -2742,29 +2801,34 @@ impl Streaming {
     pub fn set_forced_loaded(&mut self, world: &mut World, x: i32, z: i32, forced: bool) -> bool {
         let changed = self.set_forced(x, z, forced);
         if forced && changed {
-            while !world.chunks.contains_key(&(x, z)) {
-                assert!(!self.paused, "forced chunk load before streaming started");
-                assert!(
-                    !self
-                        .shared
-                        .aborted
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    "forced chunk load after generation stopped"
-                );
-                // Pump the existing generation queue. Keep unloads for the
-                // normal owner update, which saves entities and notifies mods.
-                let mut plan = self.plan_update(world);
-                plan.sweep = false;
-                plan.far.clear();
-                let (meshes, unloaded) = self.finish_update(world, plan);
-                debug_assert!(unloaded.is_empty());
-                self.free(meshes);
-                if !world.chunks.contains_key(&(x, z)) {
-                    self.wait(std::time::Duration::from_millis(5));
-                }
-            }
+            self.wait_for_full_chunk(world, (x, z));
         }
         changed
+    }
+
+    /// Pump Horizon's generation and disk reads for a requested column.
+    fn wait_for_full_chunk(&mut self, world: &mut World, key: (i32, i32)) {
+        while !world.chunks.contains_key(&key) {
+            assert!(!self.paused, "chunk load before streaming started");
+            assert!(
+                !self
+                    .shared
+                    .aborted
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "chunk load after generation stopped"
+            );
+            // Pump the existing generation queue. Keep unloads for the
+            // normal owner update, which saves entities and notifies mods.
+            let mut plan = self.plan_update(world);
+            plan.sweep = false;
+            plan.far.clear();
+            let (meshes, unloaded) = self.finish_update(world, plan);
+            debug_assert!(unloaded.is_empty());
+            self.free(meshes);
+            if !world.chunks.contains_key(&key) {
+                self.wait(std::time::Duration::from_millis(5));
+            }
+        }
     }
 
     /// Release every `/forceload`ed chunk (`/forceload remove all`, a game-test
@@ -2810,6 +2874,24 @@ impl Streaming {
             self.mod_tickets.insert(ticket)
         } else {
             self.mod_tickets.remove(&ticket)
+        };
+        if self.settle(chunk) {
+            self.rank_forced(chunk.0, chunk.1, chunk.0, chunk.1);
+        }
+        changed
+    }
+    /// Hold or release a runtime-only mod ticket ([`TransientTicket`]), as
+    /// [`Self::set_mod_forced`] does a saved one: true when it changed.
+    pub fn set_transient_forced(
+        &mut self,
+        ticket: crate::mod_chunk_tickets::TransientTicket,
+        forced: bool,
+    ) -> bool {
+        let chunk = ticket.chunk;
+        let changed = if forced {
+            self.mod_tickets.insert_transient(ticket)
+        } else {
+            self.mod_tickets.remove_transient(&ticket)
         };
         if self.settle(chunk) {
             self.rank_forced(chunk.0, chunk.1, chunk.0, chunk.1);
@@ -2958,11 +3040,22 @@ impl ViewArrival {
         if self.since.is_none() || view != self.view {
             (self.view, self.since, self.arrived) = (view, Some(now), false);
         }
-        let ((x, z), r) = view;
-        if self.arrived || r < 0 || !self.recent(now) {
+        if self.arrived || view.1 < 0 || !self.recent(now) {
             return false;
         }
-        self.arrived = (-r..=r).all(|d| {
+        let incomplete = self.arrival_incomplete(has);
+        self.arrived = !incomplete;
+        incomplete
+    }
+
+    /// Whether the tracked view still lacks a perimeter column, even after
+    /// the UI stopped waiting or a level change cleared the columns.
+    pub fn arrival_incomplete(&self, has: impl Fn((i32, i32)) -> bool) -> bool {
+        let ((x, z), r) = self.view;
+        if self.since.is_none() || r < 0 {
+            return false;
+        }
+        !(-r..=r).all(|d| {
             // How far row (and column) `d` reaches: `in_view_distance` solved for it.
             let gap = i64::from((d.abs() - 1).max(0));
             let room = i64::from(r).pow(2) - gap * gap;
@@ -2973,8 +3066,7 @@ impl ViewArrival {
                     .into_iter()
                     .all(|e| has((x + d, z + e)) && has((x + e, z + d)))
             }
-        });
-        !self.arrived
+        })
     }
     /// Whether the view `arriving` was last given changed less than `VIEW_WAIT`
     /// ago: until then sections meshed are its terrain coming in, later an edit's.
@@ -3743,6 +3835,155 @@ mod tests {
     /// order, then all sorted by rank), and ranks the new ones the same way,
     /// whatever order the chunks are listed in.
     #[test]
+    fn retain_drops_out_of_range_generating_ranks_before_pregen() {
+        let forced = HashSet::new();
+        let empty_protos: FxHashMap<(i32, i32), Option<Proto>> = Default::default();
+        let mut order = DecorationOrder::default();
+        // Speculative or pre-teleport ranks around (0, 0).
+        order.reassign((0, 0), 4, |_, _| false);
+
+        // Centre moves far away to (-33, 4); (0, 0) jobs still in flight are
+        // dropped on arrival, so retain must not preserve their stale ranks.
+        order.reassign((-33, 4), 4, |_, _| false);
+        let spawn_ranges = Ranges {
+            center: (-33, 4),
+            radius: 4,
+            extra: &[],
+            forced: &forced,
+            cover: None,
+            forced_cover: None,
+            band: None,
+        };
+        retain_decoration_order(&mut order, &spawn_ranges, &empty_protos);
+        for (x, z) in [(0, 0), (-1, 0), (0, -1), (1, 0)] {
+            assert_eq!(order.rank(x, z), None, "stale rank leaked for ({x}, {z})");
+        }
+
+        // A subsequent `/pregen start 1 square 16 0` ranks [-3..=5, -4..=4] row
+        // by row; its 5x5 decoration neighbourhood must pop strictly row by row.
+        let band = Band {
+            x0: 1,
+            x1: 1,
+            z0: 0,
+            z1: 0,
+            circle: None,
+        };
+        const REACH: i32 = 4;
+        for z in band.z0 - REACH..=band.z1 + REACH {
+            for x in band.x0 - REACH..=band.x1 + REACH {
+                order.rank_or_append(x, z);
+            }
+        }
+        let expected: Vec<(i32, i32)> = (-2..=2)
+            .flat_map(|z| (-1..=3).map(move |x| (x, z)))
+            .collect();
+        let mut q = decoration_queue(&mut order, expected.iter().copied(), |_, _| 0);
+        let popped: Vec<(i32, i32)> = std::iter::from_fn(|| q.pop())
+            .map(|std::cmp::Reverse((_, x, z))| (x, z))
+            .collect();
+        assert_eq!(popped, expected);
+    }
+
+    #[test]
+    fn waits_for_blocks_overlapping_neighbours_beside_final_chunks_without_deadlock() {
+        let mut world = World::new(horizon_world::registry::BlockStateId(0), 0);
+        // Existing final chunks along a seam (e.g. spawn border or prior pregen strip).
+        for x in -35..=-31 {
+            world.chunks.insert((x, -2), Arc::new(Chunk::empty(x, -2)));
+        }
+        let forced = HashSet::new();
+        let band = Band {
+            x0: -35,
+            x1: -31,
+            z0: -5,
+            z1: -3,
+            circle: None,
+        };
+        let ranges = Ranges {
+            center: (-33, 4),
+            radius: 4,
+            extra: &[],
+            forced: &forced,
+            cover: None,
+            forced_cover: None,
+            band: Some(&band),
+        };
+        let mut order = DecorationOrder::default();
+        for z in band.z0 - 4..=band.z1 + 4 {
+            for x in band.x0 - 4..=band.x1 + 4 {
+                order.rank_or_append(x, z);
+            }
+        }
+
+        // Everything ranked before (-33, -3) is already decorated.
+        let pivot = order.rank(-33, -3).unwrap();
+        let mut decorated: FxHashSet<(i32, i32)> = order
+            .ordered()
+            .into_iter()
+            .filter(|&(x, z)| order.rank(x, z).unwrap() < pivot)
+            .collect();
+        let protos: FxHashMap<(i32, i32), Option<Proto>> = Default::default();
+        let generating: FxHashSet<(i32, i32)> = Default::default();
+
+        // With saves_beside_final = false, a chunk beside a final chunk is skipped
+        // and must not block higher-ranked neighbours.
+        let wait_without = DecorationWait {
+            ranges: &ranges,
+            world: &world,
+            decorated: &decorated,
+            protos: &protos,
+            generating: &generating,
+            saves_beside_final: false,
+        };
+        assert!(!wait_without.waits_for(-33, -3));
+        assert!(!order.blocked(-32, -3, |nx, nz| wait_without.waits_for(nx, nz)));
+
+        // With saves_beside_final = true (VanillaGen), (-33, -3) WILL decorate beside
+        // final chunk (-33, -2), so it must hold back overlapping (-32, -3).
+        let wait_with = DecorationWait {
+            ranges: &ranges,
+            world: &world,
+            decorated: &decorated,
+            protos: &protos,
+            generating: &generating,
+            saves_beside_final: true,
+        };
+        assert!(wait_with.waits_for(-33, -3));
+        assert!(order.blocked(-32, -3, |nx, nz| wait_with.waits_for(nx, nz)));
+
+        // Deadlock-freedom: every remaining wanted chunk (including all chunks beside
+        // the final seam) makes progress to completion in strictly non-decreasing rank order.
+        let mut remaining: Vec<(i32, i32)> = (-7..=-1)
+            .flat_map(|z| (-37..=-29).map(move |x| (x, z)))
+            .filter(|&(x, z)| !decorated.contains(&(x, z)) && !world.chunks.contains_key(&(x, z)))
+            .collect();
+        let mut completed = Vec::new();
+        while !remaining.is_empty() {
+            let wait = DecorationWait {
+                ranges: &ranges,
+                world: &world,
+                decorated: &decorated,
+                protos: &protos,
+                generating: &generating,
+                saves_beside_final: true,
+            };
+            let next = remaining
+                .iter()
+                .copied()
+                .filter(|&(x, z)| !order.blocked(x, z, |nx, nz| wait.waits_for(nx, nz)))
+                .min_by_key(|&(x, z)| order.rank(x, z).unwrap())
+                .expect("at least one unblocked chunk must exist (no deadlock)");
+            decorated.insert(next);
+            completed.push(next);
+            remaining.retain(|&c| c != next);
+        }
+        // Every adjacent pair along the seam decorated in rank order.
+        let pos_a = completed.iter().position(|&c| c == (-33, -3)).unwrap();
+        let pos_b = completed.iter().position(|&c| c == (-32, -3)).unwrap();
+        assert!(pos_a < pos_b);
+    }
+
+    #[test]
     fn decoration_queue_pops_in_the_order_a_full_sort_gives() {
         // Distinct for every chunk, so the full sort has one answer.
         let distance = |x: i32, z: i32| i64::from(x) * 100_000 + i64::from(z);
@@ -4245,6 +4486,7 @@ mod tests {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: Arc::from([]),
+            block_layers: Arc::default(),
             leaf_culling: LeafCullingMode::Off,
         };
         let mut meshed = FxHashSet::default();

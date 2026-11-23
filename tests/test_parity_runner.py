@@ -137,24 +137,41 @@ class ParityRunnerTests(unittest.TestCase):
 
     def test_prebuild_repeats_each_harness_selection(self):
         artifacts = [
-            *parity.artifacts_of(["cargo", "build", "--release", "-p", "horizon-world", "--example", "a"]),
-            *parity.artifacts_of(["cargo", "build", "--release", "-p", "horizon-world", "--example", "b"]),
-            *parity.artifacts_of(["cargo", "build", "--release", "-p", "horizon-world", "--bin", "horizon-world"]),
-            *parity.artifacts_of(["cargo", "build", "--release", "--bin", "horizon-world"]),
-            *parity.artifacts_of(["cargo", "run", "--profile", "fast", "-p", "horizon-client", "--example", "c"]),
-            *parity.artifacts_of(["cargo", "build", "--release", "-p", "horizon-world", "--example", "renamed"]),
-            ["example", "old", "release"],  # recorded before selections were kept: its own crate's -p
-            ["example", "unknown", "release"],  # no longer in the workspace: left to its harness
+            *parity.artifacts_of(["cargo", "build", "--profile", "fast", "-p", "horizon-world", "--example", "a"]),
+            *parity.artifacts_of(["cargo", "build", "--profile", "fast", "-p", "horizon-world", "--example", "b"]),
+            *parity.artifacts_of(["cargo", "build", "--profile", "fast", "-p", "horizon-world", "--bin", "horizon-world"]),
+            *parity.artifacts_of(["cargo", "build", "--profile", "fast", "--bin", "horizon-world"]),
+            *parity.artifacts_of(["cargo", "run", "-p", "horizon-client", "--example", "c"]),
+            *parity.artifacts_of(["cargo", "build", "--profile", "fast", "-p", "horizon-world", "--example", "renamed"]),
+            ["example", "old", "fast"],  # recorded before selections were kept: its own crate's -p
+            ["example", "unknown", "fast"],  # no longer in the workspace: left to its harness
         ]
         packages = {("example", "a"): "horizon-world", ("example", "b"): "horizon-world", ("example", "c"): "horizon-client",
                     ("bin", "horizon-world"): "horizon-world", ("example", "old"): "horizon-world"}
         self.assertEqual(parity.prebuild_commands(artifacts, packages), [
-            ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-client", "--example", "c"],
-            ["cargo", "build", "--locked", "--profile", "release", "--bin", "horizon-world"],
-            ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-world", "--bin", "horizon-world"],
-            ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-world", "--example", "a", "--example", "b",
+            ["cargo", "build", "--locked", "--profile", "dev", "-p", "horizon-client", "--example", "c"],
+            ["cargo", "build", "--locked", "--profile", "fast", "--bin", "horizon-world"],
+            ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-world", "--bin", "horizon-world"],
+            ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-world", "--example", "a", "--example", "b",
              "--example", "old"],
         ])
+
+    def test_release_records_are_prebuilt_in_the_fast_profile(self):
+        # Records from before the harnesses moved to the fast profile are built as the harnesses build them now.
+        packages = {("example", "world_probe"): "horizon-world", ("bin", "horizon-parity"): "horizon-core",
+                    ("bin", "horizon-client"): "horizon-game"}
+        old = [*parity.artifacts_of(["cargo", "build", "--release", "-p", "horizon-world", "--example", "world_probe"]),
+               *parity.artifacts_of(["cargo", "build", "--profile", "release", "--bin", "horizon-parity"]),
+               ["bin", "horizon-client", "release", ["-p", "horizon-game"], False]]
+        new = [*parity.artifacts_of(["cargo", "build", "--profile", "fast", "-p", "horizon-world", "--example", "world_probe"]),
+               *parity.artifacts_of(["cargo", "build", "--profile", "fast", "--bin", "horizon-parity"]),
+               *parity.artifacts_of(fast_bins.command("horizon-client"))]
+        self.assertEqual(parity.prebuild_commands(old, packages), parity.prebuild_commands(new, packages))
+        tests = [parity.test_selection(["cargo", "test", flag, "-p", "horizon-world", "--lib"])
+                 for flag in ("--release", "-r")]
+        tests.append(["--profile", "release", "-p", "horizon-world", "--lib"])
+        self.assertEqual(parity.prebuild_commands([], packages, tests), [
+            ["cargo", "test", "--locked", "--no-run", "--profile", "fast", "-p", "horizon-world", "--lib"]])
 
     def test_the_harnesses_fast_programs_share_one_prebuild_run(self):
         # The game alone (most server harnesses), with horizon-ctl (lan_e2e), with the server (management_protocol)
@@ -181,7 +198,6 @@ class ParityRunnerTests(unittest.TestCase):
                  for name in ("horizon-official", "horizon-ctl", "horizon-relay")]]
         untouched = [
             ["example", "client_probe", "fast", ["-p", "horizon-client-lib"], True],
-            ["bin", "horizon-client", "release", ["-p", "horizon-game"], False],
             ["bin", "horizon-client", "fast", ["-p", "horizon-game", "--features", "x"], False],
             ["bin", "horizon-mod-dimension-game", "fast", ["-p", "horizon-game", "-p", "horizon-mod-dimension-game"], False],
         ]
@@ -197,7 +213,6 @@ class ParityRunnerTests(unittest.TestCase):
             fast_bins.command("horizon-client", "horizon-ctl", "horizon-server", "horizon-official", "horizon-relay"),
             ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-game", "-p", "horizon-mod-dimension-game",
              "--bin", "horizon-mod-dimension-game"],
-            ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-game", "--bin", "horizon-client"],
         ])
 
     def test_a_prebuild_cargo_run_says_where_its_time_went(self):
@@ -817,6 +832,55 @@ class ParityRunnerTests(unittest.TestCase):
         self.assertEqual(sizes, {"cargo-01.html": 40, "cargo-03.html": 20, "prebuild-calls.txt": len(calls)})
         self.assertLessEqual(sum(sizes.values()), 150)
 
+    @unittest.skipUnless(shutil.which("du"), "du is POSIX")
+    def test_the_build_folders_size_is_reported_per_profile_folder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp, "target")
+            for name, size in (("fast", 300_000), ("debug", 100_000)):
+                (target / name).mkdir(parents=True)
+                (target / name / "unit").write_bytes(b"x" * size)
+            (target / "CACHEDIR.TAG").write_text("tag")  # a file at the top: not a folder of its own
+            if hasattr(os, "symlink"):
+                os.symlink(target / "fast", target / "linked")  # a link is never followed or counted
+            (target / "my-experiment").mkdir()  # not a cargo profile: its name stays out of the public report
+            (target / "my-experiment" / "unit").write_bytes(b"x" * 50_000)
+            sizes = parity.target_sizes(target)
+            self.assertEqual(set(sizes), {"fast", "debug", "other"})
+            self.assertGreaterEqual(sizes["fast"], 290)
+            self.assertGreater(sizes["fast"], sizes["debug"])
+            Path(temp, "empty").mkdir()
+            self.assertEqual(parity.target_sizes(Path(temp, "empty")), {})
+        self.assertEqual(parity.describe_target_sizes({"debug": 1 << 20, "fast": 3 << 20}),
+                         "build folder after the prebuild: 4.0 GB (fast 3.0 GB, debug 1.0 GB)")
+        self.assertIsNone(parity.report(lambda: parity.describe_target_sizes({})), "no folder yet: no line")
+
+    def test_the_build_folder_is_measured_only_after_a_normal_prebuild(self):
+        measured = []
+        patch = mock.patch.object(parity.PrebuildTimings, "measure_target", lambda timings: measured.append(1))
+        (built, _), _, events, state, _ = self.prebuild_with_fake_cargo(["one"], patches=[patch])
+        self.assertTrue(built)
+        self.assertEqual(measured, [1])
+        measured.clear()
+        stopped, _, _, _, _ = self.prebuild_with_fake_cargo(
+            ["sleep", "one"], role="main", patches=[patch, mock.patch.object(parity.compile_lock, "GRACE", 2),
+                                                    mock.patch.object(parity, "PREBUILD_LIMIT", {"main": 1})])
+        self.assertIsInstance(stopped, SystemExit)
+        self.assertEqual(measured, [], "a prebuild stopped at its limit publishes without waiting on du")
+        built_folder = lambda target, state: (target / "fast").mkdir()
+        if shutil.which("du"):
+            (built, _), _, _, state, _ = self.prebuild_with_fake_cargo(["one"], prepare=built_folder)
+            self.assertTrue(built)
+            folder, = state.iterdir()
+            self.assertIn("build folder after the prebuild: 0.0 GB (fast 0.0 GB)",
+                          (folder / "prebuild-calls.txt").read_text(encoding="utf-8"))
+        # A du that times out leaves the line out, and the reports still publish.
+        timeout = mock.patch.object(parity, "target_sizes", side_effect=subprocess.TimeoutExpired("du", 30))
+        (built, _), _, _, state, _ = self.prebuild_with_fake_cargo(["one"], prepare=built_folder, patches=[timeout])
+        self.assertTrue(built)
+        folder, = state.iterdir()
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["cargo-01.html", "prebuild-calls.txt"])
+        self.assertNotIn("build folder", (folder / "prebuild-calls.txt").read_text(encoding="utf-8"))
+
     def test_a_collection_that_cannot_be_finished_publishes_nothing(self):
         failures = {"the cap": ({}, mock.patch.object(parity.PrebuildTimings, "size",
                                                       return_value=parity.PREBUILD_TIMINGS_CAP + 1)),
@@ -882,11 +946,11 @@ class ParityRunnerTests(unittest.TestCase):
         packages = {("example", "client_probe"): "horizon-client", ("example", "world_probe"): "horizon-world",
                     ("bin", "horizon-world"): "horizon-world"}
         self.assertEqual(parity.prebuild_commands(artifacts, packages), [
-            ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-client", "--example", "client_probe"],
-            ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-core", "-p", "horizon-world",
+            ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-client", "--example", "client_probe"],
+            ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-core", "-p", "horizon-world",
              "--example", "world_probe"],
-            ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-world", "--bin", "horizon-world"],
-            ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-world", "--example", "world_probe"],
+            ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-world", "--bin", "horizon-world"],
+            ["cargo", "build", "--locked", "--profile", "fast", "-p", "horizon-world", "--example", "world_probe"],
         ])
         self.assertEqual(parity.recorded_artifacts({"artifacts": [["example", "probe", "release"]]}),
                          [["example", "probe", "release"]])  # no crate to tell: left to its harness
