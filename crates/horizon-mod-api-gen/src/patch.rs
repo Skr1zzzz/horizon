@@ -701,8 +701,10 @@ pub(crate) fn replaceable(
 }
 
 /// The names a module's own items define, for explicit re-export (an explicit name outranks the
-/// module's glob imports, as the item itself did).
+/// module's glob imports, as the item itself did). Each name comes once per condition: one `use`
+/// of a path imports it in every namespace, so `pub mod render;` and `pub fn render` share it.
 fn defined(items: &[Item]) -> Vec<(syn::Ident, Vec<syn::Attribute>)> {
+    let mut seen = BTreeSet::new();
     let cfg = |attrs: &[syn::Attribute]| {
         attrs
             .iter()
@@ -753,6 +755,7 @@ fn defined(items: &[Item]) -> Vec<(syn::Ident, Vec<syn::Attribute>)> {
                     .iter()
                     .any(|a| a.to_token_stream().to_string().contains("test"))
         })
+        .filter(|(ident, attrs)| seen.insert((ident.to_string(), quote!(#(#attrs)*).to_string())))
         .collect()
 }
 
@@ -805,6 +808,8 @@ struct Tree {
     copies: Vec<proc_macro2::TokenStream>,
     /// Names the copies define, which the mirror must not also re-export.
     own: BTreeSet<String>,
+    /// Names this build's stager made public for a marked trait method.
+    staged_exports: BTreeSet<String>,
 }
 
 /// The patch crate for `targets` (as `[[native.mixin]]` rows write them), from the pinned game source
@@ -988,6 +993,7 @@ pub fn generate(
                     };
                     quote! {
                         #[doc(hidden)]
+                        #[allow(non_snake_case)]
                         pub fn #install() -> bool {
                             <#elided>::#constructor(<#elided as #trait_ref>::#method)
                         }
@@ -1072,6 +1078,18 @@ pub fn generate(
     }
     if !refusals.is_empty() {
         return Err(refusals);
+    }
+    for export in &index.staged_exports {
+        let Some((module, name)) = export.rsplit_once("::") else {
+            continue;
+        };
+        let mut segments = module.split("::");
+        let Some(root) = segments.next().and_then(|name| trees.get_mut(name)) else {
+            continue;
+        };
+        if let Some(node) = segments.try_fold(root, |node, part| node.children.get_mut(part)) {
+            node.staged_exports.insert(name.to_owned());
+        }
     }
     let mut libs = Vec::new();
     for (source_crate, tree) in &mut trees {
@@ -1632,7 +1650,8 @@ fn mirror_rooted(
         .cloned()
         .chain(tree.own.iter().cloned())
         .collect();
-    // The crate root is not widened: only its public items are there to re-export.
+    // The root and lower-crate ancestors re-export public items, including names the
+    // stager widened for a copied trait method.
     let public: BTreeSet<String> = items
         .iter()
         .filter_map(|item| match item {
@@ -1672,7 +1691,11 @@ fn mirror_rooted(
     let explicit = defined(&items)
         .into_iter()
         .filter(|(ident, _)| !reserved.contains(&ident.to_string()))
-        .filter(|(ident, _)| !only_public || public.contains(&ident.to_string()))
+        .filter(|(ident, _)| {
+            !only_public
+                || public.contains(&ident.to_string())
+                || tree.staged_exports.contains(&ident.to_string())
+        })
         .map(|(ident, cfg)| quote!(#(#cfg)* pub use #original::#ident;));
     let mut uses = Vec::new();
     for item in self::uses(&items) {
@@ -2406,6 +2429,45 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("game_helper")
+        );
+    }
+
+    #[test]
+    fn a_module_and_a_function_of_one_name_are_re_exported_once() {
+        // `mobs.rs` has `pub mod render;` and `pub fn render`: one `use` imports both.
+        let mut source = Source {
+            root: PathBuf::new(),
+            loaded: BTreeSet::new(),
+            files: BTreeMap::new(),
+            parsed: BTreeMap::from([(
+                "lower::mobs".to_owned(),
+                Module {
+                    items: syn::parse_file("pub mod render {} pub fn render() {}")
+                        .unwrap()
+                        .items,
+                },
+            )]),
+            local_macros: BTreeSet::new(),
+            libraries: BTreeMap::new(),
+            owners: BTreeMap::new(),
+            cache: Cache::default(),
+            hashes: BTreeMap::new(),
+            stale: None,
+        };
+        let out = mirror(
+            &mut source,
+            "lower::mobs",
+            &Tree::default(),
+            false,
+            None,
+            None,
+        )
+        .unwrap()
+        .to_string();
+        assert_eq!(
+            out.matches("pub use :: lower :: mobs :: render ;").count(),
+            1,
+            "{out}"
         );
     }
 

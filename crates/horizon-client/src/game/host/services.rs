@@ -31,6 +31,13 @@ impl ClientSession for Game<'_> {
         );
         self.native_client_tab_list()
     }
+    fn client_waypoints(&self) -> Option<ClientWaypoints> {
+        mod_api::__private::check_access(
+            "client_waypoints",
+            mod_api::__private::LoadAccess::ClientSetup,
+        );
+        self.native_client_waypoints()
+    }
     fn client_frame_stats(&self) -> Option<ClientFrameStats> {
         mod_api::__private::check_access(
             "client_frame_stats",
@@ -161,6 +168,13 @@ impl RuntimeLevels for Game<'_> {
     fn is_open(&mut self, id: &str) -> bool {
         mod_api::__private::check_access("is_open", mod_api::__private::LoadAccess::WorldOnly);
         self.runtime_level_is_open(id)
+    }
+    fn reset_vanilla(&mut self, seed: i64) -> Result<(), LevelResetError> {
+        mod_api::__private::check_access(
+            "reset_vanilla",
+            mod_api::__private::LoadAccess::WorldOnly,
+        );
+        self.queue_level_reset(seed)
     }
 }
 impl RenderAssets for Game<'_> {
