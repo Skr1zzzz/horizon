@@ -1376,10 +1376,8 @@ as the terrain samples them.
   (for a plain block's north side, `u = 1 - x, v = 1 - y`). A tinted face is multiplied by its source's colour:
   `Grass`, `Foliage`, `DryFoliage` and `Water` are the biome's where the block is, `Fixed` a constant (spruce
   leaves, redstone at its power). A grass block's side is two faces, the side and then its grey overlay tinted with
-  grass. The model is the variant the mesher draws at 0, 0, 0; faces that don't lie flat on a side (a flower's
-  crossed planes) are left out, and the `particle` sprite stands for them (`block_model_quads(state, pos)` gives
-  every quad, those included, as the mesher draws the block at that position). Fluids give their still texture on
-  every side.
+  grass. The model is the state's first random variant; faces that don't lie flat on a side (a flower's crossed
+  planes) are left out, and the `particle` sprite stands for them. Fluids give their still texture on every side.
 - `native_texture_sprites(textures)`: a texture's sprite by name (`block/stone`), none for one no model uses.
 - `native_gui_sprite(sprite)`: a GUI atlas sprite's `AtlasRegion` by `Identifier` (`minecraft:gui/sprites/container/slot`,
   `minecraft:particle/flame`, `mymod:gui/panel`), its UV rect and its size in its own pixels, none for one the atlas
