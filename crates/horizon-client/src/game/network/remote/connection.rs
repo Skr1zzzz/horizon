@@ -114,6 +114,8 @@ impl Game<'_> {
         self.client_logging_out();
         if let Err(error) = self.join_server(address, name, None, cookies, lan, realm) {
             log::warn!("Horizon: could not join server: {error}");
+            // A failed transfer leaves no packs of the connection it replaced behind.
+            self.server_packs_disconnect();
             let skip = self.settings.file.bool("skipMultiplayerWarning");
             match &mut self.title {
                 Some(title) => {
@@ -180,7 +182,7 @@ impl Game<'_> {
             },
             |a| (a.name.clone(), a.uuid),
         );
-        self.server_packs_connect(local.is_none().then_some(address), user);
+        self.server_packs_connect_for(local.is_none().then_some(address), user, cookies.is_some());
         let session = match local {
             Some(pipe) => Session::connect_local(
                 pipe,
@@ -304,6 +306,7 @@ impl Game<'_> {
                 };
             });
         self.ui.registries.selector_tokens.clear();
+        self.replay.connections += 1;
         self.remote = Some(Remote {
             selector_metadata_supported: true,
             professions: self.client_professions()?,
@@ -316,6 +319,7 @@ impl Game<'_> {
             logged_out: false,
             attachments: HashMap::new(),
             far_terrain: None,
+            splash_sound: Default::default(),
             builtin,
             status: lang
                 .get("connect.connecting")
@@ -549,6 +553,9 @@ impl Game<'_> {
         let services_keys = Arc::new(std::sync::Mutex::new(ServicesKeys::Ready(Vec::new())));
 
         self.ui.registries.selector_tokens.clear();
+        self.replay.connections += 1;
+        // The session made here is the replay's (an open's, or a seek's rebuild).
+        self.replay.connection = self.replay.connections;
         self.remote = Some(Remote {
             selector_metadata_supported: true,
             professions: self.client_professions()?,
@@ -560,10 +567,15 @@ impl Game<'_> {
             custom_books: false,
             attachments: HashMap::new(),
             far_terrain: None,
-            builtin,
+            splash_sound: Default::default(),
+            builtin: builtin.clone(),
             status: "Playing Studio Replay".into(),
             lang,
-            registries: Arc::new(Dynamic::default()),
+            // A recording holds no configuration phase: the clocks `SetTime` names resolve here.
+            registries: Arc::new(super::super::replay::replay_dynamic_registries(
+                &self.ui.registries.clocks,
+                &builtin,
+            )),
             tags: None,
             enchantments: None,
             joined: false,
@@ -706,8 +718,44 @@ impl Game<'_> {
     /// Disconnect and return to the multiplayer screen (DisconnectedScreen), whose Back
     /// leads to the title after a single player world.
     pub(super) fn leave_server_body(&mut self, reason: Option<Text>) -> Result<()> {
-        if reason.is_none() && self.integrated.as_ref().is_some_and(|s| !s.stopped()) {
-            return self.begin_closing_save(false);
+        self.leave_server_with(reason, false)
+    }
+
+    /// `Minecraft.disconnect` for a protocol transfer: the world and the connection go, the
+    /// server packs stay, and no screen opens because the next connection follows at once.
+    pub(super) fn leave_server_for_transfer_body(&mut self) -> Result<()> {
+        self.leave_server_with(None, true)
+    }
+
+    fn leave_server_with(&mut self, reason: Option<Text>, transferring: bool) -> Result<()> {
+        self.interrupt_export_for_world_exit("export interrupted because the client disconnected");
+        // A replay ends with the session it plays on: one that owns its session, left without
+        // a reason, closes as Escape closes it, which leaves that session; otherwise the replay
+        // ends alone and the leave goes on (a reason to the disconnect screen).
+        self.drop_stale_replay();
+        if self.replay.playing() {
+            let owns = self.replay.standalone
+                || self
+                    .remote
+                    .as_ref()
+                    .is_some_and(|remote| remote.brand == "horizon-studio");
+            if owns && reason.is_none() {
+                self.close_studio_replay();
+                return Ok(());
+            }
+            self.end_studio_replay();
+            if owns {
+                // Left with a reason: the disconnect screen below says it, as without a
+                // replay; the hands and the view the replay set go first.
+                self.reset_studio_hand_state();
+                self.camera_type = horizon_client::camera::CameraType::FirstPerson;
+            }
+        }
+        if self.integrated.as_ref().is_some_and(|s| !s.stopped()) {
+            return match reason {
+                Some(reason) => self.begin_integrated_disconnect(reason),
+                None => self.begin_closing_save(false),
+            };
         }
         self.client_logging_out();
         self.finish_perf();
@@ -751,7 +799,11 @@ impl Game<'_> {
         }
         super::super::lan::sync::forget_sync_data();
         self.gui.atlas.clear_object_skins();
-        self.server_packs_disconnect();
+        if transferring {
+            self.server_packs_disconnect_for(true);
+        } else {
+            self.server_packs_disconnect();
+        }
         self.code_of_conduct = None;
         self.reset_tutorial();
         self.close_dialogs();
@@ -799,6 +851,9 @@ impl Game<'_> {
         self.pending_uploads.clear();
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
+        }
+        if transferring {
+            return Ok(());
         }
         let saves = std::env::current_dir()?.join("saves");
         let mut title = self

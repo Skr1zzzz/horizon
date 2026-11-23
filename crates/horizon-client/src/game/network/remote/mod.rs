@@ -489,6 +489,9 @@ pub(super) struct Remote {
     pub attachments: HashMap<Holder, ResidentAttachments>,
     /// The server samples far terrain for us, this far at most (`lod_net`).
     pub far_terrain: Option<horizon_client::lod_net::Offer>,
+    /// Where an older release's server last broke a potion, whose sound this client played
+    /// itself (`splash_sound`).
+    pub(super) splash_sound: horizon_protocol::adapter::splash_sound::SplashSound,
     pub(super) builtin: Arc<Builtin>,
     lang: Arc<Language>,
     pub(in crate::game) registries: Arc<Dynamic>,
@@ -767,9 +770,14 @@ pub(super) struct Remote {
     clock_game_time: i64,
     /// `ClientChunkCache.Storage`'s view centre (ClientboundSetChunkCacheCenterPacket).
     chunk_center: (i32, i32),
-    /// Received events a frame left for the next one, in order, and when
-    /// the oldest of them first waited (`poll_remote`).
-    backlog: VecDeque<Received>,
+    /// Received events a frame left for the next one, in order, with each
+    /// item's arrival time so `BACKLOG_LIMIT` tracks the front item's age
+    /// instead of staying overdue for an entire continuous chunk stream.
+    backlog: VecDeque<(Received, Instant)>,
+    /// Arrival time of the front item in `backlog`, kept updated for
+    /// mod-API internals compatibility while per-item timestamps drive
+    /// `BACKLOG_LIMIT`.
+    #[allow(dead_code)]
     backlog_since: Option<Instant>,
     /// `ClientboundTransferPacket`'s target: when the connection ends the
     /// game connects here, the stored cookies carried over (`TransferState`).
@@ -841,7 +849,7 @@ mod use_prediction;
 mod wire;
 
 // The `Game` methods moved into the files above stay here as the mod points they were, by name, module path and
-// signature (docs/layers.md#mod-points-stay-put); each forwards to its body in its file.
+// signature; each forwards to its body in its file.
 impl Game<'_> {
     // connection.rs
     pub(super) fn remote_sound_name(
@@ -896,6 +904,9 @@ impl Game<'_> {
     }
     pub(super) fn leave_server(&mut self, reason: Option<Text>) -> Result<()> {
         self.leave_server_body(reason)
+    }
+    pub(super) fn leave_server_for_transfer(&mut self) -> Result<()> {
+        self.leave_server_for_transfer_body()
     }
 
     // wire.rs
@@ -1245,7 +1256,7 @@ impl Game<'_> {
     }
 
     // tick.rs
-    fn tick_client_load(&mut self) {
+    pub(in crate::game) fn tick_client_load(&mut self) {
         self.tick_client_load_body()
     }
     pub(super) fn tick_remote(&mut self) -> Result<()> {
@@ -1302,6 +1313,14 @@ impl Game<'_> {
     ) {
         self.remote_player_eating_body(item, ticks, at, eye, pitch, yaw)
     }
+    pub(in crate::game) fn send_export_view_position(&mut self) {
+        if !self.replay.playing()
+            && let Some(remote) = &self.remote
+        {
+            self.remote_send_state(remote.last_input);
+        }
+    }
+
     fn remote_send_state(&mut self, input: u8) {
         self.remote_send_state_body(input)
     }

@@ -289,7 +289,11 @@ impl Game<'_> {
             // ClientPacketListener.handleLevelEvent: a global one is heard
             // from anywhere (ClientLevel.globalLevelEvent).
             C::LevelEvent(p) if p.global => self.global_level_event_sound(p.kind, p.pos),
-            C::LevelEvent(p) => self.level_event_at(p.kind, p.pos, p.data),
+            C::LevelEvent(p) => {
+                if self.splash_sound(p.kind, p.pos) {
+                    self.level_event_at(p.kind, p.pos, p.data);
+                }
+            }
             C::LevelParticles(p) => self.remote_level_particles(&p),
             C::Explode(p) => self.remote_explode(&p),
             C::Sound(p) => {
@@ -837,7 +841,10 @@ impl Game<'_> {
                     .map(|(slot, stack)| {
                         (
                             *slot,
-                            stack.as_ref().map(|s| self.item_name(s.item)),
+                            stack
+                                .as_ref()
+                                .filter(|s| s.count > 0)
+                                .map(|s| self.item_name(s.item)),
                             self.to_stack(stack),
                         )
                     })
@@ -860,7 +867,10 @@ impl Game<'_> {
                         m.extra.charged = charged;
                     }
                     for (slot, item, stack) in items {
-                        let stack = stack.or_else(|| item.map(|item| ItemStack::new(&item, 1)));
+                        let stack = stack.or_else(|| {
+                            item.filter(|item| &**item != "minecraft:air")
+                                .map(|item| ItemStack::new(&item, 1))
+                        });
                         m.set_equipment_stack(slot as usize, stack);
                     }
                 }
@@ -2012,7 +2022,7 @@ impl Game<'_> {
                     }
                 }
                 for (ty, key, count) in known {
-                    self.stats.values.entry(ty).or_default().insert(key, count);
+                    self.stats.set_received(ty, key, count);
                 }
             }
             // ClientPacketListener.setActionBarText, setTitleText,

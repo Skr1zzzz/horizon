@@ -36,7 +36,7 @@ impl Game<'_> {
             gui,
             self.renderer.as_ref(),
             None,
-            self.settings.horizon.api,
+            self.settings.horizon.effective_api(),
             self.settings.horizon.translucent_batching,
             self.settings.vsync,
             &self.settings.horizon,
@@ -88,8 +88,7 @@ impl Game<'_> {
             );
             let available = path.exists()
                 && path.file_name().is_none_or(|f| {
-                    !shader_packs::active_pack(&f.to_string_lossy(), &self.settings.mods)
-                        .is_empty()
+                    !shader_packs::active_pack(&f.to_string_lossy(), &self.settings.mods).is_empty()
                 });
             let outcome = if available {
                 native_shaders::outcome(&path)
@@ -227,15 +226,10 @@ impl Game<'_> {
         self.remote.as_ref()?.far_terrain
     }
 
-    /// LOD Distance as far terrain uses it (`graphics::lod_distance_capped`).
+    /// LOD Distance as far terrain uses it.
     pub(super) fn lod_distance(&self) -> u32 {
         let (distance, _) = self.far_terrain_choice();
-        match &self.renderer {
-            Some(renderer) => {
-                horizon_client::graphics::lod_distance_capped(distance, &renderer.info)
-            }
-            None => distance.min(horizon_client::lod::MAX_CHUNKS),
-        }
+        distance.min(horizon_client::lod::MAX_CHUNKS)
     }
 
     /// Only enabled LOD worlds extend the renderer's range, never simulation.
@@ -254,7 +248,9 @@ impl Game<'_> {
     pub(super) fn effective_render_distance(&self) -> i32 {
         effective_render_distance(
             self.settings.render_distance,
-            self.remote.as_ref().map_or(0, |remote| remote.view_distance),
+            self.remote
+                .as_ref()
+                .map_or(0, |remote| remote.view_distance),
         )
     }
 

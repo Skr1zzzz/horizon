@@ -101,6 +101,14 @@ UTF-16 units, values of 32767 and signatures of 1024. A list past a limit is
 refused and the login's own properties are sent. `player_login` follows later and
 can still refuse the player.
 
+`entity.set_swimming(host, swimming)` (`entity_set_swimming`) sets the swimming flag of a server player or a guest, the one the next water update reads, as Paper's `Entity#setSwimming` does. It returns `false` for a mob, which keeps its own swim, and for a stale handle.
+
+`entity.detonate(host)` (`entity_detonate`) explodes an entity now: a primed TNT explodes where it stands with its power, as `PrimedTnt.explode` does, and a creeper is lit and explodes at once, as `Creeper.explodeCreeper` does. The entity is gone after its explosion. It returns `false`, changing nothing, for a stale handle, a kind that does not explode, or when the explosion itself fails.
+
+`entity.set_fall_distance(host, distance)` (`entity_set_fall_distance`) sets the blocks a server player, a guest or a mob has fallen, as Paper's `Entity#setFallDistance` does, so the next landing hurts by that much. It returns `false` for another kind, a client, a stale handle or a value that is not finite; `entity_reset_fall_distance` is the zero.
+
+`entity.set_fuse(host, ticks)` (`entity_set_fuse`) sets the ticks left before a primed TNT explodes, as vanilla's `PrimedTnt.setFuse` and Paper's `TNTPrimed#setFuseTicks` do. A fuse of `0` or less explodes it on its next tick. It returns `false`, changing nothing, for a negative count, a stale handle or an entity that is not primed TNT (a creeper's fuse is its swell, not this).
+
 ## Messages and visibility
 
 Send a message with `player.tell(host, text)`, `player.action_bar(host, text)` or
@@ -145,6 +153,12 @@ Tab list (`hide` lists them out too), and chat is not filtered. The calls return
 anything changed, and refuse with `EntityVisibilityRefusal`: `Client`, `Stale`, `NoConnection` for a
 fake viewer and `StaleEntity` for an entity handle that names nothing or the viewer's own player.
 
+To show an entity to one player only, spawn it with `player.spawn_viewer_entity(host, kind, pos)`.
+Its `AddEntity` goes to that client alone; the level does not hold it, and the other players do not
+see it. Move it with `player.move_viewer_entity(host, id, pos)` and remove it with
+`player.remove_viewer_entity(host, id)`. It has the type's default metadata only, and it is gone
+when the viewer leaves, so a mod that wants it kept re-spawns it on the next join.
+
 The reads `player.latency(host)`, `player.hidden(host)` and `player.nickname(host)`
 return what the calls above set. Latency is the Tab list ping in milliseconds
 (`Option<i32>`, `0` until the first keep-alive answer). `hidden` is the level
@@ -164,6 +178,27 @@ the list shows) and `hide_players` start as vanilla's answer. `hide_players` lea
 is dropped. An answer longer than a client reads (32767 characters) is replaced by the plain one, and so is any answer
 the mods do not finish within half a second. With no listener the request is not put to the game thread at all.
 The legacy ping of pre-1.7 clients is not asked.
+
+## Resource packs
+
+`player.push_resource_pack(host, ResourcePackOffer)` offers one player's client a pack while they play, as
+`ClientboundResourcePackPushPacket` does; `player.pop_resource_pack(host, Some(id))` takes it off again, and `None`
+takes off every pack the server pushed, the `resource-pack` of `server.properties` included. Build the offer with
+`ResourcePackOffer::new(id, url)` and set `sha1` (40 hex digits, or empty for no check), `required` and `prompt`.
+A pack pushed with the id of one the client holds replaces it; other ids stack. The client downloads the zip itself,
+so the URL must be reachable from that player.
+Like vanilla, popping does not retract an offer still waiting in an unanswered consent prompt;
+accepting that prompt can load the pack later. It is not a pending-offer cancellation API.
+
+`resource_pack_status_v2(player, name, pack, status)` hears the answers with the pack's id, including while the
+player is dead; `resource_pack_status(player, name, status)` keeps its three arguments and its firing point.
+`required` changes only
+what the client's screen offers: the server does not disconnect a player who declines a pack a mod pushed (it does
+so only for the `server.properties` pack), so a mod that needs the pack kicks on status 1 or 2 itself. Answers to the
+`server.properties` pack are given before the player has joined and are not heard. Both calls return
+`Result<(), PlayerPackRefusal>`: `Client`, `Stale`, `NoConnection`, and for a push `UrlTooLong` (over 32767
+UTF-16 code units), `HashTooLong` (over 40 UTF-16 code units) and `BadPrompt` (text the boundary refuses); a refused
+call sends nothing. Characters outside the BMP count as two code units.
 
 ## Chat lines and respawn
 
@@ -208,6 +243,8 @@ Reads accept `Host`; writes accept `ServerHost`.
 A second disconnect on a guest already leaving is a no-op and keeps the first reason.
 
 Vetoing a player's movement: the `player_move` hook hears each validated movement report whose position or rotation differs from the player's last reported location, after the server's own checks and before the report is committed, with the exact `from`, `to` and both rotations. The last reported location is kept on the player's connection, apart from the accepted position: it is the position given to the listener before it runs, and the destination of every server-side teleport (a join, a teleport in the level, a level change, a respawn, the resend of an unconfirmed teleport and the correction after a veto); `from` is that location. Set `cancel` and the report is not applied; the client is sent back to the accepted position and rotation. The veto adds no anticheat violation of its own, but the report was already seen by the server's own checks and by the anticheat's record of the client's ticks before the hook, so what a violation of those would have done still happens. The engine applies no threshold, so a mod that wants to ignore small moves compares the two positions itself (`(to - from).length() < 1.0 / 16.0` skips anything under 1/16 of a block). A held report is ruled on in the same tick; that player's later packets (further reports, the end of the client tick, pongs) wait in order behind it, then go on in that tick, so each later report is heard from the one before. A report is out of time at its 21st tick, counting the tick it was held at as the first: it is dropped with the correction, never committed, even when a ruling arrives after that; a disconnect, teleport or level change drops it cleanly. Not heard: the first tick in a level (the tick after a join or a level change; the second is heard), a player riding something (`vehicle_moved` hears the vehicle), any teleport (its confirmation is validated and committed without the hook, at the teleport's target, and so is the veto's own correction; a report that arrives while a teleport is unconfirmed is not heard either) and a passage crossing (its caller reads the position at once, so the report is committed in place). The first report after a teleport that passed validation is heard, with the teleport's destination as its `from`. With no listener nothing is held or copied; with one, the cost is a held report for each moving player a tick. A fault or an epoch timeout in a wasm listener answers nothing: it is not a veto and the report is committed, like every cancellable hook; the fault is logged, counted against the mod and stops the mod's group for the session. A native listener that never returns is out of scope: it blocks the game thread like any native code, and the 20-tick deadline covers only a report held pending across ticks.
+
+Reading every movement packet (an anticheat): `player_move` hears only a report whose position or rotation differs from the last reported one, so a stand-still or ground-flag packet never reaches it. The `player_move_packet(player, to, to_rotation, on_ground, has_position, has_rotation)` hook is heard once for every validated movement packet of a guest, also one that changes nothing, with the packet's own on-ground flag as the client sent it and whether the packet carried a position and a rotation (a status-only packet carries neither, and `to` and `to_rotation` then repeat the player's own). It is heard with the player's state swapped in, before `player_move` hears the same packet, and cannot cancel; a veto stays `player_move`'s. A guest is heard at most 8 packets a tick (`MOVE_PACKET_BUDGET`); the ones over it wait, in order, for the next ticks, at most 256 of them (the oldest are dropped past that), so one client cannot make the listeners run for its whole backlog at once. Not heard: the first tick in a level, a teleport's confirmation and a passage crossing. With no listener nothing is queued.
 
 ## Text conversions
 
@@ -303,6 +340,19 @@ The inventory menu has no slot for body or saddle. All four player data writes
 are undone by an open transaction abort; equipment effects and overflow drops
 wait for the outermost commit.
 
+## Advancement progress
+
+For mods that carry a player's advancements between servers. Server only. `player.advancements(host)` returns
+the progress as the JSON text `PlayerAdvancements.save` writes (each started advancement's `criteria`, with grant
+dates, and `done`, plus `DataVersion`), or `None` for a stale or unavailable player and on a client.
+`player.set_advancements(host, json)` replaces the whole progress from a JSON object, as a loaded file does:
+advancements and criteria this server lacks are dropped, nothing is awarded (no toast, chat line or reward), and
+the client receives the full tree with its next update. A hook that replaces the progress while a gameplay grant
+runs does not make that grant complete an advancement: what it imported is not rewarded. It returns `false`,
+changing nothing, for input that is not a JSON object, for a grant date that is not a date this server can send
+(a number, other text, a year out of range), and for a player who cannot take it: a stale or unavailable handle, a
+dead or not connected player, a client, or a world with no server list.
+
 ## Player statistics
 
 Statistics are read and replaced whole, not one at a time. `player.statistics(host)` returns all of a player's
@@ -313,3 +363,9 @@ goes back to 0, scoreboard criteria follow the changed values, and the client se
 `player_stat_award` is not heard.
 
 Measuring a client's transaction round trip (a lag-compensating anticheat): send the player a `ping` with `player_send_packet` and hear the answer in `player_pong(player, name, id)`, which carries the number the ping had; the time between the two is finer than the keep-alive average `player_latency` reads. The engine's own pings (a recording's end-of-tick ping, whose id is the server tick) are answered here too, so pick ids that tell apart from small tick numbers. The hook is heard only for a pong that answers a ping the server sent on that connection, once per ping (an unsolicited or repeated pong, or an answer to a ping older than 30 seconds, is dropped), in order with the guest's other packets, with their state swapped in, and cannot cancel; with no listener nothing is queued.
+
+## Entity broadcast range
+
+`ConfigServerHost::entity_range_percent()` (server side) returns the entity broadcast range the server hosts with,
+in percent of vanilla's (`entity-broadcast-range-percentage` of server.properties). It is `100` when no server is
+hosting a world, which is vanilla's default. Read only.

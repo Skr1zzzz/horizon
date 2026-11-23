@@ -30,15 +30,16 @@ jobs:
     # A batch reruns up to ~670 harnesses: 89-234 min in the nine runs logged up to 2026-11-20 (then with the merge
     # search), the longest on a loaded Mac (an 85 min probe prebuild). After the oracle shim's key changes, its
     # records are rebuilt once, which adds up to ~23 min to the first full run.
-    timeout-minutes: 300
+    timeout-minutes: 360
     env:
       # This run's identity: tools/parity.py records it with the harnesses that failed (last-run.json), and the verdict
       # judges only a list this run wrote, never one an earlier run left when this batch stopped before writing its own.
       PARITY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       # The probe prebuild's turn on the self-hosted Mac (tools/compile_lock.py), and the preparer build's in
       # vanilla-data.sh: a pull request's parity job takes the turn only while this run neither waits for it nor holds
-      # it. This run waits at most 20 min in all, and its prebuild has 120 min (tools/parity.py PREBUILD_LIMIT), which
-      # leaves the harnesses at least 160 of the job's 300 min.
+      # it. This run waits at most 20 min in all, and its prebuild has 240 min (tools/parity.py PREBUILD_LIMIT): a
+      # prebuild that builds everything takes over 2 hours even alone. Of the job's 360 min, 120 remain beyond the
+      # prebuild's limit; after a full 20 min wait, 100 remain for setup and the harnesses.
       HORIZON_COMPILE_LOCK_ROLE: main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,11 +68,28 @@ jobs:
         env:
           PARITY_HOSTS: ''
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          # Cargo's timing report of each prebuild run, for the step after this one (tools/parity.py
+          # PrebuildTimings). This step only: the verdict's reruns build again without it.
+          HORIZON_PARITY_PREBUILD_TIMINGS: '1'
         # exec: a cancelled job's signals reach tools/parity.py, which stops its builds' process groups.
         run: |
           echo "Merges since ${BASE_SHA}:"
           git log --first-parent --format='  %h %s' "$BASE_SHA..HEAD"
           exec python3 tools/parity.py --changed "$BASE_SHA" --timeout 2400
+      - name: Upload the prebuild's timing reports
+        # Only when this step's tools/parity.py published this attempt's folder (it says `ready` once the files are
+        # checked and renamed), and in it only the two kinds of file it holds. Best effort, as the verdict's upload:
+        # the artifact service never decides the run.
+        if: ${{ !cancelled() && steps.harnesses.outputs.prebuild_timings == 'ready' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: parity-main-prebuild-timings
+          path: |
+            .local/parity-runner/prebuild-timings-${{ github.run_id }}-${{ github.run_attempt }}/cargo-*.html
+            .local/parity-runner/prebuild-timings-${{ github.run_id }}-${{ github.run_attempt }}/prebuild-calls.txt
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Preserve the initial failure logs
         if: steps.harnesses.outcome == 'failure'
         run: |
