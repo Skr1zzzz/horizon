@@ -194,13 +194,13 @@ impl MobLevel for Level {
     fn grief_hooked(&self) -> bool {
         false
     }
-    fn spawn_item_own(&mut self, _: ItemStack, _: [f64; 3], _: u32) -> [f64; 3] {
+    fn spawn_item_own(&mut self, _: ItemStack, _: [f64; 3], _: u32) -> Option<u32> {
         unreachable!()
     }
-    fn spawn_item(&mut self, _: ItemStack, _: [f64; 3], _: [f64; 3], _: u32) {
+    fn spawn_item(&mut self, _: ItemStack, _: [f64; 3], _: [f64; 3], _: u32) -> Option<u32> {
         unreachable!()
     }
-    fn just_spawned_item(&mut self) -> Option<&mut ItemEntity> {
+    fn item_entity_mut(&mut self, _: u32) -> Option<&mut ItemEntity> {
         unreachable!()
     }
     fn mob_uuid(&mut self, _: u32) -> [i32; 4] {
