@@ -740,6 +740,15 @@ pub fn shown_address(address: &str) -> String {
     }
 }
 
+/// A disconnect reason as the log keeps it. The player sees the address they typed in the
+/// "invalid address" refusal; the log, which a bug report carries, gets `<server>` instead.
+pub fn logged_reason(reason: &str, key: Option<&str>) -> String {
+    match key {
+        Some("horizon.multiplayer.invalid_address") => "Invalid server address: <server>".into(),
+        _ => reason.to_owned(),
+    }
+}
+
 /// The relay the player set (`friendsRelay` in horizon.txt, beside
 /// options.txt), else the resolver's (`HORIZON_RELAY_URL`). None by default.
 pub fn friends_relay_setting() -> Option<String> {
@@ -1007,7 +1016,12 @@ fn run(
         let (host, port, token) = match address.strip_prefix(FRIEND) {
             Some(code) => join_friend(code, lang, send)?,
             None => {
-                let Some(target) = parse_address(address) else {
+                let target = if lan {
+                    lan_target(address)
+                } else {
+                    parse_address(address)
+                };
+                let Some(target) = target else {
                     // A refusal: never retried (`horizon.multiplayer
                     // .invalid_address` is in reconnect's key list).
                     return Err(Reason::keyed_arg(
@@ -1795,6 +1809,8 @@ fn append_json_text(v: &serde_json::Value, lang: &Language, out: &mut String, de
             if let Some(t) = o.get("text").and_then(serde_json::Value::as_str) {
                 push_capped(out, t);
             } else if let Some(key) = o.get("translate").and_then(serde_json::Value::as_str) {
+                // One budget for all the arguments, as in `horizon_protocol::text::plain`.
+                let mut room = MAX_TEXT;
                 let args: Vec<String> = o
                     .get("with")
                     .and_then(serde_json::Value::as_array)
@@ -1802,7 +1818,10 @@ fn append_json_text(v: &serde_json::Value, lang: &Language, out: &mut String, de
                         a.iter()
                             .map(|e| {
                                 let mut s = String::new();
-                                append_json_text(e, lang, &mut s, depth + 1);
+                                if room > 0 {
+                                    append_json_text(e, lang, &mut s, depth + 1);
+                                    room = room.saturating_sub(s.len());
+                                }
                                 s
                             })
                             .collect()
@@ -1976,8 +1995,55 @@ fn continues_after_failed_join(lan: bool, signed_in: bool) -> bool {
     lan && signed_in
 }
 
+/// Where a LAN game's join leads: only an IP and a port from 1 to 65535 (the
+/// multiplayer list passes the sender's IP and the announced port). Anything
+/// else is an invalid address, so a LAN announcement never starts a host name
+/// or SRV lookup.
+fn lan_target(address: &str) -> Option<(String, u16)> {
+    let target: std::net::SocketAddr = address.parse().ok()?;
+    (target.port() != 0).then(|| (target.ip().to_string(), target.port()))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_lan_join_takes_only_an_ip_and_a_port() {
+        use super::lan_target;
+        assert_eq!(
+            lan_target("192.168.1.10:25565"),
+            Some(("192.168.1.10".to_owned(), 25565))
+        );
+        assert_eq!(
+            lan_target("[fe80::1]:25566"),
+            Some(("fe80::1".to_owned(), 25566))
+        );
+        for refused in [
+            "192.168.1.10:",
+            "10.0.0.2:x",
+            "10.0.0.2:0",
+            "10.0.0.2:80:evil.example",
+            "10.0.0.2:evil.example:80",
+            "evil.example:25565",
+            "localhost:25565",
+            "",
+        ] {
+            assert_eq!(lan_target(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_refused_address_stays_out_of_the_logged_reason() {
+        // The text is in the player's language and holds what they typed; the key says which
+        // refusal it is.
+        let shown = "Ungültige Serveradresse: my-smp.example.com:99999";
+        let key = Some("horizon.multiplayer.invalid_address");
+        assert_eq!(
+            logged_reason(shown, key),
+            "Invalid server address: <server>"
+        );
+        assert_eq!(logged_reason("Timed out", None), "Timed out");
+    }
+
     #[test]
     fn older_servers_are_on_unless_the_variable_is_zero() {
         use std::ffi::OsStr;

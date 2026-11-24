@@ -121,6 +121,12 @@ cargo run --release -p horizon-game -- --render-distance 12
 
 Development builds that link quickly: `cargo build --profile fast -p horizon-game`.
 
+On Windows, with the build prerequisites and prepared resources above and `python` on `PATH`, run
+`tools\build-and-run.bat --world "Dev World" --render-distance 8` from the checkout.
+It builds `target\fast\horizon-client.exe`, passes along game arguments, and prints the new
+temporary run directory. Saves, options and logs stay there by default, not in the checkout
+or in your regular Horizon profile. Each invocation starts with a fresh directory.
+
 `HORIZON_OCCLUSION_PROFILE=1` enables detailed entity-occlusion phase and bounds-scan timings
 in `horizon-ctl stats` and `bench`. The normal benchmark keeps these CPU-clock reads disabled;
 query, cache-hit and cull counters remain available without profiling.
@@ -152,6 +158,9 @@ Optional Windows allocator build features are documented in
 Worlds autosave every 6000 ticks (5 minutes), when chunks unload and on quit.
 On headless Linux use `vscreen start ./target/release/horizon-client` and
 `vscreen shot`.
+
+Server dialogs replace the visible menu without closing it. Dismissing the
+dialog returns to the open inventory, container, or other screen.
 
 Sound: the game prints the output it opened (`Horizon: audio output ...`) or
 why it has none (`Horizon: no sound: ...`). It opens none with
@@ -223,6 +232,8 @@ reconstruction. Modified entity/block-entity data has no general reverse datafix
 and newer components without an old field cannot be represented. Incoming block-entity
 updates and chunk entries use forward datafixes for banner patterns, skull profiles,
 text and nested inventory stacks, retaining opaque fields and the original tag identity.
+The legacy registry and item context is acquired only for translations that read it,
+not for movement, keepalives or other packets that do not use that data.
 Independent vanilla fixtures cover these conversions; they do not establish full rendered parity. Static banners,
 enchantments, paintings, instruments and the original wolf coat use vanilla names.
 Old recipes, trades, horse equipment, attribute/effect metadata and particles are

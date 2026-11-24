@@ -321,6 +321,9 @@ impl Game<'_> {
             }
         }
         self.remote_seat_passengers(vehicle_id, passengers);
+        // One set for the loops over every mob, display, armor stand and
+        // interaction below: the server's list can hold many ids.
+        let riders = super::remote::passenger_set(passengers);
         let player_controls = passengers.first().is_some_and(|&id| {
             self.remote
                 .as_ref()
@@ -353,42 +356,43 @@ impl Game<'_> {
             if m.id == vehicle_id {
                 m.extra.rider = passengers.first().map(|&p| p as u32);
             }
-            if m.extra.mount == Some(vehicle_id) && !passengers.contains(&(m.id as i32)) {
+            if m.extra.mount == Some(vehicle_id) && !riders.contains(&(m.id as i32)) {
                 m.extra.mount = None;
                 m.extra.passenger = false;
-            } else if passengers.contains(&(m.id as i32)) {
+            } else if riders.contains(&(m.id as i32)) {
                 m.extra.mount = Some(vehicle_id);
                 m.extra.passenger = true;
             }
         }
         for (id, display) in &mut self.text_displays {
-            if passengers.contains(id) {
+            if riders.contains(id) {
                 display.vehicle = Some(vehicle_id);
             } else if display.vehicle == Some(vehicle_id) {
                 display.vehicle = None;
             }
         }
         for a in &mut self.armor_stands {
-            if passengers.contains(&(a.id as i32)) {
+            if riders.contains(&(a.id as i32)) {
                 a.vehicle = Some(vehicle_id);
             } else if a.vehicle == Some(vehicle_id) {
                 a.vehicle = None;
             }
         }
         for (&id, i) in &mut self.interactions {
-            if passengers.contains(&id) {
+            if riders.contains(&id) {
                 i.vehicle = Some(vehicle_id);
             } else if i.vehicle == Some(vehicle_id) {
                 i.vehicle = None;
             }
         }
-        if passengers.contains(&me)
+        let aboard = riders.contains(&me);
+        if aboard
             && let Some(r) = self.remote.as_mut()
         {
             r.first_passenger = passengers.first() == Some(&me);
             r.passenger_index = passengers.iter().position(|&p| p == me).unwrap_or(0);
         }
-        if passengers.contains(&me) {
+        if aboard {
             if self.riding != Some(vehicle_id) {
                 self.riding = Some(vehicle_id);
                 // ClientPacketListener.handleSetEntityPassengersPacket: boarding says how to get off,
@@ -460,6 +464,18 @@ impl Game<'_> {
         let Some(id) = self.riding else {
             return Ok(false);
         };
+        // LocalPlayer.aiStep's pending auto-jump: `canAutoJump` needs a walking
+        // player, so one cannot start in a vehicle, but the tick after boarding
+        // still counts the last one down, presses jump (`input.makeJump`) and
+        // keeps that jump from toggling flight (`!wasAutoJump`).
+        let mut keys = keys;
+        if let Some(p) = self.player.as_mut() {
+            p.was_auto_jump = p.auto_jump_time > 0;
+            if p.was_auto_jump {
+                p.auto_jump_time -= 1;
+                keys.jump = true;
+            }
+        }
         // LocalPlayer.aiStep runs its sprint decisions in a vehicle too: `canSprint` and
         // this client's authority stand in for food (`isSprintingPossible`).
         let (can_sprint, local) = self
@@ -480,6 +496,7 @@ impl Game<'_> {
             // Another animal moves on the server with the rider's input
             // (PlayerInput); the rider sits where `positionRider` puts it.
             self.position_rider();
+            self.rider_flight_toggle(keys.jump);
             return Ok(true);
         }
         // Generic entities are valid vehicles too (plugins use displays as seats).
@@ -519,6 +536,7 @@ impl Game<'_> {
                     p.velocity = Vec3::ZERO;
                     p.fall_distance = 0.0;
                 }
+                self.rider_flight_toggle(keys.jump);
                 return Ok(true);
             }
         }
@@ -594,7 +612,20 @@ impl Game<'_> {
             p.velocity = Vec3::ZERO;
             p.fall_distance = 0.0;
         }
+        self.rider_flight_toggle(keys.jump);
         Ok(true)
+    }
+
+    /// `LocalPlayer.aiStep`'s creative-flight toggle for a rider, whose tick
+    /// runs here instead of the walking one. `Player.tick` counts the
+    /// jump-trigger window down and clears a passenger's `onGround` before
+    /// `aiStep`, so the mount must be jumpable (`Player.jumpableVehicle`) and
+    /// the toggle's jump from the ground never runs for a rider.
+    fn rider_flight_toggle(&mut self, jumping: bool) {
+        let vehicle_jumpable = self.jumpable_mount();
+        if let Some(player) = self.player.as_mut() {
+            player.creative_flight_toggle(jumping, vehicle_jumpable);
+        }
     }
 
     /// `LocalPlayer.tick` for a passenger: the boat it controls goes to the
@@ -856,6 +887,10 @@ fn mount_move(m: &Mob) -> S {
         on_ground: m.on_ground,
     })
 }
+
+#[cfg(test)]
+#[path = "remote_vehicles/creative_flight_tests.rs"]
+mod creative_flight_tests;
 
 /// Avatar's VEHICLE attachment scales independently of the vehicle's seat.
 fn generic_player_seat(at: glam::DVec3, before: glam::DVec3, scale: f32) -> (Vec3, Vec3) {
