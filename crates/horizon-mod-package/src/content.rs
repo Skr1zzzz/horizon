@@ -36,7 +36,7 @@ pub fn check_bytes(name: &str, bytes: &[u8]) -> Result<(), String> {
 /// Checks a content path: `assets/` or `data/`, then `/`-separated parts of
 /// `[a-z0-9_.-]`, none of them `.` or `..` and none ending in `.` (vanilla's
 /// resource-location characters, so the path means the same on every OS: Windows
-/// drops a trailing dot).
+/// drops a trailing dot). No part is a Windows device name or over 255 bytes either.
 pub fn check_path(name: &str) -> Result<(), String> {
     let bad = || format!("{name:?} is not a plain assets/ or data/ path");
     let mut parts = name.split('/');
@@ -51,6 +51,9 @@ pub fn check_path(name: &str) -> Result<(), String> {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
         if part.is_empty() || part.ends_with('.') || !chars_ok {
             return Err(bad());
+        }
+        if let Some(why) = crate::manifest::part_problem(part) {
+            return Err(format!("{name:?}: {why}; rename it"));
         }
     }
     // assets/<namespace>/<file> at least.
@@ -351,6 +354,89 @@ impl ShapeEntityKind {
             Self::Living => "living",
             Self::Other => "other",
         }
+    }
+}
+
+/// A vanilla block's shape for one entity class: each state's own vanilla shape of the
+/// same channel cut to a box, or a table of boxes by the block's vanilla state properties.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VanillaShape {
+    /// `{"clip": [minX,minY,minZ,maxX,maxY,maxZ]}`, in block units.
+    Clip([f64; 6]),
+    /// A shape table, as `shapes` takes it.
+    Table(BlockShapes),
+}
+
+impl<'de> Deserialize<'de> for VanillaShape {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Clip {
+            clip: [f64; 6],
+        }
+        let value = serde_json::Value::deserialize(d)?;
+        if value.get("clip").is_some() {
+            let Clip { clip } = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Ok(Self::Clip(clip))
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Table)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+/// Entity-context outlines and collisions for vanilla blocks
+/// (`data/<id>/horizon/vanilla_block_shapes/<name>.json`, or `mod_api::VanillaBlockShapes`
+/// from code): a mod block's `outline_context_shapes` and `collision_context_shapes`, for
+/// blocks no mod owns.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VanillaBlockShapes {
+    /// `minecraft:<path>` block ids.
+    pub blocks: Vec<String>,
+    #[serde(default)]
+    pub outline_context_shapes: BTreeMap<ShapeEntityKind, VanillaShape>,
+    #[serde(default)]
+    pub collision_context_shapes: BTreeMap<ShapeEntityKind, VanillaShape>,
+}
+
+impl VanillaBlockShapes {
+    /// What can be checked without the vanilla registry: ids, boxes and tables. Whether each
+    /// block exists, its tables' properties and its shape being static are checked at load.
+    pub fn check(&self) -> Result<(), String> {
+        if self.blocks.is_empty() {
+            return Err("vanilla block shapes name no blocks".into());
+        }
+        let mut seen = BTreeSet::new();
+        for block in &self.blocks {
+            if !vanilla_id(block) {
+                return Err(format!("{block:?} is not a minecraft: block id"));
+            }
+            if !seen.insert(block) {
+                return Err(format!("{block} is named twice"));
+            }
+        }
+        if self.outline_context_shapes.is_empty() && self.collision_context_shapes.is_empty() {
+            return Err("vanilla block shapes declare no outline or collision".into());
+        }
+        for shape in self
+            .outline_context_shapes
+            .values()
+            .chain(self.collision_context_shapes.values())
+        {
+            match shape {
+                VanillaShape::Clip(bounds) => {
+                    if bounds.iter().any(|value| !value.is_finite())
+                        || (0..3).any(|axis| bounds[axis] > bounds[axis + 3])
+                    {
+                        return Err("clip needs a finite box with ordered bounds".into());
+                    }
+                }
+                VanillaShape::Table(table) => table.check()?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -868,6 +954,8 @@ pub struct Content {
     /// Block entity types declared by native code, not content files.
     pub block_entity_types: Vec<BlockEntityType>,
     pub menu_types: Vec<MenuType>,
+    /// Entity-context shapes it gives vanilla blocks, from its files and its code.
+    pub vanilla_shapes: Vec<VanillaBlockShapes>,
     /// The namespaces it owns: the mod id, then the manifest's `namespaces`.
     pub namespaces: Vec<String>,
 }
@@ -957,8 +1045,9 @@ impl Content {
                     let name = entry.name().map_err(|e| e.to_string())?.into_owned();
                     // As `Package::read_zip`: the loader reads `\` as `/`, so no entry may
                     // name a path these checks would read differently.
-                    if !crate::manifest::plain_path(name.strip_suffix('/').unwrap_or(&name)) {
-                        return Err(format!("invalid package path: {name}"));
+                    let bare = name.strip_suffix('/').unwrap_or(&name);
+                    if let Some(why) = crate::manifest::path_problem(bare) {
+                        return Err(format!("invalid package path: {name:?}: {why}; rename it"));
                     }
                     if (name.starts_with("assets/") || name.starts_with("data/")) && !entry.is_dir()
                     {
@@ -997,6 +1086,7 @@ impl Content {
             entity_types: Vec::new(),
             block_entity_types: Vec::new(),
             menu_types: Vec::new(),
+            vanilla_shapes: Vec::new(),
             namespaces: manifest.owned_namespaces().map(str::to_owned).collect(),
         };
         content.check(manifest, declared)?;
@@ -1017,8 +1107,19 @@ impl Content {
             entity_types: Vec::new(),
             block_entity_types: Vec::new(),
             menu_types: Vec::new(),
+            vanilla_shapes: Vec::new(),
             namespaces: vec![namespace.to_owned()],
         }
+    }
+
+    /// Adds the vanilla block shapes a mod's code declares (`vanilla_block_shapes`), checked
+    /// as declaration files are. All or nothing: on an error nothing is added.
+    pub fn declare_vanilla_shapes(&mut self, shapes: &[VanillaBlockShapes]) -> Result<(), String> {
+        for shape in shapes {
+            shape.check()?;
+        }
+        self.vanilla_shapes.extend_from_slice(shapes);
+        Ok(())
     }
 
     /// Adds blocks and items a native mod declares in code (`native_blocks`,
@@ -1156,6 +1257,7 @@ impl Content {
         let mut fluids = Vec::new();
         let mut types = Vec::new();
         let mut menus = Vec::new();
+        let mut vanilla_shapes = Vec::new();
         for name in &self.files {
             let mut parts = name.splitn(3, '/');
             let (top, namespace, rest) = (
@@ -1198,9 +1300,11 @@ impl Content {
                 types.push((kind, name.clone()));
             } else if let Some(menu) = parse("menu") {
                 menus.push((menu, name.clone()));
+            } else if parse("vanilla_block_shapes").is_some() {
+                vanilla_shapes.push(name.clone());
             } else {
                 return Err(format!(
-                    "{name}: data/{id}/horizon/ holds block/, item/, mob_effect/, creative_tab/, fluid/, entity_type/ and menu/*.json only"
+                    "{name}: data/{id}/horizon/ holds block/, item/, mob_effect/, creative_tab/, fluid/, entity_type/, menu/ and vanilla_block_shapes/*.json only"
                 ));
             }
         }
@@ -1208,6 +1312,12 @@ impl Content {
         // whole index, so a reader per file made loading a big mod quadratic.
         let source = self.source.clone();
         let mut reader = reader_of(&source)?;
+        for name in vanilla_shapes {
+            let file: VanillaBlockShapes =
+                serde_json::from_slice(&reader.read(&name)?).map_err(|e| format!("{name}: {e}"))?;
+            file.check().map_err(|e| format!("{name}: {e}"))?;
+            self.vanilla_shapes.push(file);
+        }
         let mut ids = BTreeSet::new();
         for (block, name) in blocks {
             let file: BlockFile =
@@ -1320,9 +1430,12 @@ impl Content {
                 items: file.items,
             });
         }
+        let mut fluid_names = BTreeSet::new();
+        let mut block_ids: BTreeSet<String> = self.blocks.iter().map(|b| b.id.clone()).collect();
+        let mut item_ids: BTreeSet<String> = self.items.iter().map(|i| i.id.clone()).collect();
         for (fluid, name) in fluids {
             let file: FluidFile =
-                serde_json::from_slice(&self.file(&name)?).map_err(|e| format!("{name}: {e}"))?;
+                serde_json::from_slice(&reader.read(&name)?).map_err(|e| format!("{name}: {e}"))?;
             if file.sprite.as_deref().is_some_and(|s| !namespaced_id(s)) {
                 return Err(format!(
                     "{name}: sprite is an atlas sprite id (namespace:path)"
@@ -1337,26 +1450,27 @@ impl Content {
                 tint: file.tint,
                 world: file.world,
             };
-            if self.fluids.iter().any(|known| {
-                known.id == look.id
-                    || (known.world.is_some() && known.flowing_id() == look.id)
-                    || (look.world.is_some()
-                        && (look.flowing_id() == known.id
-                            || (known.world.is_some() && look.flowing_id() == known.flowing_id())))
-            }) {
+            // Every registry name a fluid takes: its id, and its flowing form if it flows.
+            if fluid_names.contains(&look.id)
+                || (look.world.is_some() && fluid_names.contains(&look.flowing_id()))
+            {
                 return Err(format!("{name}: fluid name declared twice"));
             }
             if let Some(block) = look.world_block() {
-                if self.blocks.iter().any(|known| known.id == block.id) {
+                if !block_ids.insert(block.id.clone()) {
                     return Err(format!("{name}: block {} is declared twice", block.id));
                 }
                 self.blocks.push(block);
             }
             if let Some(item) = look.world_bucket() {
-                if self.items.iter().any(|known| known.id == item.id) {
+                if !item_ids.insert(item.id.clone()) {
                     return Err(format!("{name}: item {} is declared twice", item.id));
                 }
                 self.items.push(item);
+            }
+            fluid_names.insert(look.id.clone());
+            if look.world.is_some() {
+                fluid_names.insert(look.flowing_id());
             }
             self.fluids.push(look);
         }
@@ -1975,6 +2089,62 @@ capabilities = ["registries"]
         let mut nonfinite = oversized;
         nonfinite.default = Some(vec![[f64::NAN; 6]]);
         assert!(nonfinite.check().is_err());
+    }
+
+    #[test]
+    fn vanilla_block_shapes_files_name_minecraft_blocks_and_valid_shapes() {
+        let read = |text: &str| {
+            hmod(
+                "vanilla-shapes",
+                MANIFEST_TEXT,
+                &[(
+                    "data/ruby/horizon/vanilla_block_shapes/fences.json",
+                    text.as_bytes(),
+                )],
+            )
+        };
+        let content = read(
+            r#"{"blocks":["minecraft:oak_fence","minecraft:stone_wall"],
+                "collision_context_shapes":{"player":{"clip":[0,0,0,1,1,1]},
+                  "item":{"default":[[0,0,0,1,0.5,1]]}}}"#,
+        )
+        .unwrap();
+        let [shapes] = content.vanilla_shapes.as_slice() else {
+            panic!("{:?}", content.vanilla_shapes)
+        };
+        assert_eq!(
+            shapes.blocks,
+            ["minecraft:oak_fence", "minecraft:stone_wall"]
+        );
+        assert_eq!(
+            shapes.collision_context_shapes[&ShapeEntityKind::Player],
+            VanillaShape::Clip([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+        );
+        assert!(matches!(
+            shapes.collision_context_shapes[&ShapeEntityKind::Item],
+            VanillaShape::Table(_)
+        ));
+        for (text, refusal) in [
+            (
+                r#"{"blocks":["ruby:post"],"collision_context_shapes":{"player":{"clip":[0,0,0,1,1,1]}}}"#,
+                "is not a minecraft: block id",
+            ),
+            (
+                r#"{"blocks":["minecraft:oak_fence"],"collision_context_shapes":{"player":{"clip":[0,1,0,1,0,1]}}}"#,
+                "ordered bounds",
+            ),
+            (
+                r#"{"blocks":["minecraft:oak_fence"]}"#,
+                "no outline or collision",
+            ),
+            (
+                r#"{"blocks":["minecraft:oak_fence"],"collision_context_shapes":{"player":{"clip":[0,0,0,1,1,1],"default":[]}}}"#,
+                "unknown field",
+            ),
+        ] {
+            let error = read(text).unwrap_err();
+            assert!(error.contains(refusal), "{text}: {error}");
+        }
     }
 
     #[test]
@@ -3318,6 +3488,40 @@ capabilities = ["registries"]
     }
 
     #[test]
+    fn many_fluids_load_and_a_flowing_name_taken_by_an_earlier_fluid_is_refused() {
+        let names: Vec<String> = (0..300)
+            .map(|i| format!("data/ruby/horizon/fluid/f{i}.json"))
+            .collect();
+        let files: Vec<(&str, &[u8])> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    n.as_str(),
+                    if i % 2 == 0 {
+                        &b"{}"[..]
+                    } else {
+                        br#"{"world":{}}"#
+                    },
+                )
+            })
+            .collect();
+        let content = hmod("many-fluids", MANIFEST_TEXT, &files).unwrap();
+        assert_eq!(content.fluids.len(), 300);
+        assert_eq!(content.blocks.len(), 150);
+        // `a` flows into `flowing_a`, which a later file may not declare.
+        let files: &[(&str, &[u8])] = &[
+            ("data/ruby/horizon/fluid/a.json", br#"{"world":{}}"#),
+            ("data/ruby/horizon/fluid/flowing_a.json", b"{}"),
+        ];
+        assert!(
+            hmod("flowing-taken", MANIFEST_TEXT, files)
+                .unwrap_err()
+                .contains("declared twice")
+        );
+    }
+
+    #[test]
     fn fluids_declare_a_sprite_and_a_tint() {
         let files: &[(&str, &[u8])] = &[
             (
@@ -3703,7 +3907,20 @@ capabilities = ["registries"]
     fn paths_are_plain() {
         assert!(check_path("assets/ruby/textures/block/ruby_block.png").is_ok());
         assert!(check_path("data/ruby/loot_table/blocks/a.json").is_ok());
+        for near in ["console.json", "com0.json", "lpt10.json", "nul_block.json"] {
+            assert!(
+                check_path(&format!("data/ruby/recipe/{near}")).is_ok(),
+                "{near}"
+            );
+        }
+        // 255 bytes is the longest file name the common file systems take.
+        assert!(check_path(&format!("data/ruby/{}.json", "a".repeat(250))).is_ok());
+        assert!(check_path(&format!("data/ruby/{}.json", "a".repeat(251))).is_err());
         for bad in [
+            "data/ruby/recipe/nul.json",
+            "data/ruby/recipe/com1.json",
+            "assets/ruby/aux/a.png",
+            "data/ruby/recipe/lpt9.tar.json",
             "assets/ruby",
             "assets/../x/y",
             "assets/ruby//a",
