@@ -77,7 +77,7 @@ fn own_player_frame(game: &mut Game<'_>) -> Vec<Vertex> {
     game.tick_player_model();
     game.prepare_entity_culling(glam::DVec3::ZERO);
     let mut out = Vec::new();
-    game.player_model_geometry(CAMERA, 1.0, &mut out);
+    game.player_model_geometry(CAMERA, 1.0, None, &mut out);
     out
 }
 
