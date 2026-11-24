@@ -73,7 +73,8 @@ alone, with a warning. The check is still reported on the head.
 
 Failed harnesses' logs are uploaded as the `parity-logs` artifact.
 
-**Hosted parity.** A maintainer can also run harnesses on Blacksmith's runners, away from the Mac mini:
+**Hosted parity.** A push to main runs the full hosted selection on Blacksmith's runners, away from the Mac mini,
+at most every 3 hours, and a maintainer can run harnesses there too:
 `gh workflow run parity-hosted.yml --ref <branch> -f harnesses="..."`, or `-f base=<commit>` for what the branch's
 changes reach. The data comes encrypted from the maintainers' private `horizon-rust/vanilla-data`. The only thing
 that leaves the runner is the harness logs: the first-attempt and failure logs, holding compared values, log tails and
@@ -183,7 +184,8 @@ which runs them on main a batch of merges at a time, on the Mac mini's runner:
 - Jobs on the self-hosted Mac take turns at compiling (`tools/compile_lock.py`, flock on files in
   `/Users/Shared/horizon-compile-lock`): parity-main's probe prebuild, pull requests' parity prebuilds and the
   Nightly's, releases' and the launcher's Mac compiles. A pull request's job is not given the turn while parity-main
-  or a Mac build is waiting or compiling; those wait only for the turn's holder. A holder that dies frees the turn at
+  or a Mac build is waiting or compiling; those wait only for the turn's holder, and a pull request's prebuild that
+  holds it gives it back after its current Cargo run. A holder that dies frees the turn at
   once (the kernel drops its lock). Waits are bounded (parity-main 20 min and the Mac builds 60, each for all its
   compiles together; pull requests 60 per prebuild), then the job compiles anyway and says who held the turn. parity-main's prebuild then has 240 minutes (`PREBUILD_LIMIT`),
   past which its Cargo process group is stopped and the run fails.
@@ -336,7 +338,7 @@ There is no daily run: `daily.yml` and the workflows it called (`ignored-tests.y
 |---|---|---|
 | `ci.yml` (`verify (Rust tests)`) | A pull request that `tools/ci/rust_changes.py` selects (any change except `docs/`, Markdown, and Python under `tools/` and `tests/`; `rust_changes.py` and `release_train.py` themselves count); every merge-queue entry, manual dispatch and push to main (a push only builds when a merge-queue run already passed on its commit) | On Linux: the workspace's unit, binary, integration and doc tests, and the `#[ignore]`d `mod_content::tests::` (they pass at once without the vanilla data, which no GitHub runner holds) |
 | `ci.yml` (`verify (launcher)`) | A pull request or push to main that `rust_changes.py --launcher` selects, or whose earlier commit can't be read; every manual dispatch. Never in the merge queue (the job's condition), and a push to main only builds when a merge-queue run already passed on its commit | On Linux: the launcher's library and binary tests |
-| `ci.yml` (`verify (mod points)`) | A pull request that `rust_changes.py` selects for the mod points (see `needs_mod_points`: crate manifests count, for example); every merge-queue entry, manual dispatch and push to main | On Linux: `horizon-mod-points`' wire loopback test |
+| `ci.yml` (`verify (mod API)`) | A pull request that `rust_changes.py` selects for the mod API (see `needs_mod_api`: crate manifests count, for example); every merge-queue entry, manual dispatch and push to main | On Linux, pull requests only: the generated mod API against the base (`tools/check_mod_api_unchanged.py`) and the surface report |
 | `ci.yml` (`Windows ARM64 game and launcher`) | Manual dispatch with `-f arm64=true` only | The launcher's library tests and the `#[ignore]`d `rust_toolchain::tests::managed_arm64_toolchain_builds_the_game` |
 | `ci.yml` (`Windows x64 game and launcher tests`) | Manual dispatch with `-f windows=true` only, a [try run](ci-runners.md#try-runs) | On Windows x64: the launcher's tests; the game's release build, uploaded for 3 days |
 | `launcher.yml` (`build`) | See the workflow's `on:` (pushes to `main`, `launcher` and `launcher-*` within its path filter, a schedule, manual dispatch) and its `decide` job: it builds when a launcher release is due, and on every dry run (every run off main, and a dispatch with `dry_run`, the default), which publishes nothing | The launcher's tests on Linux, macOS (two builds, one for x86-64) and Windows (x64, ARM64) |
@@ -717,6 +719,11 @@ release.
   5 minutes, or the oldest 1 hour: a fix to installs or updates starts its release at most ~70 minutes after it
   merges, as the decision runs every 10 minutes, then builds and publishes), `release-now`, `skip-release` and
   `RELEASES_PAUSED`.
+- A fix merged through a security advisory's private fork has no pull request, so the decision doesn't count it.
+  Release it by hand: `gh workflow run launcher --ref main -f dry_run=false -f force=true`, but only after the
+  `checks` run on the fix's commit on `main` has passed. The dispatch releases the newest commit on `main` whose
+  `checks` passed, so one sent earlier ships a commit without the fix. Confirm the release's commit contains the
+  fix, then publish the advisory.
 - The tag is `launcher@X.Y.Z` on the release line (`launcher@0.2.0` first; the game and the launcher count their
   patches separately). Without `.github/release-line.txt`, `launcher-vX.Y.Z`: the patch after the last launcher tag,
   or the next minor (`X.Y+1.0`) when one of those pull requests is labelled `feature`. `launcher-v0.2.0` was taken
@@ -794,7 +801,7 @@ Online5277 since 2026-10-27, levzzz5154 since 2026-10-28) and for Ludovic, with 
   linking the comment that asked; a refusal answers too. Claims are their own workflow
   (`.github/workflows/claim-command.yml`, `tools/ci/claim_command.py`), open to everyone for their own claim.
 - **Refused.** Any label with `release` in its name (`release-now`, `release-blocker`, `skip-release`) and
-  `full-parity`; anything on Ludovic's own issues and pull requests; a merged pull request; a locked thread; more
+  `full-parity`, `run-parity`, and removing `needs-proof` (adding it is fine); anything on Ludovic's own issues and pull requests; a merged pull request; a locked thread; more
   than 60 actions per reviewer in 24 hours (counted from the workflow's own comments).
 - **Safety.** Same as `/nightly`: main's copy of the workflow runs, no pull request's code is checked out or run,
   the comment reaches the script as env vars, and the token has `issues` and `pull-requests` write only.
@@ -810,6 +817,20 @@ Online5277 since 2026-10-27, levzzz5154 since 2026-10-28) and for Ludovic, with 
   `tools/ci/nightly_set.py`); each holds these owner powers. A line in any other form, a bare login included, grants nothing.
   `python3 tools/ci/resolve_reviewer_ids.py` fills in IDs for new lines; `--check` reports a listed ID whose login
   changed (a rename to look at) or whose account is gone.
+
+### Stale pull requests
+
+`.github/workflows/stale-prs.yml` (`tools/ci/stale_prs.py`, daily) closes pull requests left waiting on their author.
+An open, non-draft pull request to main gets the `stale` label and one comment naming the reason when it conflicts
+with main and saw no push, reopen, or person's comment, review or review-thread reply for 4 days, or when its head is
+still the commit a changes-requested review looked at 7 days later and that reviewer hasn't been asked to look again.
+Any push or person's comment takes the label off; unchanged 3 days after the notice, it is closed with a comment (its
+unfinished checks are cancelled, as `cancel-on-close.yml` would), and reopening it starts again. Drafts, the merge
+queue, other bases and the labels `keep-open`, `pinned`, `proposal`, `tracker` and `release-now` are never touched, nor
+is a pull request whose mergeable state GitHub hasn't worked out yet; each one is read again right before it is
+labelled or closed. At most 30 actions a run. A dry run by hand: `gh workflow run stale-prs.yml` (its `dry_run` box is
+ticked by default), or locally `python3 tools/ci/stale_prs.py`, which only reads. Before the first scheduled run,
+`python3 tools/ci/stale_prs.py create --apply` creates the labels.
 
 ### Trusted reviewers pick the Nightly's pull requests
 
@@ -949,5 +970,6 @@ Releases ship often, so nothing they leave behind may grow without bound.
   `ssh macmini 'cd ~/.actions-runners && for f in runner-gc.sh git-slim.sh; do curl -fsSL https://raw.githubusercontent.com/horizon-rust/horizon/main/tools/ci/$f -o $f; done'`.
 
 Guest-stack release note (arismoko/horizon#3232): game and server executables reserve 136 MiB
-for their main stack through MSVC `/STACK` or Apple `-stack_size` linker arguments;
-Linux raises RLIMIT_STACK and re-execs before initialization.
+(144 MiB on macOS) for their main stack through MSVC `/STACK` or Apple `-stack_size` linker arguments;
+Linux raises RLIMIT_STACK and re-execs before initialization. Rosetta 2 ignores `-stack_size`, so an
+Intel macOS program there runs its `main` on a stack its main thread allocates (`run_main`).
