@@ -15,7 +15,8 @@ mod wire;
 
 use horizon_server_launch::config::Config;
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -32,6 +33,14 @@ const SECRET_FILE: &str = "forwarding.secret";
 const OWN_SECRET: &str = ".horizon/proxy-forwarding.secret";
 /// How long a client may take over its handshake and login.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound a client write so holding or releasing this session cannot stall the rest of the proxy.
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How often held players are looked after.
+const TICK: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(1)
+};
 
 pub struct Inner {
     /// The game, on this machine.
@@ -41,12 +50,102 @@ pub struct Inner {
     pub compression: i32,
     keys: Option<auth::Keys>,
     status_enabled: bool,
-    /// Whether a game that answers is running: the server list asks it only then.
-    up: AtomicBool,
+    /// What the game is doing for the players: see [`Gate`].
+    gate: Mutex<GameGate>,
+    /// How long a held player waits for the game before it is sent away.
+    hold: Duration,
+    /// Every player through the proxy.
+    pub sessions: Mutex<Vec<Arc<session::Session>>>,
     log: Mutex<Box<dyn Fn(&str, &str) + Send>>,
+    /// The connections still before login: see [`Admission`].
+    admission: Admission,
+}
+
+/// Whether the game takes logins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gate {
+    /// Not yet, or not for now (it starts, restarts or crashed): players that come are held.
+    Holding,
+    Up,
+    /// A stop for good has begun: the game's kicks reach the players as they are.
+    Closing,
+}
+
+struct GameGate {
+    phase: Gate,
+    generation: u64,
+    pid: Option<u32>,
 }
 
 impl Inner {
+    fn gate(&self) -> std::sync::MutexGuard<'_, GameGate> {
+        self.gate.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn is_up(&self) -> bool {
+        self.gate().phase == Gate::Up
+    }
+
+    fn up_generation(&self) -> Option<u64> {
+        let gate = self.gate();
+        (gate.phase == Gate::Up).then_some(gate.generation)
+    }
+
+    pub fn closing(&self) -> bool {
+        self.gate().phase == Gate::Closing
+    }
+
+    /// A game that stops itself sends everyone its shutdown kick: unless the stop is for good, that is the
+    /// start of a hold, not something to pass on.
+    pub fn hold_on_shutdown(&self) -> bool {
+        !self.closing()
+    }
+
+    fn snapshot(&self) -> Vec<Arc<session::Session>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The game is going away (a restart, a crash): every player is held, and the ones that come.
+    fn stopping(&self, pid: Option<u32>) {
+        let generation = {
+            let mut gate = self.gate();
+            if gate.phase != Gate::Up || (pid.is_some() && pid != gate.pid) {
+                return;
+            }
+            gate.phase = Gate::Holding;
+            gate.generation
+        };
+        for s in self.snapshot() {
+            s.hold_game(generation);
+        }
+    }
+
+    fn game_up(&self) {
+        {
+            let mut gate = self.gate();
+            if gate.phase != Gate::Holding {
+                return;
+            }
+            gate.phase = Gate::Up;
+            gate.generation += 1;
+        }
+        for s in self.snapshot() {
+            s.resume();
+        }
+    }
+
+    /// The game stopped and will not be started again: the players are sent away.
+    fn release_all(&self) {
+        self.gate().phase = Gate::Holding;
+        let reason = wire::translated("horizon.proxy.stopped", "The server was stopped");
+        for s in self.snapshot() {
+            s.disconnect(&reason);
+        }
+    }
+
     pub fn note(&self, level: &str, line: &str) {
         (self.log.lock().unwrap_or_else(|e| e.into_inner()))(level, line);
     }
@@ -89,21 +188,70 @@ pub fn start(
         status_enabled: !config
             .effective_property(dir, "enable-status")
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("false")),
-        up: AtomicBool::new(false),
+        gate: Mutex::new(GameGate {
+            phase: Gate::Holding,
+            generation: 0,
+            pid: None,
+        }),
+        hold: Duration::from_secs(u64::from(config.proxy.hold_seconds)),
+        sessions: Mutex::new(Vec::new()),
         log: Mutex::new(Box::new(log)),
+        admission: Admission::new(config.server.max_players as usize),
     });
     let accepting = inner.clone();
     thread::Builder::new()
         .name("Proxy listener".into())
         .spawn(move || accept(listener, &accepting))
         .map_err(|e| e.to_string())?;
+    let ticking = inner.clone();
+    thread::Builder::new()
+        .name("Proxy keep-alive".into())
+        .spawn(move || {
+            loop {
+                thread::sleep(TICK);
+                let now = std::time::Instant::now();
+                for s in ticking.snapshot() {
+                    s.tick(now, ticking.hold);
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
     Ok(Proxy { inner })
 }
 
 impl Proxy {
-    /// The game answers (`true`) or is down or still starting (`false`).
-    pub fn set_game_up(&self, up: bool) {
-        self.inner.up.store(up, Ordering::SeqCst);
+    /// The process whose console can announce that this game is stopping.
+    pub fn game_starting(&self, pid: u32) {
+        self.inner.gate().pid = Some(pid);
+    }
+
+    /// The game answers: held players are logged into it again, and new ones go straight in.
+    pub fn game_up(&self) {
+        self.inner.game_up();
+    }
+
+    /// The game is about to stop, or has stopped by itself, and will be started again: hold everyone.
+    pub fn game_stopping(&self) {
+        self.inner.stopping(None);
+    }
+
+    pub fn game_stopping_if_current(&self, pid: u32) {
+        self.inner.stopping(Some(pid));
+    }
+
+    /// A stop for good has begun: what the game says to the players reaches them.
+    pub fn closing(&self) {
+        self.inner.gate().phase = Gate::Closing;
+    }
+
+    /// The game's process ended. `for_good`: nothing starts it again, so the players are sent away.
+    pub fn game_exited(&self, for_good: bool) {
+        self.inner.gate().pid = None;
+        if for_good {
+            self.inner.release_all();
+        } else {
+            self.inner.stopping(None);
+        }
     }
 }
 
@@ -195,28 +343,121 @@ pub fn remove_own_secret(dir: &Path) {
     }
 }
 
+/// Connections from one source (an IPv6 /64 counts as one) still before login at once, as the game's own
+/// per-address limit.
+const PER_SOURCE: usize = 10;
+/// Connections before login beyond the player limit, as the game's spare places for logins and pings.
+const SPARE_CONNECTIONS: usize = 64;
+
+/// Who counts as one source: an IPv4 address, or an IPv6 /64 (one subscriber holds a whole prefix).
+fn source(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & !(u64::MAX as u128))),
+        v4 => v4,
+    }
+}
+
+/// Whether many players may come from `ip`: a tunnel, a container's port forward or the local network
+/// hands them all over from one address.
+fn shared_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
+}
+
+/// Caps the connections that have not logged in yet, so silent ones can't take a thread each without end.
+/// Players that logged in are not counted: they are the game's players and its own limits apply.
+struct Admission {
+    open: Arc<std::sync::atomic::AtomicUsize>,
+    by_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    most: usize,
+}
+
+impl Admission {
+    fn new(max_players: usize) -> Self {
+        Self {
+            open: Arc::default(),
+            by_source: Arc::default(),
+            most: max_players.saturating_add(SPARE_CONNECTIONS),
+        }
+    }
+
+    /// A place for a connection from `ip`, or None when its source or the proxy has its most.
+    fn take(&self, ip: IpAddr) -> Option<Place> {
+        // Judge the address itself: grouping an IPv6 address into its /64 turns `::1` into `::`,
+        // which is no longer loopback.
+        let exempt = shared_address(ip.to_canonical());
+        let key = source(ip);
+        let mut by = self.by_source.lock().unwrap_or_else(|e| e.into_inner());
+        if !exempt && by.get(&key).copied().unwrap_or(0) >= PER_SOURCE {
+            return None;
+        }
+        let slot = crate::http::Slot::take(&self.open, self.most)?;
+        if !exempt {
+            *by.entry(key).or_default() += 1;
+        }
+        Some(Place {
+            _slot: slot,
+            by_source: self.by_source.clone(),
+            counted: (!exempt).then_some(key),
+        })
+    }
+}
+
+/// A connection's place before login, given back when dropped.
+struct Place {
+    _slot: crate::http::Slot,
+    by_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    counted: Option<IpAddr>,
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let Some(key) = self.counted else { return };
+        let mut by = self.by_source.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = by.get_mut(&key) {
+            *n -= 1;
+            if *n == 0 {
+                by.remove(&key);
+            }
+        }
+    }
+}
+
 fn accept(listener: TcpListener, inner: &Arc<Inner>) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        let Some(place) = stream
+            .peer_addr()
+            .ok()
+            .and_then(|a| inner.admission.take(a.ip()))
+        else {
+            // Closed before it costs a thread.
+            continue;
+        };
         let inner = inner.clone();
         let _ = thread::Builder::new()
             .name("Proxy client".into())
             .spawn(move || {
-                if let Err(e) = serve(stream, &inner) {
+                if let Err(e) = serve(stream, &inner, place) {
                     inner.note("DEBUG", &format!("A connection to the proxy ended: {e}"));
                 }
             });
     }
 }
 
-fn serve(stream: TcpStream, inner: &Arc<Inner>) -> Result<(), String> {
+fn serve(stream: TcpStream, inner: &Arc<Inner>, place: Place) -> Result<(), String> {
+    stream
+        .set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))
+        .map_err(|e| e.to_string())?;
     let peer = stream.peer_addr().map_err(|e| e.to_string())?;
     let mut c = Connection::from_stream(stream).map_err(|e| e.to_string())?;
     c.reader
         .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
         .map_err(|e| e.to_string())?;
     // The timeout above is per read: this one ends the whole handshake and login.
-    let deadline = Deadline::start(&c, HANDSHAKE_TIMEOUT)?;
+    let deadline = Deadline::start(&c, HANDSHAKE_TIMEOUT, place)?;
     let e = |e: wire::Error| e.to_string();
     let (id, payload) = c.recv().map_err(e)?;
     let hello =
@@ -248,10 +489,12 @@ fn serve(stream: TcpStream, inner: &Arc<Inner>) -> Result<(), String> {
 struct Deadline {
     done: Arc<AtomicBool>,
     watcher: thread::Thread,
+    /// Held until login is over: [`Admission`] counts only connections before it.
+    _place: Place,
 }
 
 impl Deadline {
-    fn start(c: &Connection, limit: Duration) -> Result<Deadline, String> {
+    fn start(c: &Connection, limit: Duration, place: Place) -> Result<Deadline, String> {
         let closer = c.reader.closer().map_err(|e| e.to_string())?;
         let done = Arc::new(AtomicBool::new(false));
         let flag = done.clone();
@@ -271,6 +514,7 @@ impl Deadline {
         Ok(Deadline {
             done,
             watcher: watcher.thread().clone(),
+            _place: place,
         })
     }
 }
@@ -327,8 +571,7 @@ fn serve_status(c: &mut Connection, inner: &Arc<Inner>, protocol: i32) -> Result
             status::Serverbound::StatusRequest(_) => {
                 answered = true;
                 let json = inner
-                    .up
-                    .load(Ordering::SeqCst)
+                    .is_up()
                     .then(|| backend::status_json(inner.game).ok())
                     .flatten()
                     .unwrap_or_else(|| restarting_status(protocol));
@@ -391,5 +634,33 @@ mod tests {
         remove_own_secret(&dir);
         assert!(!dir.join(SECRET_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_source_has_its_share_of_places_an_ipv6_prefix_counts_as_one_and_places_come_back() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let admission = Admission::new(100);
+        let mut held: Vec<Place> = (0..PER_SOURCE)
+            .map(|_| admission.take(ip("203.0.113.7")).unwrap())
+            .collect();
+        assert!(admission.take(ip("203.0.113.7")).is_none());
+        assert!(admission.take(ip("198.51.100.2")).is_some());
+        // Local addresses (a tunnel or a container hands everyone over from one) have no share.
+        let local: Vec<Place> = (0..PER_SOURCE + 5)
+            .map(|_| admission.take(ip("127.0.0.1")).unwrap())
+            .collect();
+        let v6: Vec<Place> = (0..PER_SOURCE)
+            .map(|i| admission.take(ip(&format!("2001:db8:1:2::{i:x}"))).unwrap())
+            .collect();
+        assert!(admission.take(ip("2001:db8:1:2:ffff::1")).is_none());
+        assert!(admission.take(ip("2001:db8:1:3::1")).is_some());
+        let loopback6: Vec<Place> = (0..PER_SOURCE + 5)
+            .map(|_| admission.take(ip("::1")).unwrap())
+            .collect();
+        held.pop();
+        assert!(admission.take(ip("203.0.113.7")).is_some());
+        drop((held, local, v6, loopback6));
+        assert_eq!(admission.open.load(Ordering::SeqCst), 0);
+        assert!(admission.by_source.lock().unwrap().is_empty());
     }
 }
