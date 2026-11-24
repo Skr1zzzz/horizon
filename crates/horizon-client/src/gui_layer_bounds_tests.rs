@@ -136,5 +136,9 @@ fn a_frame_without_a_hud_keeps_the_last_hud_passs_boxes() {
     assert_eq!(bounds.get("minecraft:hotbar"), hotbar, "no HUD drew");
     bounds.begin_hud();
     bounds.frame_start();
-    assert_eq!(bounds.get("minecraft:hotbar"), None, "a HUD that drew no hotbar");
+    assert_eq!(
+        bounds.get("minecraft:hotbar"),
+        None,
+        "a HUD that drew no hotbar"
+    );
 }
