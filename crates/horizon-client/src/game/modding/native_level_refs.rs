@@ -12,8 +12,9 @@ use horizon_items::items::ItemStack;
 use horizon_world::registry::BlockStateId;
 use mod_api::world::mod_chunk_tickets::ModTicket;
 use mod_api::{
-    BlockHit, BlockTransformPreview, ChunkRef, ChunkStatus, ClipBlock, ClipFluid, DimensionKey,
-    Hand, LevelRef, LightLayer, MapState, PlayerRef, RespawnData, TicketController, Vec3,
+    BlockHit, BlockTransformPreview, ChunkDeltaCursor, ChunkDeltas, ChunkRef, ChunkStatus, ClipBlock,
+    ClipFluid, DimensionKey, Hand, LevelRef, LightLayer, MapState, PlayerRef, RespawnData,
+    TicketController, Vec3,
 };
 
 fn block_pos([x, y, z]: [i32; 3]) -> BlockPos {
@@ -395,6 +396,38 @@ impl Game<'_> {
                 .map(|(x, z)| mod_api::__private::game::chunk_ref(level, [x, z]))
                 .collect(),
         )
+    }
+    /// Read the current client level's residency and content journal without loading any chunk.
+    pub(super) fn level_chunk_deltas(
+        &self,
+        level: LevelRef,
+        since: Option<ChunkDeltaCursor>,
+    ) -> Option<ChunkDeltas> {
+        if self.native_client_level()? != level {
+            return None;
+        }
+        let chunks = &self.world.chunks;
+        let now = chunks.touch_cursor();
+        let cursor = ChunkDeltaCursor::new(level, now);
+        let touched = since
+            .and_then(|since| since.for_level(level))
+            .filter(|&(_, seq)| seq <= now.1)
+            .and_then(|since| chunks.touched_since(since));
+        let loaded = |&(x, z)| mod_api::__private::built::chunk_delta([x, z], true);
+        let full = touched.is_none();
+        let mut changes: Vec<_> = match touched {
+            Some(keys) => keys.map(loaded).collect(),
+            None => chunks.keys().map(loaded).collect(),
+        };
+        changes.sort_unstable_by_key(|delta| delta.pos);
+        if !full {
+            changes.dedup_by_key(|delta| delta.pos);
+            for delta in &mut changes {
+                let [x, z] = delta.pos;
+                delta.loaded = chunks.contains_key(&(x, z));
+            }
+        }
+        Some(mod_api::__private::built::chunk_deltas(cursor, full, changes))
     }
     /// Whether this chunk is loaded; false on a client or for a stale handle.
     pub(super) fn chunk_loaded(&self, chunk: ChunkRef) -> bool {
@@ -961,6 +994,38 @@ impl Game<'_> {
             .and_then(|map| map.paint(colors))
             .unwrap_or(false)
     }
+    /// `MapItemSavedData.setLocked` for a mod's call (`set_locked`). False on a client, for a
+    /// stale handle and a map nothing made; true otherwise, the flag set as given.
+    pub(super) fn level_set_map_locked(&mut self, level: LevelRef, id: i32, locked: bool) -> bool {
+        if !self.native_world_data_allowed(level) {
+            return false;
+        }
+        match self.map(id) {
+            Some(map) => {
+                map.set_locked(locked);
+                true
+            }
+            None => false,
+        }
+    }
+    /// `MapItem.create` for a mod's call: a new map in `level`'s dimension, centred on `center`
+    /// as given, at `scale` with `colors`. None on a client, for a stale handle, a scale over 4
+    /// and a colour list that is not 128 by 128.
+    pub(super) fn level_new_map(
+        &mut self,
+        level: LevelRef,
+        center: [i32; 2],
+        scale: u8,
+        colors: &[u8],
+    ) -> Option<i32> {
+        if !self.native_world_data_allowed(level) || scale > 4 || colors.len() != 128 * 128 {
+            return None;
+        }
+        let mut data = crate::game::maps::MapData::fresh(0.0, 0.0, scale, level.dimension_id());
+        data.center = center;
+        data.colors.copy_from_slice(colors);
+        Some(self.new_map_id(data))
+    }
     /// Queue the level to be saved at the start of the next server tick. False for a stale
     /// handle and on a client.
     pub(super) fn level_request_save(&mut self, level: LevelRef) -> bool {
@@ -1431,6 +1496,27 @@ mod tests {
             assert_eq!(stale.map_data(game, id), None);
             assert!(!stale.set_map_data(game, id, &colors));
             assert_eq!(level.map_data(game, i32::MAX), None, "a map nothing made");
+
+            // The locked flag changes alone: the pixels stay; refusals change nothing.
+            assert!(level.set_map_locked(game, id, true));
+            assert!(level.set_map_locked(game, id, true), "already locked is still true");
+            let locked = level.map_data(game, id).unwrap();
+            assert_eq!((locked.locked, locked.colors[5 + 2 * 128]), (true, 34));
+            assert!(!stale.set_map_locked(game, id, false));
+            assert!(!level.set_map_locked(game, i32::MAX, false), "a map nothing made");
+            assert!(level.map_data(game, id).unwrap().locked);
+            // A new map keeps the centre, scale and colours it is given, in the level's dimension.
+            let mut painted = vec![0u8; 128 * 128];
+            painted[7 + 3 * 128] = 52;
+            let made = level.new_map(game, [64, -64], 2, &painted).unwrap();
+            assert_ne!(made, id);
+            let new = level.map_data(game, made).unwrap();
+            assert_eq!(new.center, [64, -64]);
+            assert_eq!((new.scale, new.dimension.as_str()), (2, "minecraft:overworld"));
+            assert_eq!((new.colors[7 + 3 * 128], new.locked), (52, false));
+            assert_eq!(level.new_map(game, [0, 0], 5, &painted), None, "scale over 4");
+            assert_eq!(level.new_map(game, [0, 0], 0, &painted[..10]), None);
+            assert_eq!(stale.new_map(game, [0, 0], 0, &painted), None);
 
             // Ticks run only in the level in place, at a loaded position inside its height.
             let height = level.height(game).unwrap();

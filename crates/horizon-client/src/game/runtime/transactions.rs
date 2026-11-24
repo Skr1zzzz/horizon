@@ -278,7 +278,7 @@ pub(super) enum After {
     Drop([i32; 3], ItemStack),
     /// `Player.drop(stack, false)` by the player with this UUID: what no longer fits.
     PlayerDrop(u128, ItemStack),
-    GivePickup(u128),
+    GivePickup(u128, ItemStack),
     InventoryTrigger(u128),
     GiveRest(u128, ItemStack, Option<[i32; 4]>),
     PlayerEquip(u128, String, Option<ItemStack>),
@@ -996,8 +996,8 @@ impl Game<'_> {
             After::Drop(pos, stack) => {
                 self.spawn_item(stack, pos.map(|p| f64::from(p) + 0.5), [0.0; 3], 10);
             }
-            After::GivePickup(uuid) => {
-                self.native_as_player(uuid, |g| g.give_pickup());
+            After::GivePickup(uuid, stack) => {
+                self.native_as_player(uuid, |g| g.give_pickup(stack));
             }
             After::InventoryTrigger(uuid) => {
                 self.native_as_player(uuid, |g| {
@@ -1190,14 +1190,14 @@ impl Game<'_> {
         }
         let bottom_quart = self.world.bottom_y() >> 2;
         for ((qx, qy, qz), biome) in level.biomes {
-            if let Some(chunk) = self.world.chunks.get_mut(&(qx >> 2, qz >> 2)) {
+            self.world.chunks.mutate_chunk((qx >> 2, qz >> 2), |chunk| {
                 std::sync::Arc::make_mut(chunk).set_biome_cell(
                     qx & 3,
                     qy - bottom_quart,
                     qz & 3,
                     biome,
                 );
-            }
+            });
         }
         for (pos, state) in level.blocks {
             self.world.set_stored(pos.0, pos.1, pos.2, state);

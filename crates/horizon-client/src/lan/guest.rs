@@ -232,6 +232,10 @@ pub struct Guest {
     /// the player away and they are still at the chunk it left. The hold ends (back to `None`) at
     /// an accepted move or teleport ack, a passenger or vehicle move, a camera change, a placement.
     pub held_ticket_chunk: Option<(i32, i32)>,
+    /// A mod's view centre for this player (`PlayerRef::set_view_center`): the chunk their chunk
+    /// tracking follows in place of their own, in their own level, without moving them. `None`:
+    /// their own chunk, as in vanilla. Ends at a respawn, a level change and when they leave.
+    pub view_center: Option<(i32, i32)>,
     pub previous_position: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
@@ -322,6 +326,12 @@ pub struct Guest {
     /// A position move arrived since the client's last ClientTickEnd
     /// (receivedPositionThisTick): a second one is a protocol error.
     pub position_this_tick: bool,
+    /// A move reached the player since its last ClientTickEnd
+    /// (`receivedMovementThisTick`): its own position packet, or the one its
+    /// vehicle drove (`handleMoveVehicle` → `handlePlayerKnownMovement`, which
+    /// a rider's `known_movement` comes from: a rider sends no position of its
+    /// own). Without one, `handleClientTickEnd` zeroes `known_movement`.
+    pub movement_this_tick: bool,
     /// Violation levels and the checks' state (the anticheat, when on).
     pub anticheat: horizon_anticheat::Player,
     /// The client ticks the movement prediction plays again (only while it records).
@@ -718,6 +728,17 @@ impl Guest {
                 .is_some_and(|(cx, cz)| super::hub::tracked(cx, cz, self.view_distance, x, z))
     }
 
+    /// Whether this guest is currently tracking entity `id` in `dimension` (in its own level or
+    /// through a viewed level).
+    pub fn tracks_entity(&self, dimension: &str, id: i32) -> bool {
+        (self.dimension == dimension && self.tracker.is_tracking(id))
+            || self
+                .viewed
+                .views
+                .get(dimension)
+                .is_some_and(|view| view.tracker.is_tracking(id))
+    }
+
     fn with_defaults(
         kind: GuestKind,
         j: GuestInit,
@@ -762,6 +783,7 @@ impl Guest {
             recipe_sync: Default::default(),
             position,
             held_ticket_chunk: None,
+            view_center: None,
             previous_position: position,
             yaw: 0.0,
             pitch: 0.0,
@@ -806,6 +828,7 @@ impl Guest {
             rests_on_ground: false,
             support_blocks_sent: 0,
             position_this_tick: false,
+            movement_this_tick: false,
             anticheat: Default::default(),
             record: None,
             client_sprinting: false,
@@ -1097,6 +1120,11 @@ impl Guest {
             (self.position[0].floor() as i32) >> 4,
             (self.position[2].floor() as i32) >> 4,
         )
+    }
+    /// The chunk this player's chunk tracking is centred on (`ChunkMap.move`'s section): a mod's
+    /// view centre, else their own chunk.
+    pub fn view_chunk(&self) -> (i32, i32) {
+        self.view_center.unwrap_or_else(|| self.chunk())
     }
     pub fn creative(&self) -> bool {
         self.game_mode == CREATIVE
