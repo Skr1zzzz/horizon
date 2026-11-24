@@ -331,6 +331,11 @@ impl Game<'_> {
                 }
             }
             TimelineAction::Seek(time_ms) => {
+                // The timeline can still act once the replay is gone (a drag let go after a
+                // failed read or a recorded leave closed it).
+                if !self.replay.playing() {
+                    return;
+                }
                 let time_ms = if self.replay.standalone {
                     time_ms
                 } else {
@@ -422,6 +427,8 @@ impl Game<'_> {
 
     /// Add a bookmark at the replay playhead and save it in the `.mcpr` archive.
     pub(super) fn add_studio_marker(&mut self) {
+        let archive = &mut self.replay.archive;
+        let identity = &mut self.replay.identity;
         let Some(replay) = self
             .replay
             .driver
@@ -430,12 +437,18 @@ impl Game<'_> {
         else {
             return;
         };
+        if let Err(error) = archive_unchanged(*archive, replay) {
+            log::warn!("Studio: could not save replay marker: {error}");
+            return;
+        }
         let label = Text::translate(
             "horizon.studio.timeline.marker",
             &[Text::literal((replay.markers().len() + 1).to_string())],
         )
         .plain();
-        match replay.add_marker(label) {
+        let added = replay.add_marker(label);
+        note_written(archive, identity, replay);
+        match added {
             Ok(_) => self.studio.timeline.markers = replay.markers().to_vec(),
             Err(error) => log::warn!("Studio: could not save replay marker: {error}"),
         }
@@ -466,6 +479,8 @@ impl Game<'_> {
 
     /// Saves the free camera's path into the replay playing, when it changed.
     pub(super) fn save_studio_camera_track(&mut self) -> std::io::Result<()> {
+        let archive = &mut self.replay.archive;
+        let identity = &mut self.replay.identity;
         if self.studio.camera_track_dirty
             && let Some(driver) = self
                 .replay
@@ -479,7 +494,10 @@ impl Game<'_> {
             } else {
                 Some(serde_json::to_vec_pretty(track).map_err(std::io::Error::other)?)
             };
-            driver.save_camera_path(json)?;
+            archive_unchanged(*archive, driver)?;
+            let saved = driver.save_camera_path(json);
+            note_written(archive, identity, driver);
+            saved?;
             self.studio.camera_track_dirty = false;
         }
         Ok(())
@@ -539,8 +557,55 @@ impl Game<'_> {
     pub(super) fn studio_replay_closing(&mut self) {
         if let Err(error) = self.save_studio_camera_track() {
             log::warn!("Studio: could not save camera path: {error}");
+            self.save_studio_camera_draft();
         }
         self.studio.camera_track_dirty = false;
+    }
+
+    /// The camera path a failed save on close would lose, written as the archive's
+    /// `camera.json` would hold it to a new `<recording>.camera-draft*.json` beside the
+    /// recording, else in the game folder's `recordings/`; the player is told where.
+    fn save_studio_camera_draft(&mut self) {
+        let Some(recording) = self
+            .replay
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.as_any().downcast_ref::<ReplayDriver>())
+            .map(|driver| driver.path().to_path_buf())
+        else {
+            return;
+        };
+        let stem = recording
+            .file_stem()
+            .map_or("replay".into(), |stem| stem.to_string_lossy());
+        let beside = recording
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let written = serde_json::to_vec_pretty(&self.studio.freecam.track)
+            .map_err(std::io::Error::other)
+            .and_then(|json| {
+                write_camera_draft(beside, &stem, &json).or_else(|_| {
+                    let fallback = horizon_client::studio::recorder::default_recordings_dir();
+                    std::fs::create_dir_all(&fallback)?;
+                    write_camera_draft(&fallback, &stem, &json)
+                })
+            });
+        match written {
+            Ok(path) => {
+                let path = path.display().to_string();
+                log::warn!("Studio: the unsaved camera path was kept in {path}");
+                self.system_message(Text::tr("horizon.studio.replay.camera_draft", &[&path]));
+            }
+            Err(error) => {
+                let error = error.to_string();
+                log::error!("Studio: the unsaved camera path is lost: {error}");
+                self.system_message(Text::tr(
+                    "horizon.studio.replay.camera_draft.error",
+                    &[&error],
+                ));
+            }
+        }
     }
 
     /// The replay closed: the timeline empties and the free camera lands.
@@ -757,5 +822,99 @@ impl Game<'_> {
             }
             _ => {}
         }
+    }
+}
+
+/// The longest suffix `write_camera_draft` appends (`.camera-draft-99.json`, 21 bytes); keeping
+/// the stem within 234 bytes keeps every candidate within the 255-byte filename limit.
+const MAX_CAMERA_DRAFT_STEM_BYTES: usize = 255 - ".camera-draft-99.json".len();
+
+/// `json` in a new file in `dir`, never over an earlier draft.
+fn write_camera_draft(dir: &std::path::Path, stem: &str, json: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let mut end = MAX_CAMERA_DRAFT_STEM_BYTES.min(stem.len());
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let stem = if end == 0 { "replay" } else { &stem[..end] };
+    for n in 1..100 {
+        let name = if n == 1 {
+            format!("{stem}.camera-draft.json")
+        } else {
+            format!("{stem}.camera-draft-{n}.json")
+        };
+        let path = dir.join(name);
+        match std::fs::File::create_new(&path) {
+            Ok(mut file) => {
+                file.write_all(json)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other("too many camera path drafts"))
+}
+
+/// A replay a mod opened (`replay_open`) saves into the archive it was opened from only: the file
+/// at its path now must be that same file, not one put in its place since. Other replays (the
+/// replays list, `/studio replay open`) save to their path as before.
+fn archive_unchanged(
+    archive: Option<super::native_replay::FileIdentity>,
+    driver: &ReplayDriver,
+) -> std::io::Result<()> {
+    let Some(archive) = archive else {
+        return Ok(());
+    };
+    let now = std::fs::File::open(driver.path())
+        .and_then(|file| super::native_replay::FileIdentity::of(&file))?;
+    if now != archive {
+        return Err(std::io::Error::other(
+            "the recording was replaced since the replay opened it",
+        ));
+    }
+    Ok(())
+}
+
+/// After an editor save, the archive it wrote (from the handle the writer returns) is the one the
+/// replay reads (`identity`) and a mod's replay saves into next (`archive`).
+fn note_written(
+    archive: &mut Option<super::native_replay::FileIdentity>,
+    identity: &mut Option<super::native_replay::FileIdentity>,
+    driver: &mut ReplayDriver,
+) {
+    let Some(written) = driver.take_written() else {
+        return;
+    };
+    let written = super::native_replay::FileIdentity::of(&written).ok();
+    // Unknown, it matches nothing: a reopen recorded before this save counts as stale.
+    *identity = written;
+    // An identity that can't be read keeps the old one: the next save is refused, not unguarded.
+    if archive.is_some()
+        && let Some(written) = written
+    {
+        *archive = Some(written);
+    }
+}
+
+#[cfg(test)]
+mod camera_draft_tests {
+    use super::write_camera_draft;
+
+    #[test]
+    fn long_stems_stay_within_255_bytes_and_number_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_ascii = "a".repeat(250);
+        let first = write_camera_draft(dir.path(), &long_ascii, b"{\"v\":1}").unwrap();
+        let second = write_camera_draft(dir.path(), &long_ascii, b"{\"v\":2}").unwrap();
+        assert!(first.file_name().unwrap().len() <= 255);
+        assert!(second.file_name().unwrap().len() <= 255);
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"{\"v\":1}");
+        assert_eq!(std::fs::read(&second).unwrap(), b"{\"v\":2}");
+
+        let long_utf8 = "é".repeat(125); // 250 bytes, 2-byte chars
+        let utf8 = write_camera_draft(dir.path(), &long_utf8, b"{}").unwrap();
+        assert!(utf8.file_name().unwrap().len() <= 255);
     }
 }
