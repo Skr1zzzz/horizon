@@ -17,8 +17,7 @@ pub trait Hooks {
     /// GPU: a hidden part takes its children with it and leaves the layers drawn on the model itself
     /// (`getParentModel()`: a villager's type, profession and level, a spider's eyes), while its
     /// armour, held items and other layers keep every part. An entity is drawn afresh each frame:
-    /// `draw.keep()` does nothing here. `render_living_equipment`, asked right after, hides or
-    /// tints its armour, elytra and held items.
+    /// `draw.keep()` does nothing here.
     #[hook(
         side = "client",
         version = 2,
