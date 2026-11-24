@@ -8357,11 +8357,14 @@ impl Renderer {
         // A lost device cannot accept uploads either. Leave recovery to the
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {
+            // The staged particle quads were this frame's: a later frame must not draw them.
+            self.particle_quads.clear();
             return Err("the graphics device was lost".into());
         }
         if !frame_export::Readbacks::draw_allowed(self.frame_export.as_ref()) {
             // A settling redraw only drains terrain transfers. Running the world
             // passes here would spend a TAA phase and mutate shader-pack history.
+            self.particle_quads.clear();
             self.flush_frame_export_uploads();
             return Ok(false);
         }

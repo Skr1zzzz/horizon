@@ -256,12 +256,13 @@ impl ParticleExpand {
         let head = (HEAD_WORDS * 4) as u64;
         let bytes = records_bytes(quads.len());
         if self.records.as_ref().is_none_or(|b| b.size() < bytes) {
-            self.records = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Particle quads"),
-                size: bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            // Out of memory, the frame's particles go undrawn instead of losing the device.
+            self.records = super::arena::try_create(
+                device,
+                "Particle quads",
+                bytes,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
         }
         let Some(records) = &self.records else {
             return;
