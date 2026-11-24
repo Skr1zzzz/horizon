@@ -1978,8 +1978,11 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
             + self.random.next_double() * 0.2
     }
     fn villager_type(&mut self, m: &mut Mob) {
-        let at = block(m);
-        m.extra.variant = self.level.mob_maps().villager_type(&self.level.biome(at));
+        if !super::villager::ext(m).is_some_and(|e| e.data_finalized) {
+            let at = block(m);
+            m.extra.variant = self.level.mob_maps().villager_type(&self.level.biome(at));
+            super::villager::ext_mut(m).data_finalized = true;
+        }
     }
     /// `VariantUtils.selectVariantToSpawn` into `variant`, by registry name.
     fn variant(&mut self, m: &mut Mob, registry: fn(&SpawnRegistries) -> &VariantRegistry) {
@@ -2452,6 +2455,20 @@ pub fn variant_index(s: Species, name: &str) -> u8 {
     let i = match s {
         Species::Cat => super::tame::CAT_VARIANTS.iter().position(|v| *v == name),
         Species::Wolf => super::tame::WOLF_VARIANTS.iter().position(|v| v.0 == name),
+        // Rabbit.Variant and Parrot.Variant, in their registry order.
+        Species::Rabbit => match name {
+            "brown" => Some(0),
+            "white" => Some(1),
+            "black" => Some(2),
+            "white_splotched" => Some(3),
+            "gold" => Some(4),
+            "salt" => Some(5),
+            "evil" => Some(99),
+            _ => None,
+        },
+        Species::Parrot => ["red", "blue", "green", "cyan", "yellow"]
+            .iter()
+            .position(|v| *v == name),
         Species::ZombieNautilus => super::nautilus::VARIANTS.iter().position(|v| *v == name),
         // MushroomCow.Variant: red is the codec's default, brown the other.
         Species::Mooshroom => ["red", "brown"].iter().position(|v| *v == name),

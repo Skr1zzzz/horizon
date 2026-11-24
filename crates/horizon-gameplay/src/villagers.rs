@@ -232,10 +232,7 @@ pub fn villager_birth<L: VillagerLevel + ?Sized>(
         return;
     };
     if let Some(child) = l.parts().mobs.iter_mut().find(|m| m.id == id) {
-        child.extra.variant = variant;
-        child.extra.profession = Default::default();
-        child.extra.age = -24000;
-        child.extra.bed = Some(bed);
+        init_bred_child(child, variant, bed);
     }
     // VillagerMakeLove.giveBirth: entity event 12 for the child.
     l.mob_event_particles(id, 12);
@@ -347,12 +344,14 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
     // first: a server's villagers and dropped items each run into the
     // hundreds or thousands.
     let mut near_items = ItemAreas::default();
-    for mut i in 0..l.mobs().len() {
+    // A cursor, not a range: a pickup's reward function (below) may remove
+    // mobs, and the walk goes on after its villager wherever it now is.
+    let mut next = 0;
+    while next < l.mobs().len() {
+        let mut i = next;
+        next += 1;
         let p = l.parts();
-        // A pickup's reward function (below) may have removed mobs.
-        let Some(m) = p.mobs.get(i) else {
-            break;
-        };
+        let m = &p.mobs[i];
         if m.species() != Species::Villager
             || !m.can_pick_up_loot()
             || !m.alive()
@@ -397,6 +396,7 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
                 continue;
             }
             let before = l.dropped()[j].clone();
+            let (count, next_entity) = (l.dropped().len(), l.parts().next_entity);
             // `InventoryCarrier.pickUpItem`'s `onItemPickup` comes before the
             // stack goes in: the advancement of whoever threw it. Its reward
             // function may move or remove mobs and items, so the villager and
@@ -405,15 +405,22 @@ pub fn villager_pickups<L: VillagerLevel + ?Sized>(l: &mut L) {
             l.on_item_pickup(i, &before);
             if l.mobs().get(i).is_none_or(|m| m.id != id) {
                 let Some(at) = l.villager_index(id) else {
+                    // Gone: the mob after it may have moved into its place.
+                    next = i;
                     break;
                 };
                 i = at;
+                next = at + 1;
             }
             let rest = villager::ext_mut(&mut l.parts().mobs[i]).add_item(stack, max);
-            if l.dropped().get(j).is_none_or(|e| e.id != before.id) {
-                // The list changed under the walk: its cells are built again,
-                // and it goes on from the item, or from the start when the
-                // item is gone (`take` and `discard` pass over a removed one).
+            if l.dropped().get(j).is_none_or(|e| e.id != before.id)
+                || l.dropped().len() != count
+                || l.parts().next_entity != next_entity
+            {
+                // The list changed under the walk (an item removed, added or
+                // replaced): its cells are built again, and it goes on from
+                // the item, or from the start when the item is gone (`take`
+                // and `discard` pass over a removed one).
                 let next_entity = l.parts().next_entity;
                 scan = near_items.scan(l.dropped(), next_entity, reach);
                 let Some(k) = l.dropped().iter().position(|e| e.id == before.id) else {
@@ -553,6 +560,16 @@ pub fn kick_villager_out_of_bed<L: VillagerLevel + ?Sized>(l: &mut L, head: [i32
     true
 }
 
+/// `Villager.getBreedOffspring`: sets the child's type, clears its profession,
+/// marks its data finalized, and sets baby age and claimed bed.
+fn init_bred_child(child: &mut Mob, variant: u8, bed: [i32; 3]) {
+    child.extra.variant = variant;
+    child.extra.profession = Default::default();
+    child.extra.age = -24000;
+    child.extra.bed = Some(bed);
+    villager::ext_mut(child).data_finalized = true;
+}
+
 #[cfg(test)]
 mod pickup_tests;
 
@@ -560,6 +577,8 @@ mod pickup_tests;
 mod tests {
     use super::*;
     use crate::item_areas::tests::item_at;
+    use horizon_client::mobs::{Anim, Brain, MobType, Part};
+    use std::sync::Arc;
 
     /// `Mob.aiStep`'s looting meets each item's own box, 0.25 wide and tall,
     /// not its point. Beside a villager (0.6 by 1.95, its box made as
@@ -592,5 +611,65 @@ mod tests {
                 "item at {x} {y} {z}"
             );
         }
+    }
+
+    #[test]
+    fn bred_villager_child_is_finalized() {
+        let kind = MobType {
+            shadow: None,
+            id: "minecraft:villager".into(),
+            species: Species::Villager,
+            width: 0.6,
+            height: 1.95,
+            eye_height: 1.62,
+            category: "misc".into(),
+            max_health: 20.0,
+            speed: 0.5,
+            flying_speed: 0.4,
+            attack_damage: 0.0,
+            attack_knockback: 0.0,
+            follow_range: 48.0,
+            step_height: 0.6,
+            armor: 0.0,
+            armor_toughness: 0.0,
+            knockback_resistance: 0.0,
+            jump_strength: 0.42,
+            attributes: Arc::default(),
+            item_stack_limits: Arc::default(),
+            attribute_bounds: Default::default(),
+            gravity: 0.08,
+            safe_fall_distance: 3.0,
+            fall_damage_multiplier: 1.0,
+            water_efficiency: 0.0,
+            water_slowdown: 0.8,
+            air_speed: 0.02,
+            baby_scale: 0.5,
+            head_rot_speed: 10.0,
+            max_head_x_rot: 40.0,
+            max_head_y_rot: 75.0,
+            ambient_interval: 80,
+            flags: Default::default(),
+            model: Arc::new(Part {
+                name: "root".into(),
+                pose: [0.0; 9],
+                polygons: Vec::new(),
+                children: Vec::new(),
+            }),
+            layers: Default::default(),
+            texture: String::new(),
+            brain: Brain::Passive,
+            anim: Anim::Humanoid { zombie_arms: false },
+            sounds: ["entity.villager.ambient"; 3],
+            sound_overrides: Default::default(),
+            food: Arc::default(),
+            tempt: Arc::default(),
+            passenger_attachments: Vec::new(),
+        };
+        let mut child = Mob::new(1, Arc::new(kind), Vec3::ZERO, 0.0);
+        init_bred_child(&mut child, 2, [4, 64, 8]);
+        assert_eq!(child.extra.variant, 2);
+        assert_eq!(child.extra.age, -24000);
+        assert_eq!(child.extra.bed, Some([4, 64, 8]));
+        assert!(villager::ext(&child).is_some_and(|e| e.data_finalized));
     }
 }
