@@ -24,21 +24,8 @@ fn check_turn() -> Result<crate::native_cache::Locked, Failed> {
         .map_err(|error| cache_error(error).into())
 }
 
-/// Classification for the checks, which never stop. A build classifies with
-/// [`classify_until`], under its lease; the SDK's index, surface and build data it reads and
-/// keeps need no build lease.
+/// Each mod's route. The SDK's index and surface it reads and keeps need no build lease.
 pub(super) fn classify(folder: &Path, base: Option<&str>) -> Result<Routes, Failed> {
-    classify_until(folder, base, &|| Ok(()))
-}
-
-/// [`classify`] for a build: `stop` (its [`check_cancelled`]) is asked while the build data
-/// downloads and while it waits for another fetch unpacking it, and a stop ends the
-/// classification as [`CANCELLED`] rather than as a mod's route.
-pub(super) fn classify_until(
-    folder: &Path,
-    base: Option<&str>,
-    stop: &dyn Fn() -> Result<(), String>,
-) -> Result<Routes, Failed> {
     let found = scan_bundles(folder)?;
     let mut result = Routes::default();
     let mut projects = Vec::new();
@@ -93,7 +80,7 @@ pub(super) fn classify_until(
             *slot = route;
         }
     };
-    match judge_all(&projects, &sdk, &sdk_base, stop) {
+    match judge_all(&projects, &sdk, &sdk_base) {
         Err(sdk_cache::Refusal::Cancelled) => return Err(Failed::Other(CANCELLED.into())),
         Ok(verdicts) => {
             for (id, verdict) in verdicts {
@@ -102,11 +89,7 @@ pub(super) fn classify_until(
                     fit::Verdict::Fits { .. } => Route::Fits {
                         line: fit::line(&id, &verdict, &shown),
                     },
-                    _ => Route::Unfit {
-                        headline: fit::headline(&id, &verdict),
-                        line: fit::line(&id, &verdict, &shown),
-                        actions: fit::actions(&id),
-                    },
+                    _ => fit::unfit_route(&id, &verdict, &shown),
                 };
                 said(id.as_str(), route);
             }
@@ -170,17 +153,14 @@ pub fn update_check(home: &Path, to: &str) -> Result<UpdateCheck, Failed> {
     let sdk_base = sdk_cache::Base::from_env();
     let keys = horizon_release_sign::sdk_keys_for(backend::REPO);
     let sdk = sdk_cache::index(&sdk_base, &revision, &keys).map_err(|r| r.to_string())?;
-    let verdicts = judge_all(&projects, &sdk, &sdk_base, &|| Ok(())).map_err(|r| r.to_string())?;
+    let verdicts = judge_all(&projects, &sdk, &sdk_base).map_err(|r| r.to_string())?;
     let shown = sdk.shown();
     let unfit: Vec<LeftOut> = verdicts
         .iter()
         .filter(|(_, verdict)| !verdict.usable())
         .filter_map(|(id, verdict)| {
             let bundle = found.iter().find(|b| &b.manifest.id == id)?;
-            Some(LeftOut::new(
-                bundle,
-                isolate::Why::Unfit(fit::short(verdict)),
-            ))
+            Some(LeftOut::new(bundle, fit::update_why(verdict)))
         })
         .collect();
     let declared: Vec<Vec<dependencies::Dependency>> = found
@@ -198,20 +178,6 @@ pub fn update_check(home: &Path, to: &str) -> Result<UpdateCheck, Failed> {
         .map(|(b, d)| (b, d.as_slice()))
         .collect();
     let left = isolate::with_dependents(&unfit, &pairs);
-    let off: Vec<(String, String)> = left
-        .iter()
-        .map(|l| {
-            let why = match &l.why {
-                isolate::Why::Unfit(why) => why.clone(),
-                isolate::Why::Needs(library) => trf(
-                    "it needs {library}, which doesn't fit",
-                    &[("library", library)],
-                ),
-                _ => String::new(),
-            };
-            (l.id.clone(), why)
-        })
-        .collect();
     let ids: Vec<String> = left.iter().map(|l| l.id.clone()).collect();
     let all = crate::worlds::list(home);
     let worlds = crate::worlds::saved_with(&all, &ids)
@@ -220,7 +186,7 @@ pub fn update_check(home: &Path, to: &str) -> Result<UpdateCheck, Failed> {
         .collect();
     Ok(UpdateCheck {
         to: to.to_owned(),
-        summary: fit::update_summary(&shown, found.len(), &off),
+        summary: fit::update_summary(&shown, found.len(), &left),
         worlds,
     })
 }

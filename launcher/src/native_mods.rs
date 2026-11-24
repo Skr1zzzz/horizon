@@ -18,9 +18,7 @@ use horizon_platform::mod_package::mod_surface;
 
 mod api;
 mod api_route;
-mod inject;
 mod planning;
-mod slots;
 pub use planning::{routes, update_check, UpdateCheck};
 mod crates;
 mod diagnostics;
@@ -492,6 +490,10 @@ pub fn cache_error(error: crate::storage::Error) -> String {
             "This version supplies resources to native build {build}. Remove that build first.",
             &[("build", &build)],
         ),
+        crate::native_cache::Error::InstanceVersion(instance) => trf(
+            "In use by {names}. Pick another version for it first.",
+            &[("names", &instance)],
+        ),
         crate::native_cache::Error::UnsupportedFilesystem(folder) => {
             crate::refusals::unsupported_filesystem(folder.as_deref(), &backend::data_dir())
         }
@@ -551,7 +553,8 @@ fn installed_files(home: &Path) -> Vec<PathBuf> {
 }
 
 /// [`installed_mods`] into `out`, which it empties first. A `.hmod` in the format from before the
-/// SDK is left out, untouched: no build can take it, and it must not stop the others.
+/// SDK is left out, untouched: no build can take it, and it must not stop the others. So is one
+/// turned off that declares the removed `[[inject]]`; one turned on stops the build, by name.
 pub(crate) fn stage_installed(home: &Path, out: PathBuf) -> Result<Option<PathBuf>, String> {
     let _ = fs::remove_dir_all(&out);
     let mut count = 0;
@@ -559,7 +562,16 @@ pub(crate) fn stage_installed(home: &Path, out: PathBuf) -> Result<Option<PathBu
         let bundle = match horizon_platform::mod_package::index::native::Bundle::read(&path) {
             Ok(bundle) => bundle,
             Err(_) if crate::native_status::legacy_format(&path) => continue,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+            Err(e) => match crate::native_status::retired_inject(&path) {
+                Some(id) if !crate::browser::java::is_enabled(home, &id) => continue,
+                Some(id) => {
+                    return Err(crate::i18n::trf(
+                        "{id} ({file}) uses [[inject]], which was removed: turn it off, or install a version that listens through a typed hook.",
+                        &[("id", &id), ("file", &path.display().to_string())],
+                    ));
+                }
+                None => return Err(format!("{}: {e}", path.display())),
+            },
         };
         if !crate::browser::java::is_enabled(home, &bundle.manifest.id) {
             continue;
@@ -569,15 +581,6 @@ pub(crate) fn stage_installed(home: &Path, out: PathBuf) -> Result<Option<PathBu
             let to = dir.join(name);
             fs::create_dir_all(to.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
             fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
-        }
-        count += 1;
-    }
-    for bundle in crate::native_status::wasm_points(home) {
-        let dir = out.join(&bundle.manifest.id);
-        for (name, bytes) in &bundle.files {
-            let to = dir.join(name);
-            fs::create_dir_all(to.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
-            fs::write(&to, bytes).map_err(|e| e.to_string())?;
         }
         count += 1;
     }
@@ -1881,35 +1884,16 @@ fn judge_all(
     projects: &[api::Project<'_>],
     sdk: &sdk_cache::Sdk,
     base: &sdk_cache::Base,
-    stop: &dyn Fn() -> Result<(), String>,
 ) -> Result<Vec<(String, fit::Verdict)>, sdk_cache::Refusal> {
     let mut surface: Option<std::rc::Rc<mod_surface::Surface>> = None;
-    let mut catalog: Option<std::rc::Rc<internals::Catalog>> = None;
     let mut verdicts = Vec::new();
     for project in projects {
-        let verdict = fit::judge(
-            project,
-            sdk.commit(),
-            &mut || {
-                if surface.is_none() {
-                    surface = Some(std::rc::Rc::new(sdk_cache::surface(sdk, base)?));
-                }
-                Ok(surface.clone().expect("read above"))
-            },
-            &mut || {
-                if catalog.is_none() {
-                    let dir = sdk_cache::build_data(sdk, base, stop)?;
-                    let read = internals::Catalog::read(&dir).map_err(|why| {
-                        sdk_cache::Refusal::Refused {
-                            build: sdk.shown(),
-                            why,
-                        }
-                    })?;
-                    catalog = Some(std::rc::Rc::new(read));
-                }
-                Ok(catalog.clone().expect("read above"))
-            },
-        )?;
+        let verdict = fit::judge(project, sdk.commit(), &mut || {
+            if surface.is_none() {
+                surface = Some(std::rc::Rc::new(sdk_cache::surface(sdk, base)?));
+            }
+            Ok(surface.clone().expect("read above"))
+        })?;
         verdicts.push((project.bundle.manifest.id.clone(), verdict));
     }
     Ok(verdicts)
@@ -1943,6 +1927,7 @@ fn refused(refusal: sdk_cache::Refusal) -> String {
 fn guard_worlds(
     home: &Path,
     left: &[LeftOut],
+    verdicts: &[(String, fit::Verdict)],
     build: &str,
     back_up: bool,
     progress: &impl Fn(Step),
@@ -1965,6 +1950,18 @@ fn guard_worlds(
                 (!worlds.is_empty()).then(|| match l.why {
                     isolate::Why::DidNotBuild => {
                         fit::worlds_at_stake_unbuilt(&l.id, build, &worlds)
+                    }
+                    isolate::Why::Newer(_) => {
+                        let pinned = verdicts
+                            .iter()
+                            .find(|(id, _)| id == &l.id)
+                            .and_then(|(_, verdict)| verdict.newer_build());
+                        match pinned {
+                            Some(made_for) => {
+                                fit::worlds_at_stake_newer(&l.id, build, &worlds, made_for)
+                            }
+                            None => fit::worlds_at_stake(&l.id, build, &worlds),
+                        }
                     }
                     _ => fit::worlds_at_stake(&l.id, build, &worlds),
                 })
@@ -2190,8 +2187,7 @@ fn pipeline(
     let mut fitted: Vec<String> = Vec::new();
     if let Some(sdk) = &sdk {
         progress(Step::Checking(projects.len()));
-        let verdicts =
-            judge_all(&projects, sdk, &sdk_base, &check_cancelled).map_err(|r| r.to_string())?;
+        let verdicts = judge_all(&projects, sdk, &sdk_base).map_err(|r| r.to_string())?;
         let mut unusable = Vec::new();
         for (id, verdict) in verdicts {
             match verdict {
@@ -2231,13 +2227,18 @@ fn pipeline(
                 .iter()
                 .filter_map(|(id, verdict)| {
                     let bundle = mods.iter().find(|b| &b.manifest.id == id)?;
-                    let why = isolate::Why::Unfit(fit::line(id, verdict, &shown));
+                    let line = fit::line(id, verdict, &shown);
+                    let why = if verdict.newer_build().is_some() {
+                        isolate::Why::Newer(line)
+                    } else {
+                        isolate::Why::Unfit(line)
+                    };
                     Some(LeftOut::new(bundle, why))
                 })
                 .collect();
             let left = isolate::with_dependents(&unfit, &pairs);
             if let Some(home) = options.worlds {
-                guard_worlds(home, &left, &shown, options.back_up, progress)?;
+                guard_worlds(home, &left, &unusable, &shown, options.back_up, progress)?;
             }
             return Err(Failed::Mods {
                 left,
@@ -2247,7 +2248,9 @@ fn pipeline(
         }
     }
     if target == Target::Server {
-        let jars = horizon_platform::mod_package::manifest::collect_jar_requirements(
+        // The server export never carries a jar that takes no `data/`: no server opens it.
+        let jars = horizon_platform::mod_package::manifest::jar_requirements_for(
+            horizon_platform::mod_package::manifest::Side::Server,
             mods.iter()
                 .map(|bundle| (bundle.manifest.id.as_str(), bundle.manifest.jar.as_slice())),
         )
@@ -2284,7 +2287,7 @@ fn pipeline(
                 .map(|(b, d)| (b, d.as_slice()))
                 .collect();
             let going = isolate::with_dependents(std::slice::from_ref(&left), &pairs);
-            if let Err(stop) = guard_worlds(home, &going, &shown, back_up, progress) {
+            if let Err(stop) = guard_worlds(home, &going, &[], &shown, back_up, progress) {
                 return stop;
             }
         }
@@ -2713,7 +2716,7 @@ pub fn build_then<R>(
         let folder = stage()?;
         let folder = folder.as_path();
         let profile = select_build_profile(instance.native_profile, profile, || {
-            planning::classify_until(folder, Some(base), &check_cancelled)
+            planning::classify(folder, Some(base))
                 .map_err(|error| Failed::Other(error.said(caller)))
         })?;
         let built = isolated(
@@ -2827,7 +2830,7 @@ pub fn build_server(
         }
         let lease = cache.map_err(str::to_owned)?;
         let profile = select_build_profile(Profile::default(), profile, || {
-            planning::classify_until(folder, Some(base), &check_cancelled)
+            planning::classify(folder, Some(base))
         })?;
         let built = pipeline(
             lease,
@@ -3135,6 +3138,7 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let status = Command::new(std::env::current_exe().unwrap())
                 .args([
+                    "--include-ignored",
                     "--exact",
                     "native_mods::tests::a_native_build_starts_from_a_release_the_launcher_installed",
                 ])
@@ -3309,6 +3313,7 @@ mod tests {
 
     #[test]
     fn a_mod_saved_into_a_world_is_never_switched_off_without_the_players_choice() {
+        use horizon_platform::mod_package::sdk::{INDEX, SCHEMA};
         use horizon_platform::world::nbt::{self, Limits, Tag};
         let _guard = scratch_state();
         let home = dir("guard-worlds");
@@ -3318,7 +3323,7 @@ mod tests {
             ("ModId", Tag::String("greeter".into())),
             ("ModVersion", Tag::String("1.0.0".into())),
         ]);
-        let root = Tag::compound([
+        let level = Tag::compound([
             (
                 "Data",
                 Tag::compound([("LevelName", Tag::String("Home".into()))]),
@@ -3331,7 +3336,7 @@ mod tests {
         let bytes = nbt::write_named(
             &nbt::NamedTag {
                 name: "".into(),
-                tag: root,
+                tag: level,
             },
             Limits::default(),
         )
@@ -3356,7 +3361,7 @@ mod tests {
                 vec![],
             ),
         ] {
-            let stopped = guard_worlds(&home, &[left(why)], build, false, &|_| {});
+            let stopped = guard_worlds(&home, &[left(why)], &[], build, false, &|_| {});
             let Err(Failed::Worlds(stake)) = stopped else {
                 panic!("a world saved with the mod must stop the build");
             };
@@ -3370,6 +3375,55 @@ mod tests {
                 "nothing is backed up unasked"
             );
         }
+        let pin =
+            format!("{:x}", Sha256::digest(home.to_string_lossy().as_bytes()))[..40].to_owned();
+        let sdk = root().join("sdk").join(&pin);
+        fs::create_dir_all(sdk.parent().unwrap()).unwrap();
+        fs::create_dir(&sdk).unwrap();
+        fs::write(
+            sdk.join(INDEX),
+            serde_json::json!({
+                "schema": SCHEMA,
+                "build": {
+                    "commit": pin, "game": "26.3", "date": "2026-11-22",
+                    "nightly": "nightly-2026-11-22"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let verdict = fit::Verdict::NoList {
+            made_for: pin,
+            age: fit::Age::Newer,
+        };
+        let stopped = guard_worlds(
+            &home,
+            &[left(isolate::Why::Newer(fit::line(
+                "greeter", &verdict, build,
+            )))],
+            &[("greeter".into(), verdict)],
+            build,
+            false,
+            &|_| {},
+        );
+        fs::remove_dir_all(sdk).unwrap();
+        let Err(Failed::Worlds(stake)) = stopped else {
+            panic!("a world saved with the newer mod must stop the build");
+        };
+        assert_eq!(stake.worlds, ["Home"]);
+        assert!(
+            stake.text.contains("Opening it without greeter"),
+            "{}",
+            stake.text
+        );
+        assert!(
+            stake.text.ends_with(
+                "Update this instance to the Nov 22 update to use it: instance settings, Installation, Game version."
+            ),
+            "{}",
+            stake.text
+        );
+
         // A mod that failed to compile but is in no world isn't part of the stop.
         let Err(Failed::Worlds(stake)) = guard_worlds(
             &home,
@@ -3378,6 +3432,7 @@ mod tests {
                 other.id = "elsewhere".into();
                 other
             }],
+            &[],
             build,
             false,
             &|_| {},
@@ -3391,6 +3446,7 @@ mod tests {
         guard_worlds(
             &home,
             &[left(isolate::Why::DidNotBuild)],
+            &[],
             build,
             true,
             &|step| said.borrow_mut().push(step),
@@ -3404,7 +3460,7 @@ mod tests {
             version: "1.0.0".into(),
             why: isolate::Why::DidNotBuild,
         };
-        assert!(guard_worlds(&home, &[other], build, false, &|_| {}).is_ok());
+        assert!(guard_worlds(&home, &[other], &[], build, false, &|_| {}).is_ok());
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -3836,6 +3892,66 @@ mod tests {
         bytes
     }
 
+    /// `id`'s project from `d` as a flat `.hmod` in `home`'s native folder, its manifest followed by
+    /// `extra`.
+    fn install_hmod(d: &Path, home: &Path, id: &str, extra: &str) {
+        let mut zip = zip::ZipWriter::new(
+            fs::File::create(home.join(INSTALLED).join(format!("{id}.hmod"))).unwrap(),
+        );
+        for file in [NATIVE_MANIFEST, "Cargo.toml", "src/lib.rs"] {
+            zip.start_file(file, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&fs::read(d.join(file)).unwrap()).unwrap();
+            if file == NATIVE_MANIFEST {
+                zip.write_all(extra.as_bytes()).unwrap();
+            }
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn a_mod_with_the_removed_inject_stops_the_build_only_when_on() {
+        let _guard = scratch_state();
+        let (veinminer, listener) = (dir("inject-src-a"), dir("inject-src-b"));
+        write_native(&veinminer, "veinminer", A, B);
+        write_native(&listener, "listener", A, B);
+        let home = dir("inject-home");
+        fs::create_dir_all(home.join(INSTALLED)).unwrap();
+        install_hmod(&veinminer, &home, "veinminer", "");
+        install_hmod(
+            &listener,
+            &home,
+            "listener",
+            "[[inject]]\nid='tick'\nat='game::tick'\nkind='head'\nwith='tick'\n",
+        );
+        crate::browser::java::set_enabled(&home, "veinminer", true).unwrap();
+        crate::browser::java::set_enabled(&home, "listener", false).unwrap();
+        let ids: Vec<_> = bundles(&installed_mods(&home).unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|b| b.manifest.id)
+            .collect();
+        assert_eq!(ids, ["veinminer"]);
+        let on = |home: &Path| -> Vec<String> {
+            crate::native_status::enabled(home)
+                .into_iter()
+                .map(|m| m.0)
+                .collect()
+        };
+        assert_eq!(on(&home), ["veinminer"]);
+
+        crate::browser::java::set_enabled(&home, "listener", true).unwrap();
+        let error = installed_mods(&home).unwrap_err();
+        assert!(
+            error.starts_with("listener (") && error.contains("[[inject]]"),
+            "{error}"
+        );
+        assert_eq!(on(&home), ["listener", "veinminer"]);
+        for d in [veinminer, listener, home] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
     #[test]
     fn an_old_format_native_mod_is_left_out_and_the_others_build() {
         let _guard = scratch_state();
@@ -4235,6 +4351,7 @@ mod tests {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args([
+                    "--include-ignored",
                     "--exact",
                     "native_mods::tests::server_install_is_not_playable_and_export_survives_cache_removal",
                     "--nocapture",
