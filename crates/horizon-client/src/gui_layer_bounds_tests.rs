@@ -116,3 +116,25 @@ fn a_frames_boxes_are_read_in_the_next_frame_only() {
     bounds.next_frame();
     assert_eq!(bounds.get("minecraft:hotbar"), None);
 }
+
+/// A frame reads the last HUD pass's boxes from its start, and a frame that draws no HUD (a
+/// loading frame) keeps them.
+#[test]
+fn a_frame_without_a_hud_keeps_the_last_hud_passs_boxes() {
+    let atlas = atlas();
+    let mut batch = HudBatch::scratch([854, 480]);
+    batch.fill(&atlas, 10.0, 200.0, 182.0, 22.0, 0xFF00_0000);
+    let mut bounds = LayerBounds::default();
+    bounds.frame_start();
+    bounds.begin_hud();
+    bounds.record("minecraft:hotbar", &batch.vertices);
+    assert_eq!(bounds.get("minecraft:hotbar"), None, "the frame it draws");
+    let hotbar = Some([10.0, 200.0, 182.0, 22.0]);
+    bounds.frame_start();
+    assert_eq!(bounds.get("minecraft:hotbar"), hotbar);
+    bounds.frame_start();
+    assert_eq!(bounds.get("minecraft:hotbar"), hotbar, "no HUD drew");
+    bounds.begin_hud();
+    bounds.frame_start();
+    assert_eq!(bounds.get("minecraft:hotbar"), None, "a HUD that drew no hotbar");
+}

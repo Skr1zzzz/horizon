@@ -4657,8 +4657,9 @@ impl Game<'_> {
         // keep clear of; `hud_layers` fills it in once the world's HUD draws.
         let gui = HudBatch::new(size, self.settings.gui_scale_inputs());
         self.ui.room = horizon_client::hud_kit::room::Room::new(gui.width, gui.height);
-        // What the HUD layers drew in the last frame is what mods read in this one.
-        self.hud_layers_drawn.next_frame();
+        // What the HUD layers draw now is what mods read from the next frame on
+        // (`frame_start` at the top of `render_with`).
+        self.hud_layers_drawn.begin_hud();
         // The pack prompt replaces the connecting screen (setScreen), but
         // in game it opens over the world.
         let mut batch = if (self.server_packs.prompt.is_some()
@@ -7924,6 +7925,8 @@ impl Game<'_> {
         &mut self,
         consume: impl FnOnce(&mut Renderer, &Frame<'_>) -> Result<bool>,
     ) -> Result<bool> {
+        // Every read of `hud_layer_bounds` in this frame sees the last HUD pass's boxes.
+        self.hud_layers_drawn.frame_start();
         self.begin_frame_draws();
         let prepare = spans::guard("prepare");
         let mut pr = spans::laps();

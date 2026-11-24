@@ -69,7 +69,8 @@ fn gui_layer_draw(&self, host: &dyn ClientHost, event: &mut GuiLayerDrawEvent<'_
 - **None.** A layer that drew nothing that frame reads `None`: a mod hid it (`Flow::Cancel` in
   `gui_layer_pre`), F1 or a canceled `render_gui_pre` hid the HUD, or it had nothing to show (no
   boss bar, subtitle, effect or recent chat line). So does an id no layer has.
-- **One frame behind.** Each frame reads the boxes of the frame before it, wherever it is read: a
-  box follows its layer one frame late.
+- **One frame behind.** Every read in a frame, before or after the HUD draws, gets the boxes of
+  the last frame that drew the HUD (a loading frame keeps them): a box follows its layer one
+  frame late.
 - **Cost.** The HUD keeps one box per layer, measured as it draws; the call is a lookup. Native
   and wasm mods make the same call.

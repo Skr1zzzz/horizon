@@ -137,6 +137,8 @@ impl GuiLayers {
 #[derive(Debug, Default)]
 pub struct LayerBounds {
     layers: Vec<DrawnLayer>,
+    /// A HUD pass ran since the boxes last advanced ([`LayerBounds::begin_hud`]).
+    hud_ran: bool,
 }
 
 #[derive(Debug)]
@@ -149,6 +151,21 @@ struct DrawnLayer {
 }
 
 impl LayerBounds {
+    /// The HUD pass of this frame starts: [`LayerBounds::frame_start`] of the next frame
+    /// advances to what it draws.
+    pub fn begin_hud(&mut self) {
+        self.hud_ran = true;
+    }
+
+    /// A frame starts, before anything in it reads a box: when a HUD pass ran since the last
+    /// advance, its boxes are what this frame reads. A frame that draws no HUD (a loading frame)
+    /// keeps the last HUD pass's boxes, so every read in a frame sees the same last HUD pass.
+    pub fn frame_start(&mut self) {
+        if std::mem::take(&mut self.hud_ran) {
+            self.next_frame();
+        }
+    }
+
     /// A frame's HUD starts: what the layers drew in the frame before is what is read now, and a
     /// layer that drew nothing there, or nothing with an area, reads none.
     pub fn next_frame(&mut self) {

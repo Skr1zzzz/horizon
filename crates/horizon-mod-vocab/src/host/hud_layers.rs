@@ -17,8 +17,9 @@ pub trait HudLayersClientHost {
     /// off-hand slot and the attack indicator while they show.
     /// None when the layer drew nothing that frame: a mod hid it, F1 or a canceled
     /// `render_gui_pre` hid the HUD, it had nothing to show (no boss bar, subtitle or effect, no
-    /// recent chat line), or no layer has that id. A frame reads the frame before it, so a box
-    /// lags its layer by one frame. Sends nothing and costs a lookup.
+    /// recent chat line), or no layer has that id. Every read in a frame, before or after the
+    /// HUD draws, gets the last frame that drew the HUD, so a box lags its layer by one frame.
+    /// Sends nothing and costs a lookup.
     #[access(ClientSetup)]
     fn hud_layer_bounds(&self, layer: &str) -> Option<[f32; 4]>;
 }
