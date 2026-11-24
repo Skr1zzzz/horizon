@@ -19,13 +19,21 @@ use mod_api::{DynamicTextureError, Identifier};
 const SMILE: &str = "mymod:emoji/smile";
 
 /// Upload one emoji: 32 by 32 pixels, row by row from the top left, four bytes (RGBA) each.
-fn upload_smile(host: &mut dyn ClientHost, rgba: &[u8]) -> Result<(), DynamicTextureError> {
+/// `made` says whether this mod already created it.
+fn upload_smile(
+    host: &mut dyn ClientHost,
+    made: &mut bool,
+    rgba: &[u8],
+) -> Result<(), DynamicTextureError> {
     let id = Identifier::parse(SMILE).unwrap();
-    match host.create_dynamic_texture(&id, 32, 32, rgba) {
-        // Already there: give it the new pixels instead.
-        Err(DynamicTextureError::NameTaken) => host.update_dynamic_texture(&id, 32, 32, rgba),
-        result => result,
+    if *made {
+        // Already created by this mod: give it the new pixels instead.
+        return host.update_dynamic_texture(&id, 32, 32, rgba);
     }
+    // `NameTaken` here means a pack's sprite holds the name: there is no image to update.
+    host.create_dynamic_texture(&id, 32, 32, rgba)?;
+    *made = true;
+    Ok(())
 }
 
 fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
@@ -36,8 +44,9 @@ fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>
 }
 ```
 
-The four calls are on the client host. They change the game's atlas, so they take `&mut dyn ClientHost`: call
-them from a hook that has it, such as `client_tick_post`, not from inside a draw.
+The four calls are on the client host. Create, update and free change the game's atlas, so they take
+`&mut dyn ClientHost`: call them from a hook that has it, such as `client_tick_post`, not from inside a draw. The
+budget only reads, so a shared `&dyn ClientHost` is enough for it.
 
 - **`create_dynamic_texture(id, width, height, rgba)`** makes the image. From then on its id is a GUI sprite of
   `width` x `height` pixels, and its pixels reach the GPU with the next frame.
@@ -69,7 +78,9 @@ the path is the mod's to choose. A mod never changes another's image: an id outs
 is `NotOwned`. An id that already names an image, or a GUI sprite of the packs, is `NameTaken` on create.
 
 An id has two forms, `mymod:emoji/smile` and `mymod:gui/sprites/emoji/smile`: `DrawContext::sprite` and
-`gui_sprite` find the first, and an inline atlas object of `minecraft:gui` looks for the second first. So while
+`gui_sprite` find the first, and an inline atlas object of `minecraft:gui` looks for the second first. They don't
+map one onto the other: a pack's sprite in the `mymod:gui/sprites/...` form is not found by `DrawContext::sprite`
+or `gui_sprite` under the short id. So while
 either form names an image or a pack's sprite, `create` refuses the other one too, whichever came first. That way
 one id always draws one picture.
 
@@ -135,7 +146,9 @@ fixed size classes, and an update across classes is refused there; here an updat
 
 A resource pack change rebuilds the GUI atlas. Every image keeps its name and its place in the new atlas's page,
 and the game puts its last pixels back by itself, with the next frame: there is nothing to upload again. Ask
-`gui_sprite` again after a reload if you kept a region: the page may lie elsewhere in the new atlas. If a resource
+`gui_sprite` again after a reload if you kept a region: the page may lie elsewhere in the new atlas. Ask again
+too after an update that changes the size, and after a free and a new create: a moved image leaves its old room
+to the next one. If a resource
 pack brings a sprite under an image's id, in either form, the pack's sprite keeps the name until that pack is
 turned off again.
 

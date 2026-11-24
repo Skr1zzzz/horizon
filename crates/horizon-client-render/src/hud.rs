@@ -1030,8 +1030,12 @@ impl HudAtlas {
         mod_image: bool,
     ) -> Result<Self> {
         let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, mod_image)?;
-        atlas.dynamic_texture_page =
-            dynamic_textures::Page::take(&mut atlas.sprites, atlas.width, atlas.height);
+        // Only the page the builder reserved: without a mod, a pack texture under the page's
+        // name stays one of the pack's sprites.
+        if mod_image {
+            atlas.dynamic_texture_page =
+                dynamic_textures::Page::take(&mut atlas.sprites, atlas.width, atlas.height);
+        }
         pack_text::load_shaders(&mut atlas, root, defaults);
         atlas.sprite_modifiers = std::sync::Arc::new(sprite_modifiers::SpriteModifiers::read(
             root,
