@@ -114,18 +114,18 @@ pub struct Layer {
     /// `RenderTypes.breezeWind`: the texture scrolls with the entity's age.
     pub scroll: f32,
     /// The slot of what the mob wears that this layer draws (its armour, its body armour), which
-    /// a mod's `render_living_equipment` can hide or tint; None for the mob's own layers.
+    /// a mod's `render_worn_equipment` can hide or tint; None for the mob's own layers.
     pub worn: Option<mod_api::EquipmentRenderSlot>,
 }
 
 thread_local! {
-    /// What the mods' `render_living_equipment` left of the worn and held items of the entity
+    /// What the mods' `render_worn_equipment` left of the worn and held items of the entity
     /// being drawn on this thread ([`EquipmentScope`]); everything shown outside one.
     static SHOWN_EQUIPMENT: std::cell::Cell<mod_api::EquipmentRender> =
         const { std::cell::Cell::new(mod_api::EquipmentRender::new()) };
 }
 
-/// Draws one entity's worn and held items as a mod's `render_living_equipment` left them, until
+/// Draws one entity's worn and held items as a mod's `render_worn_equipment` left them, until
 /// it is dropped: its armour and body layers here, and the game's armour, wings, held and head
 /// items, read it ([`shown_equipment`]). Draws outside one (a screen's preview of the player)
 /// show everything.
@@ -2573,7 +2573,7 @@ fn render_visible(
             Some(_) => 0,
             None => overlay,
         };
-        // What it wears, as a mod's `render_living_equipment` lets it be drawn.
+        // What it wears, as a mod's `render_worn_equipment` lets it be drawn.
         let (color, overlay) = match layer.worn {
             Some(slot) => {
                 let base_part = mod_api::EquipmentRenderPart::Base;
@@ -3238,7 +3238,7 @@ mod tests {
         }
     }
 
-    /// A mod's `render_living_equipment` (horizon-rust/horizon#11072): inside its scope a mob's
+    /// A mod's `render_worn_equipment` (horizon-rust/horizon#11072): inside its scope a mob's
     /// worn armour is left out, drawn without its glint or tinted, slot by slot, while the body
     /// and the other slots draw as before; outside it everything draws again.
     #[test]

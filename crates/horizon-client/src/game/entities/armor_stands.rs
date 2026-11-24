@@ -380,7 +380,7 @@ impl Game<'_> {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out = Vec::new();
-        // The entity drawn now, as a mod's `render_living_equipment` lets its armour be drawn.
+        // The entity drawn now, as a mod's `render_worn_equipment` lets its armour be drawn.
         let shown = horizon_client::mobs::render::shown_equipment();
         use mod_api::{EquipmentRenderPart as Drawn, EquipmentRenderSlot as Worn};
         for (item, (layer, slot, worn_slot)) in worn.into_iter().zip([

@@ -1,10 +1,10 @@
-//! What a living entity wears and holds, as a mod's `render_living_equipment` lets it be drawn
+//! What a living entity wears and holds, as a mod's `render_worn_equipment` lets it be drawn
 //! (horizon-rust/horizon#11072): the hook is asked for each entity drawn, and what it hides or
 //! tints changes only those draws, on another player's armour and this window's held item.
 use super::Game;
 use horizon_client::{items::ItemStack, mesher::Vertex, mobs::Mob};
 use mod_api::{
-    EquipmentRenderPart as Drawn, EquipmentRenderSlot as Worn, Hooks, RenderLivingEquipmentEvent,
+    EquipmentRenderPart as Drawn, EquipmentRenderSlot as Worn, Hooks, RenderWornEquipmentEvent,
 };
 use std::sync::{Arc, Mutex};
 
@@ -16,15 +16,15 @@ struct Wish {
     asked: Vec<u32>,
 }
 
-/// A mod listening to `render_living_equipment` that does what its [`Wish`] says.
+/// A mod listening to `render_worn_equipment` that does what its [`Wish`] says.
 struct Equip(Arc<Mutex<Wish>>);
 
 #[mod_api::__subscriptions]
 impl Hooks for Equip {
-    fn render_living_equipment(
+    fn render_worn_equipment(
         &self,
         _: &dyn mod_api::ClientHost,
-        event: &mut RenderLivingEquipmentEvent<'_>,
+        event: &mut RenderWornEquipmentEvent<'_>,
     ) {
         let mut wish = self.0.lock().unwrap();
         wish.asked.push(event.entity.id);

@@ -8175,7 +8175,7 @@ impl Game<'_> {
                 self.lit_posed_entity(entity_start..out.len(), posed_start);
                 continue;
             };
-            // What it wears and holds as a mod's `render_living_equipment` lets it be drawn, until
+            // What it wears and holds as a mod's `render_worn_equipment` lets it be drawn, until
             // the next entity: its armour and body layers, wings, held and head items read it.
             let _equipment = self.mod_render_equipment(mob, false, alpha as f32);
             // A mod's renderer for the type (`register_entity_renderers`) draws in place of its

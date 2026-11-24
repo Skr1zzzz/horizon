@@ -1,4 +1,4 @@
-//! What a living entity wears and holds, as a mod's `render_living_equipment` lets it be drawn
+//! What a living entity wears and holds, as a mod's `render_worn_equipment` lets it be drawn
 //! this frame: each slot's base, glint and trim hidden or shown, and its colour tinted, without
 //! replacing the entity's model or its other layers.
 
@@ -58,7 +58,7 @@ pub enum EquipmentRenderPart {
 const UNTINTED: u32 = 0xFF_FFFF;
 
 /// How a mod lets a living entity's worn and held items draw this frame
-/// (`render_living_equipment`): by [`EquipmentRenderSlot`], a [`EquipmentRenderPart`] hidden or a
+/// (`render_worn_equipment`): by [`EquipmentRenderSlot`], a [`EquipmentRenderPart`] hidden or a
 /// colour multiplied in. It starts with everything shown and untinted; what one mod hides or
 /// tints, the next sees and adds to. Nothing allocated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]

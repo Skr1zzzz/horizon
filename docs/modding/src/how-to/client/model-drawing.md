@@ -196,7 +196,7 @@ Each mob and player in view gets the render hook pair once a frame, NeoForge's
 1. `render_player_pre(player, who, draw, hidden, canceled)`, for a player only (`who` is its
    profile name and whether it is this window's own);
 2. `render_living_pre(entity, draw, hidden, canceled)`, before the entity's model;
-3. `render_living_equipment(entity, equipment)`, when neither pre hook canceled
+3. `render_worn_equipment(entity, equipment)`, when neither pre hook canceled
    ([below](#a-living-entitys-armour-and-held-items));
 4. the model and its vanilla layers, or in their place the renderer a mod registered for its type
    ([entity renderers](entity-renderers.md)), then the layers mods added to its type
@@ -217,7 +217,7 @@ its own draws it in `render_living_pre` and cancels; one that draws every entity
 a renderer for the type instead; one that wants the name tag or the shadow then draws them itself, or doesn't cancel.
 Canceling only `render_living_pre` of a player still asks its `render_player_post`. An entity the
 frame culls gets neither hook. The game asks once a frame whether any mod listens to the four (and
-to `render_living_equipment`), and with none builds nothing for them.
+to `render_worn_equipment`), and with none builds nothing for them.
 
 ## A player's or humanoid's parts
 
@@ -274,14 +274,14 @@ held item in addition to the arm you drew.
 
 ## A living entity's armour and held items
 
-`render_living_equipment(entity, equipment)` comes right after `render_living_pre` for every mob
+`render_worn_equipment(entity, equipment)` comes right after `render_living_pre` for every mob
 and player in view whose pre hooks didn't cancel, this window's own player included. `equipment`
 (`EquipmentRender`) starts with everything shown and untinted; it changes what the entity wears and
 holds this frame without replacing its model, as a mod that hides armour or colours a shield by
 its state does:
 
 ```rust,ignore
-fn render_living_equipment(&self, _: &dyn ClientHost, event: &mut RenderLivingEquipmentEvent<'_>) {
+fn render_worn_equipment(&self, _: &dyn ClientHost, event: &mut RenderWornEquipmentEvent<'_>) {
     use mod_api::{EquipmentRenderPart as Part, EquipmentRenderSlot as Slot};
     event.equipment.hide(Slot::Head, Part::Base);
     event.equipment.tint(Slot::OffHand, 0xFF_4040);

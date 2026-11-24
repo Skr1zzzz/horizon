@@ -143,7 +143,7 @@ impl Game<'_> {
         if !horizon_client::mobs::raider::is_captain(mob) {
             return;
         }
-        // The entity drawn now, as a mod's `render_living_equipment` lets its head slot be drawn.
+        // The entity drawn now, as a mod's `render_worn_equipment` lets its head slot be drawn.
         let shown = render::shown_equipment();
         let worn = mod_api::EquipmentRenderSlot::Head;
         if shown.hides(worn, mod_api::EquipmentRenderPart::Base) {
@@ -407,7 +407,7 @@ impl Game<'_> {
         mut skin: Option<&mut super::creatures::Skinned>,
         out: &mut Vec<Vertex>,
     ) {
-        // The entity drawn now, as a mod's `render_living_equipment` lets its hands be drawn.
+        // The entity drawn now, as a mod's `render_worn_equipment` lets its hands be drawn.
         let shown = render::shown_equipment();
         use mod_api::{EquipmentRenderPart as Drawn, EquipmentRenderSlot as Worn};
         // ItemInHandLayer submits with OverlayTexture.NO_OVERLAY: no hurt tint.
@@ -569,7 +569,7 @@ impl Game<'_> {
         {
             return;
         }
-        // The entity drawn now, as a mod's `render_living_equipment` lets its head slot be drawn.
+        // The entity drawn now, as a mod's `render_worn_equipment` lets its head slot be drawn.
         let shown = render::shown_equipment();
         let worn = mod_api::EquipmentRenderSlot::Head;
         if shown.hides(worn, mod_api::EquipmentRenderPart::Base) {

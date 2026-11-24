@@ -1,4 +1,4 @@
-//! The `render_living_equipment` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
+//! The `render_worn_equipment` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
 
 pub trait Hooks {
     /// What a living entity wears and holds, as it is drawn this frame: asked once a frame for
@@ -20,5 +20,5 @@ pub trait Hooks {
         contract = "listen",
         neoforge = "none (NeoForge has no such event)"
     )]
-    fn render_living_equipment();
+    fn render_worn_equipment();
 }

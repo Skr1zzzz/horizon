@@ -864,7 +864,7 @@ impl Game<'_> {
         let Some(hidden) = pre else {
             return;
         };
-        // What it wears and holds as a mod's `render_living_equipment` lets it be drawn: its
+        // What it wears and holds as a mod's `render_worn_equipment` lets it be drawn: its
         // armour, wings, held and head items read it; the screens' previews don't.
         let _equipment = self.mod_render_equipment(m, true, alpha as f32);
         // The mods' layers' posed parts, kept from the draw below while they want them.
@@ -1156,7 +1156,7 @@ impl Game<'_> {
             .extra
             .slot_stack(horizon_items::equipment::CHEST)
             .filter(|s| chest == Some(&*s.item));
-        // As a mod's `render_living_equipment` lets the wings be drawn.
+        // As a mod's `render_worn_equipment` lets the wings be drawn.
         let shown = horizon_client::mobs::render::shown_equipment();
         let (wings, glint) = (
             mod_api::EquipmentRenderSlot::Elytra,

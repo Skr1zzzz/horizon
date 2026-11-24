@@ -48,7 +48,7 @@ impl MobRenderHooks {
 }
 
 /// What the frame's entity pass decided about the mods' render hooks: which hooks have
-/// listeners (asked once a frame), whether any listens to `render_living_equipment`, and the
+/// listeners (asked once a frame), whether any listens to `render_worn_equipment`, and the
 /// entities a pre hook canceled.
 #[derive(Default)]
 struct EntityFrame {
@@ -71,7 +71,7 @@ pub(in crate::game) fn begin_entity_frame() {
         player_pre: mod_api::__private::listened(HookId::RenderPlayerPre),
         player_post: mod_api::__private::listened(HookId::RenderPlayerPost),
     };
-    let equipment = mod_api::__private::listened(HookId::RenderLivingEquipment);
+    let equipment = mod_api::__private::listened(HookId::RenderWornEquipment);
     FRAME.with_borrow_mut(|frame| {
         frame.listened = hooks;
         frame.equipment = equipment;
@@ -258,7 +258,7 @@ impl Game<'_> {
         FRAME.with_borrow_mut(|frame| frame.canceled.insert(id));
         None
     }
-    /// What the mods' `render_living_equipment` left of what `mob` wears and holds, asked after
+    /// What the mods' `render_worn_equipment` left of what `mob` wears and holds, asked after
     /// its pre hooks didn't cancel (`local` marks this window's own player): a scope that draws
     /// its armour, body, wings and held items that way until it is dropped, or None when no mod
     /// listens or none hid or tinted anything.
@@ -274,7 +274,7 @@ impl Game<'_> {
         }
         let entity = mob_render(mob, render_id(mob.id, local, self.own_entity_id()), partial);
         let mut equipment = EquipmentRender::new();
-        self.native_render_living_equipment(&entity, &mut equipment);
+        self.native_render_worn_equipment(&entity, &mut equipment);
         (!equipment.is_empty()).then(|| render::EquipmentScope::enter(equipment))
     }
     /// The renderer a mod registered for `mob`'s type (`register_entity_renderers`), drawn in place
