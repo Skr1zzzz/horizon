@@ -5558,6 +5558,11 @@ impl Renderer {
         if draws as u64 <= *indirect_capacity {
             return true;
         }
+        // A scaled screenshot's `made` checks nothing, and a buffer that failed would replace
+        // this one: the shadow's draws stay in the flat list instead (`pack_shadow_indirect`).
+        if matches!(kind, frame_targets::Kind::ShadowDraws) && frame_targets::screenshot_frame() {
+            return false;
+        }
         let capacity = (draws as u64).next_power_of_two();
         let made = frame_targets::made(device, kind, || {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -10978,7 +10983,7 @@ impl Renderer {
                 (self.flat.as_ref()).is_some_and(|f| f.min_sections != usize::MAX),
                 (self.pack_post.as_ref())
                     .and_then(|p| p.1.as_ref())
-                    .is_some_and(|p| p.has_shadow() && !p.shadow_solid_geometry()),
+                    .is_some_and(|p| p.shadow_solid_flat()),
                 &self.draws,
                 shadow_solid_draws.clone(),
             )
