@@ -1,7 +1,9 @@
 # Replacing what a furnace, campfire or crafter makes
 
 `Hooks::prepare_block_craft` asks your mod for the stack a block is about to make, at the
-point where vanilla computes it, before anything is used up:
+point where vanilla computes it, before the ingredients are used up and before the result
+goes anywhere. A furnace's fuel is the exception: a fuel item it lit this tick is already gone
+when it asks:
 
 | Block | When it asks | `recipe` |
 | --- | --- | --- |

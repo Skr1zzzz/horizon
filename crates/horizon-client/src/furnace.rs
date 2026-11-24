@@ -213,10 +213,13 @@ impl FurnaceCooking for Furnace {
             return false;
         };
         let max = items.get(&result.item).map_or(64, |i| i.max_stack);
-        let can_burn = match &self.items[2] {
-            None => true,
-            Some(out) => out.same_item_same_components(&result) && out.count + result.count <= max,
-        };
+        let can_burn = result.count > 0
+            && match &self.items[2] {
+                None => result.count <= max,
+                Some(out) => {
+                    out.same_item_same_components(&result) && out.count + result.count <= max
+                }
+            };
         if !can_burn {
             return false;
         }
@@ -642,22 +645,23 @@ mod tests {
         assert_eq!(made.recipes_used.get("minecraft:test_ingot"), Some(&1));
 
         // `canBurn` on the settled result: another item on the ingots, or more ingots than
-        // the stack holds, is not made.
+        // the stack holds (on top of others or into the empty output), is not made.
         for (output, result) in [
             (
-                ItemStack::new("test:ingot", 1),
+                Some(ItemStack::new("test:ingot", 1)),
                 ItemStack::new("test:husk", 1),
             ),
             (
-                ItemStack::new("test:ingot", 62),
+                Some(ItemStack::new("test:ingot", 62)),
                 ItemStack::new("test:ingot", 3),
             ),
+            (None, ItemStack::new("test:ingot", 65)),
         ] {
-            let mut full = finishing(Some(output.clone()));
+            let mut full = finishing(output.clone());
             full.cooking_timer = 0;
             assert!(!full.burn(&items, cooked.recipe.clone(), Some(result)));
             assert_eq!(full.items[0].as_ref().map(|s| s.count), Some(2));
-            assert_eq!(full.items[2], Some(output));
+            assert_eq!(full.items[2], output);
             assert!(full.recipes_used.is_empty());
         }
     }

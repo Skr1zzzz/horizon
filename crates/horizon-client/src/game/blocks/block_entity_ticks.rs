@@ -610,7 +610,7 @@ impl Game<'_> {
     pub(super) fn tick_furnace(&mut self, pos: Pos) -> Result<()> {
         // What the hooks need from before the tick, without cloning stacks: the
         // fuel's id only while the furnace is out (it can light this tick), the
-        // input's id (a last item is gone after it smelts) and the result count.
+        // input's id (a last item is gone after it smelts) and the fuel left.
         let before = match self.world.block_entities.get(&pos) {
             Some(BlockEntity::Furnace(f)) => (
                 f.cooking_timer,
@@ -618,7 +618,6 @@ impl Game<'_> {
                     .then(|| f.items[1].as_ref().map(|s| s.item.clone()))
                     .flatten(),
                 f.items[0].as_ref().map(|s| s.item.clone()),
-                f.items[2].as_ref().map_or(0, |s| s.count),
                 f.lit_remaining,
             ),
             _ => return Ok(()),
@@ -662,9 +661,9 @@ impl Game<'_> {
                     &|s| crate::crafting::CraftingRemainder::crafting_remainder(items, s),
                 )
             };
-            if let Some(cooked) = cooked {
-                self.make_furnace_result(pos, cooked);
-            }
+            // Whether `burn` made the result: a listener that edits the output slot
+            // can't fake or hide the smelt.
+            let made = cooked.is_some_and(|cooked| self.make_furnace_result(pos, cooked));
             let Some(BlockEntity::Furnace(f)) = self.world.block_entities.get(&pos) else {
                 // A mod's `prepare_block_craft` took the furnace away: what fell from it
                 // this tick still falls.
@@ -676,7 +675,7 @@ impl Game<'_> {
             let burning = before.1.filter(|_| f.lit_remaining > 0);
             let smelted = f.items[2]
                 .as_ref()
-                .filter(|after| after.count > before.3)
+                .filter(|_| made)
                 .map(|after| (before.2.clone(), after.item.clone()));
             let started = before.0 == 0 && f.cooking_timer > 0;
             let smelting = started
@@ -684,7 +683,7 @@ impl Game<'_> {
                 .flatten();
             // The tick takes one off `lit_remaining`; only consuming fuel
             // sets it higher (a lava bucket leaves a bucket of the same count).
-            let fueled = f.lit_remaining > before.4.saturating_sub(1);
+            let fueled = f.lit_remaining > before.3.saturating_sub(1);
             (lit, burning, smelted, smelting, fueled)
         };
         // `AbstractFurnaceBlockEntity.serverTick`: `burn` and consuming fuel
@@ -727,7 +726,8 @@ impl Game<'_> {
     /// tick, after the mods had their say on its result (`prepare_block_craft`). With no
     /// result left, or one the output can't take, nothing is made: the input stays, as in
     /// vanilla's tick when the recipe's result is empty, and the cook starts again.
-    fn make_furnace_result(&mut self, pos: Pos, cooked: Cooked) {
+    /// Whether the result was made.
+    fn make_furnace_result(&mut self, pos: Pos, cooked: Cooked) -> bool {
         let Cooked { recipe, result } = cooked;
         let mut result = Some(result);
         if mod_api::__private::listened(mod_api::HookId::PrepareBlockCraft) {
@@ -741,8 +741,9 @@ impl Game<'_> {
             );
         }
         let items = world_items!(self);
-        if let Some(BlockEntity::Furnace(furnace)) = self.world.block_entities.get_mut(&pos) {
-            furnace.burn(items, recipe, result);
+        match self.world.block_entities.get_mut(&pos) {
+            Some(BlockEntity::Furnace(furnace)) => furnace.burn(items, recipe, result),
+            _ => false,
         }
     }
 }
