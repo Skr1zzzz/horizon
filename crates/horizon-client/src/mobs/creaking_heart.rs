@@ -1131,6 +1131,7 @@ mod tests {
             others_index: None,
             passenger_objects: &[],
             others_villagers: None,
+            village: None,
             species_slots: None,
             others_solid: None,
             daylight: false,
