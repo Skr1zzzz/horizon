@@ -17,7 +17,8 @@ pub enum ScreenSlotRefusal {
     /// The screen did not lay the slot out when it opened, as vanilla leaves a slot
     /// inactive (a mount's missing saddle or body armour slot): it can't be shown.
     HiddenAtOpen,
-    /// A position that is not finite.
+    /// A coordinate that is not finite or lies more than 1,000,000 GUI pixels from the
+    /// screen's `leftPos`/`topPos`.
     BadPosition,
     /// Asked with no game backend, or on a server: screens are the client's.
     Unavailable,
@@ -29,7 +30,7 @@ impl std::fmt::Display for ScreenSlotRefusal {
             Self::NoScreen => "no container screen is open",
             Self::NoSuchSlot => "the open menu has no such slot",
             Self::HiddenAtOpen => "the slot was hidden when the screen opened",
-            Self::BadPosition => "the position is not finite",
+            Self::BadPosition => "the position is not finite or is too far away",
             Self::Unavailable => "screens are on the client",
         })
     }

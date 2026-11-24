@@ -117,5 +117,5 @@ It returns `Err(ScreenSlotRefusal)` and changes nothing:
 | `NoScreen` | no container screen is open: another screen or none, the creative inventory, or a native mod's own screen for the menu, which places its slots itself |
 | `NoSuchSlot` | the open menu has no slot of that index |
 | `HiddenAtOpen` | showing a slot the screen did not lay out when it opened, as vanilla leaves a mount's missing saddle or body armour slot inactive (hiding it again is already so, and returns `Ok`) |
-| `BadPosition` | a coordinate is not finite; there is no other bound |
+| `BadPosition` | a coordinate is not finite, or is more than 1,000,000 from `leftPos`/`topPos` either way (Java's `Slot.x` is an int) |
 | `Unavailable` | on a server, or with no game backend |

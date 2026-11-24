@@ -28,7 +28,7 @@ impl ScreensClientHost for Client {
         if slot == 1 && pos.is_some() {
             return Err(ScreenSlotRefusal::HiddenAtOpen);
         }
-        if pos.is_some_and(|[x, y]| !x.is_finite() || !y.is_finite()) {
+        if pos.is_some_and(|[x, y]| !(x.abs() <= 1.0e6 && y.abs() <= 1.0e6)) {
             return Err(ScreenSlotRefusal::BadPosition);
         }
         *place = pos;

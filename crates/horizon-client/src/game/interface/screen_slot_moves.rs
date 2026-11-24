@@ -12,6 +12,10 @@ use std::cell::{Cell, RefCell};
 /// A slot's place from `leftPos`/`topPos` (`Slot.x`, `Slot.y`), or None for a hidden one.
 type Place = Option<[f32; 2]>;
 
+/// The largest coordinate a mod may give, either way (`BadPosition` past it). Java's
+/// `Slot.x` is an int; this keeps every place's pixel arithmetic far inside `i32`.
+const MAX_COORD: f32 = 1_000_000.0;
+
 /// What client mods did to the open container screen's slots, by game slot id. A move
 /// waits in `pending` until the frame's build takes it (`commit`), so one frame draws and
 /// hit-tests one layout. The moves are one screen's (`owner`) and go with it, when it
@@ -82,7 +86,7 @@ impl ScreenSlotMoves {
                 None => Ok(()),
             };
         }
-        if place.is_some_and(|[x, y]| !x.is_finite() || !y.is_finite()) {
+        if place.is_some_and(|[x, y]| !(x.abs() <= MAX_COORD && y.abs() <= MAX_COORD)) {
             return Err(ScreenSlotRefusal::BadPosition);
         }
         if moved.unwrap_or(shown) != place {
@@ -279,6 +283,8 @@ mod tests {
             (0, Some([f32::NAN, 0.0]), BadPosition),
             (0, Some([0.0, f32::INFINITY]), BadPosition),
             (1, Some([f32::NEG_INFINITY, 0.0]), BadPosition),
+            (0, Some([3.0e9, 0.0]), BadPosition),
+            (1, Some([0.0, -1.0e7]), BadPosition),
         ] {
             assert_eq!(
                 moves.set(SCREEN, slot, shown(slot), place),
