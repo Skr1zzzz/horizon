@@ -160,6 +160,10 @@ pub struct BlockModelQuad {
     pub tint_index: i32,
     /// Its colour source, none for an untinted quad.
     pub tint: Option<TintSource>,
+    /// The model's fixed colour for the quad (`neoforge_data.color`, `0xAARRGGBB`): its red, green and blue
+    /// multiply the tint (white when `tint` is none), as the mesher draws it. None for a quad with no colour of
+    /// its own.
+    pub color: Option<u32>,
     /// The side whose directional shade the mesher gives it (`facing`, or the element's
     /// `shade_direction_override`); none for a quad drawn unshaded.
     pub shade: Option<Direction>,

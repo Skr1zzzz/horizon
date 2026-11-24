@@ -324,6 +324,7 @@ fn model_quads<'a>(
                 q.cull.map(side),
                 q.tint_index,
                 tint(q.tint_index),
+                q.color.map(|c| c as u32),
                 shade,
                 face.translucent,
             )
@@ -599,11 +600,12 @@ mod tests {
         }
     }
 
-    /// `block_model_quads` keeps each face's pass (`translucent`) and gives UVs a section geometry renderer can add
-    /// as they are, 0 to 1 within the sprite: those inside it unchanged, and an OBJ or loader model's past it
-    /// (below 0, above 1, infinite, not a number) on its edge, where `SectionQuad` would refuse the whole section.
+    /// `block_model_quads` keeps each face's pass (`translucent`) and its fixed colour (`neoforge_data.color`,
+    /// which the mesher multiplies into the tint), and gives UVs a section geometry renderer can add as they are,
+    /// 0 to 1 within the sprite: those inside it unchanged, and an OBJ or loader model's past it (below 0, above
+    /// 1, infinite, not a number) on its edge, where `SectionQuad` would refuse the whole section.
     #[test]
-    fn a_quads_uvs_stay_in_its_sprite_and_it_keeps_its_pass() {
+    fn a_quads_uvs_stay_in_its_sprite_and_it_keeps_its_pass_and_colour() {
         let inside = [[0.0, 0.0], [0.0, 0.75], [0.25, 0.75], [0.25, 0.0]];
         let outside = [
             [-0.25, 1.5],
@@ -611,10 +613,11 @@ mod tests {
             [f32::INFINITY, f32::NEG_INFINITY],
             [2.0, 1.0],
         ];
-        let faces = [
+        let mut faces = [
             top_face("t:block/glass", inside, true),
             top_face("t:block/obj", outside, false),
         ];
+        faces[1].quad.color = Some(0x80FF_8040_u32 as i32);
         let quads = model_quads(faces.iter(), None, sprite_at, |_| None);
         assert_eq!(quads[0].uvs, inside);
         assert_eq!(
@@ -623,6 +626,8 @@ mod tests {
         );
         let passes: Vec<_> = quads.iter().map(|q| q.translucent).collect();
         assert_eq!(passes, [true, false]);
+        let colors: Vec<_> = quads.iter().map(|q| q.color).collect();
+        assert_eq!(colors, [None, Some(0x80FF_8040)]);
     }
 
     /// `block_model_quads(state, pos)` draws a block as the mesher draws it at `pos`: of its two weighted variants

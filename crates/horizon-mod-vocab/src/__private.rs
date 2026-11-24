@@ -230,6 +230,7 @@ pub mod built {
         cull: Option<crate::Direction>,
         tint_index: i32,
         tint: Option<crate::TintSource>,
+        color: Option<u32>,
         shade: Option<crate::Direction>,
         translucent: bool,
     ) -> crate::BlockModelQuad {
@@ -242,6 +243,7 @@ pub mod built {
             cull,
             tint_index,
             tint,
+            color,
             shade,
             translucent,
         }

@@ -314,7 +314,8 @@ part of the section meshes (`add_section_geometry`), as many as each section's b
   across the block plus that offset, counterclockwise seen from the side it faces), its UVs within the sprite (0
   to 1; a model's UV past its sprite is clamped to the edge), its `sprite` and `sprite_name` (the block atlas
   name `SectionGeometryContext::add` takes), the side it is `facing`, its `cull` face, its `tint_index` and
-  `tint` source, its `shade` side and whether it is `translucent`. Air, fluids and blocks drawn only as block
+  `tint` source, its own fixed `color` (a NeoForge model's `neoforge_data.color`), its `shade` side and whether
+  it is `translucent`. Air, fluids and blocks drawn only as block
   entities have no quads; a state the game doesn't know is `None`. Read them on the client thread, for each
   block at its place when the schematic loads or moves, and again when `block_sprites_version` changes.
 - `remesh_sections(min, max)` meshes again every loaded section that the block box reaches, both corners
@@ -387,7 +388,8 @@ host.remesh_sections(new_min, new_max);
 
 A tinted quad (`tint` set) is multiplied by its source's colour where the ghost block stands:
 `context.level().block_tint(pos, ColorResolver::Grass)` for `TintSource::Grass` (and the same for foliage,
-dry foliage and water), `Fixed` as it is. A quad that reaches past its block's cell (a tall model, or a plant
+dry foliage and water), `Fixed` as it is. A quad with a `color` (`0xAARRGGBB`) multiplies its red, green and
+blue into that tint, or into white when it has none, as the mesher does. A quad that reaches past its block's cell (a tall model, or a plant
 offset toward the section's edge) has to be left out or cut there, as above.
 
 ### Section budgets
