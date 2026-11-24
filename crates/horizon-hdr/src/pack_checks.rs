@@ -89,12 +89,13 @@ fn parse(value: &str) -> (Off, Vec<&str>) {
     (off, unknown)
 }
 
-/// The checks taken off pack programs on `device`'s backend: read from the environment when the
-/// first pack program compiles, and logged then, with a warning for words the variable doesn't
-/// know.
+/// The checks taken off pack programs on `device`'s backend. The variable is read when the first
+/// pack program compiles, and logged then, with a warning for words it doesn't know; what the
+/// backend acts on is worked out for each device, as a later one can run on another backend.
 fn pack_off(device: &wgpu::Device) -> Off {
-    static OFF: OnceLock<Off> = OnceLock::new();
-    *OFF.get_or_init(|| {
+    static ASKED: OnceLock<Off> = OnceLock::new();
+    let backend = device.adapter_info().backend;
+    let asked = *ASKED.get_or_init(|| {
         let value = std::env::var(VAR).unwrap_or_default();
         let (asked, unknown) = parse(&value);
         if !unknown.is_empty() {
@@ -103,9 +104,8 @@ fn pack_off(device: &wgpu::Device) -> Off {
                  bounds, loops, div or all, in lower case"
             );
         }
-        let backend = device.adapter_info().backend;
-        let off = asked.on(backend);
         if asked.any() {
+            let off = asked.on(backend);
             log::info!(
                 "shader pack: {VAR}={value:?} on {backend:?}: the pack's programs compile \
                  without wgpu's checks: {}; still checked: {}{}",
@@ -121,8 +121,9 @@ fn pack_off(device: &wgpu::Device) -> Off {
                 }
             );
         }
-        off
-    })
+        asked
+    });
+    asked.on(backend)
 }
 
 /// The shader module of one of a shader pack's programs (`gfx/pack_post.rs`): without the checks
