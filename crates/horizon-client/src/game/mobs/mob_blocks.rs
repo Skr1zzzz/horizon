@@ -143,6 +143,12 @@ impl Game<'_> {
         if !horizon_client::mobs::raider::is_captain(mob) {
             return;
         }
+        // The entity drawn now, as a mod's `render_living_equipment` lets its head slot be drawn.
+        let shown = render::shown_equipment();
+        let worn = mod_api::EquipmentRenderSlot::Head;
+        if shown.hides(worn, mod_api::EquipmentRenderPart::Base) {
+            return;
+        }
         let Some((pole, flag)) = &self.entity_models.banner else {
             return;
         };
@@ -164,6 +170,7 @@ impl Game<'_> {
         );
         let still = Poses::new(pole);
         let white = 0xFFFF_FFFF;
+        let start = out.len();
         if let Some(r) = uv("entity/banner/banner_base") {
             render::draw(pole, m, &still, r, white, light, 0, out);
             render::draw(flag, m, &flag_poses, r, white, light, 0, out);
@@ -181,6 +188,7 @@ impl Game<'_> {
             let color = render::abgr(render::dye(index));
             render::draw(flag, m, &flag_poses, r, color, light, 0, out);
         }
+        render::tint_vertices(&mut out[start..], shown.tint_color(worn));
     }
     /// `BlockModelRenderState.submit` of a block state's baked model, as every block layer of
     /// a mob draws it (`CarriedBlockLayer`, `MushroomCowMushroomLayer`, `SnowGolemHeadLayer`,
