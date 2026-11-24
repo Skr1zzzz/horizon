@@ -1401,10 +1401,10 @@ fn mods_chat_suggestions_join_the_players_in_vanillas_order() {
     assert_eq!(screen.take_chat_query(), None, "asked once per change");
     let entries = ["stack", "Strider", "st", "Steve", ":star:"].map(String::from);
     screen.add_chat_suggestions(&input, cursor, entries.to_vec());
-    screen.key(&m, &c, &[], K::Tab, false, false);
+    screen.key(&m, &c, &VecDeque::new(), K::Tab, false, false);
     // "st" only repeats the word and "Steve" is listed once.
     assert_eq!(shown(&screen), ["stack", ":star:", "Steve", "Strider"]);
-    screen.key(&m, &c, &[], K::Tab, false, false);
+    screen.key(&m, &c, &VecDeque::new(), K::Tab, false, false);
     assert_eq!(screen.value(), "hi stack");
     assert_eq!(
         screen.take_suggestion_completion(),
@@ -1437,7 +1437,7 @@ fn a_mods_chat_suggestion_replaces_the_word_before_the_cursor() {
     assert_eq!((input.as_str(), cursor), ("hi :sm there", 6));
     screen.add_chat_suggestions(&input, cursor, vec!["😄".into()]);
     for _ in 0..2 {
-        screen.key(&m, &c, &[], K::Tab, false, false);
+        screen.key(&m, &c, &VecDeque::new(), K::Tab, false, false);
     }
     assert_eq!(screen.value(), "hi 😄 there");
     assert_eq!(
@@ -1475,8 +1475,8 @@ fn chat_suggestions_leave_commands_blank_text_and_stale_answers_alone() {
     assert_eq!(command.take_chat_query(), None, "a command");
     command.add_chat_suggestions("/gamem", 6, vec!["gamemodes".into()]);
     // Escape hides the list; Tab shows it again from what is pending.
-    command.key(&m, &c, &[], K::Escape, false, false);
-    command.key(&m, &c, &[], K::Tab, false, false);
+    command.key(&m, &c, &VecDeque::new(), K::Escape, false, false);
+    command.key(&m, &c, &VecDeque::new(), K::Tab, false, false);
     assert_eq!(shown(&command), ["gamemode"]);
 
     let mut blank = new("", false);
@@ -1493,7 +1493,7 @@ fn chat_suggestions_leave_commands_blank_text_and_stale_answers_alone() {
     stale.type_text(&m, &c, "a");
     stale.add_chat_suggestions(&input, cursor, vec!["stack".into()]);
     assert_eq!(stale.take_chat_query(), Some(("hi sta".into(), 6)));
-    stale.key(&m, &c, &[], K::Tab, false, false);
+    stale.key(&m, &c, &VecDeque::new(), K::Tab, false, false);
     assert!(shown(&stale).is_empty());
     assert_eq!(stale.value(), "hi sta");
 }
@@ -1520,7 +1520,7 @@ fn after_a_completion_mods_are_asked_at_the_lists_cursor() {
     screen.type_text(&m, &c, "hi al ther");
     screen.edit_input(&m, &c, |field| field.set_cursor_and_highlight(&m, 5));
     for _ in 0..2 {
-        screen.key(&m, &c, &[], K::Tab, false, false);
+        screen.key(&m, &c, &VecDeque::new(), K::Tab, false, false);
     }
     assert_eq!(screen.value(), "hi Alex ther");
     assert_eq!(
@@ -1531,8 +1531,8 @@ fn after_a_completion_mods_are_asked_at_the_lists_cursor() {
     assert_eq!((input.as_str(), cursor), ("hi Alex ther", 12));
     screen.add_chat_suggestions(&input, cursor, vec!["Theo".into()]);
     // Escape hides the list; Tab shows it again from what is pending.
-    screen.key(&m, &c, &[], K::Escape, false, false);
-    screen.key(&m, &c, &[], K::Tab, false, false);
+    screen.key(&m, &c, &VecDeque::new(), K::Escape, false, false);
+    screen.key(&m, &c, &VecDeque::new(), K::Tab, false, false);
     assert_eq!(shown(&screen), ["Theo", "Theresa"]);
 }
 
