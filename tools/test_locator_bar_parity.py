@@ -28,9 +28,10 @@ import threading
 import time
 
 try:
-    from . import lab, test_rust_parity as base
+    from . import fast_bins, lab, test_rust_parity as base
     from .test_dedicated_server_parity import Server, free_port, wait_ticks
 except ImportError:
+    import fast_bins
     import lab
     import test_rust_parity as base
     from test_dedicated_server_parity import Server, free_port, wait_ticks
@@ -77,6 +78,34 @@ SCRIPT = [
     ('flying-again', [], ['fly Bob on', 'cmd Bob tp @s 3.5 100 0.5']),
     ('pumpkin', [], ['cmd Bob item replace entity @s armor.head with minecraft:carved_pumpkin']),
     ('no-pumpkin', [], ['cmd Bob item replace entity @s armor.head with minecraft:air']),
+    # Computed player attributes must reach the served world's waypoint manager.
+    ('transmit-zero', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range base set 0']),
+    ('transmit-four', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range base set 4']),
+    ('outside-transmit', [], ['cmd Bob tp @s 5.5 100 0.5']),
+    ('inside-transmit', [], ['cmd Bob tp @s 3.5 100 0.5']),
+    ('transmit-modifier', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range modifier add horizon:range -4 add_value']),
+    ('remove-transmit-modifier', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range modifier remove horizon:range']),
+    ('transmit-default', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range base set 60000000']),
+    ('receive-zero', [], ['cmd Alice attribute @s minecraft:waypoint_receive_range base set 0']),
+    ('receive-four', [], ['cmd Alice attribute @s minecraft:waypoint_receive_range base set 4']),
+    ('outside-receive', [], ['cmd Bob tp @s 5.5 100 0.5']),
+    ('inside-receive', [], ['cmd Bob tp @s 3.5 100 0.5']),
+    ('receive-default', [], ['cmd Alice attribute @s minecraft:waypoint_receive_range base set 60000000']),
+    # Both ranges change (two commands sent back to back; they are not guaranteed to land in one server
+    # tick, so this only compares the outcome. The same-tick case is the unit test
+    # both_ranges_changing_in_one_tick_track_twice): vanilla's transmit and receive callbacks each track Bob.
+    ('both-ranges', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range base set 59000000',
+                         'cmd Bob attribute @s minecraft:waypoint_receive_range base set 59000000']),
+    ('both-ranges-default', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range base set 60000000',
+                                 'cmd Bob attribute @s minecraft:waypoint_receive_range base set 60000000']),
+    # A player who receives nothing is still a waypoint source that changes dimension and comes back.
+    ('bob-receives-nothing', [], ['cmd Bob attribute @s minecraft:waypoint_receive_range base set 0']),
+    ('bob-retransmits', [], ['cmd Bob attribute @s minecraft:waypoint_transmit_range base set 50000000']),
+    ('bob-to-nether', [], ['cmd Bob execute in minecraft:the_nether run tp @s 0.5 100 0.5']),
+    ('bob-back', [], ['cmd Bob execute in minecraft:overworld run tp @s 3.5 100 0.5']),
+    ('bob-moves', [], ['cmd Bob tp @s 5.5 100 0.5']),
+    # Bob stays a non-receiver, tracked again by his transmit value, to the end: he leaves like that.
+    # (A reconnect of such a Bob is not in the script: vanilla's own run of it differs between runs.)
     ('rule-off', ['gamerule locator_bar false'], []),
     ('moves-without', [], ['cmd Bob tp @s 4.5 100 0.5']),
     ('rule-on', ['gamerule locator_bar true'], []),
@@ -87,8 +116,11 @@ SCRIPT = [
 STEP_TICKS = 40
 # Vanilla's server moves a player who just joined on their own first ticks (a tiny step and back), which tracks
 # them where they spawned; Horizon does not simulate its guests. These steps compare what the bar shows at
-# their end (Bob has moved by then) rather than every packet.
-SETTLING_STEPS = {'alice-joins', 'bob-joins'}
+# their end (Bob has moved by then) rather than every packet. A player who arrives from another dimension is told
+# to the others more than once by vanilla (a receiver three times, a non-receiver twice; the addPlayer and
+# trackWaypoint calls of its arrival and more), Horizon's arrival once, the same as its join: `bob-back` compares
+# what the bar shows too. Leaving it (`bob-to-nether`) and every packet after the arrival are exact.
+SETTLING_STEPS = {'alice-joins', 'bob-joins', 'bob-back'}
 
 
 def shown(lines):
@@ -331,14 +363,14 @@ def sides(name, binary=None):
                     lab.ROOT / 'mods/horizon/src/test/java', '-cp', dependencies, '-d', classes, oracle],
                    cwd=lab.ROOT, check=True, capture_output=True)
     if binary is None:
-        subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], cwd=lab.ROOT,
+        subprocess.run(fast_bins.command('horizon-client'), cwd=lab.ROOT,
                        check=True, capture_output=True)
         import json
         metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                       cwd=lab.ROOT, text=True))
         binary = Path(metadata['target_directory']) / 'fast' / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     vanilla_server = ['java', '-Xmx2g', '-Duser.timezone=UTC', '-cp', dependencies, 'net.minecraft.server.Main', 'nogui']
-    horizon_server = [binary, '--resources', lab.LOCAL / 'horizon-client/26.3', '--dedicated', '--nogui']
+    horizon_server = [binary, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     client = ['java', '-Xmx1g', '-cp', str(classes) + os.pathsep + dependencies, 'dev.horizonlab.parity.LocatorBarClient']
     return lock, build, vanilla_server, horizon_server, client
 
@@ -460,7 +492,7 @@ def main():
         scope='Locator bar waypoints (ClientboundTrackedWaypointPacket) two vanilla-codec players receive on a '
               'dedicated server: block, chunk and azimuth connections as one moves, invisibility, team colours, '
               'crouching, a carved pumpkin, the locator_bar game rule, spectator mode and leaving.'))
-    print(f'locator bar: {len(vanilla)} waypoint packets identical')
+    print(f'locator bar: {len(vanilla)} normalized waypoint transcript entries identical (exact outside the settling steps)')
 
 
 if __name__ == '__main__':
