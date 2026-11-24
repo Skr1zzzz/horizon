@@ -3259,7 +3259,14 @@ mod tests {
         );
         mob.age = 37;
         let atlas = |_: &str| Some([0.0, 0.0, 1.0, 1.0]);
+        // Iron's one equipment layer, as the game resolves it for each slot that wears it.
+        let iron = [("entity/equipment/humanoid/iron".to_owned(), None)];
         let draw = |mob: &Mob| {
+            let worn: WornArmor = std::array::from_fn(|i| {
+                mob.extra
+                    .slot_stack(horizon_items::equipment::ARMOR[i])
+                    .map(|_| &iron[..])
+            });
             let mut out = Vec::new();
             render_with_hidden(
                 mob,
@@ -3268,6 +3275,7 @@ mod tests {
                 &atlas,
                 0xf0f0,
                 &data,
+                &worn,
                 &[],
                 Default::default(),
                 None,
