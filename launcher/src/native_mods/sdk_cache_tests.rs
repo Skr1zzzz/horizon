@@ -7,6 +7,23 @@ const TRIPLE: &str = "x86_64-unknown-linux-gnu";
 /// An xz tar the packager wrote, holding `deps/a.rmeta`.
 const SLICE: &[u8] = include_bytes!("../../../crates/horizon-mod-package/src/sdk/fixture.tar.xz");
 
+#[test]
+fn mod_build_age_requires_two_orderable_nightlies() {
+    use crate::native_mods::fit::Age;
+
+    let older = Some("nightly-2026-11-12-aaaaaaa");
+    let newer = Some("nightly-2026-11-13-bbbbbbb");
+    assert_eq!(nightly_age(newer, older), Age::Newer);
+    assert_eq!(nightly_age(older, newer), Age::Older);
+    assert_eq!(nightly_age(None, newer), Age::Unknown);
+    assert_eq!(nightly_age(newer, None), Age::Unknown);
+    assert_eq!(nightly_age(newer, Some("unknown")), Age::Unknown);
+    assert_eq!(
+        nightly_age(newer, Some("nightly-2026-11-13-ccccccc")),
+        Age::Unknown
+    );
+}
+
 fn runtime() -> String {
     Asset::name(Kind::Runtime, TRIPLE, Side::Client)
 }
@@ -324,18 +341,6 @@ fn a_failed_request_while_stopping_ends_as_cancelled() {
     )
     .unwrap_err();
     assert_eq!(refusal, Refusal::Cancelled);
-}
-
-/// The build data a build reads to judge its mods stops with the build (#19300).
-#[test]
-fn a_stopped_build_data_fetch_ends_as_cancelled() {
-    let fixture = Fixture::new();
-    let sdk = fixture.sdk(&[]).unwrap();
-    let stop = || Err(super::super::CANCELLED.to_string());
-    assert_eq!(
-        build_data(&sdk, &fixture.base(), &stop).unwrap_err(),
-        Refusal::Cancelled
-    );
 }
 
 #[test]

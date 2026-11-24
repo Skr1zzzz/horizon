@@ -67,6 +67,7 @@ mod modpacks_page;
 mod mods_page;
 mod mods_project;
 mod motion;
+mod move_window;
 mod multiplayer_page;
 mod native_consent;
 mod native_log_page;
@@ -249,6 +250,19 @@ enum Load<T> {
 }
 
 const LOG_LINES: usize = 2000;
+/// A game folder and the graphics API notice it is due.
+type ApiNoticeOf = (std::path::PathBuf, Option<backend::api_fallback::Notice>);
+
+enum InstallSource {
+    Instance,
+    Manual(instances::ManualInstallTarget),
+    Update,
+}
+
+struct QueuedInstall {
+    release: Release,
+    source: InstallSource,
+}
 
 struct Launcher {
     theme: Theme,
@@ -270,11 +284,8 @@ struct Launcher {
     whats_new_open: Option<std::collections::HashSet<String>>,
     /// The section the glass Settings list marked when last drawn (`glass_settings`).
     settings_marked: usize,
-    /// About's credit picture was asked for, and what came back.
-    credit_asked: bool,
     /// The Game version dropdown of the instance dialog and sheet is open.
     version_menu: bool,
-    credit_picture: Option<std::sync::Arc<gpui::Image>>,
     /// The instance sheet's Storage: which instance was measured, and its size once known.
     sheet_size: Option<(String, Option<u64>)>,
     /// The Mods page's project card, kept in view beside its list.
@@ -296,8 +307,10 @@ struct Launcher {
     /// The Horizon version being installed because an instance was made or saved to play it: it
     /// becomes the launcher's version only when the launcher has none.
     instance_install: Option<String>,
-    /// One for an instance waiting for the install running now to end.
-    install_next: Option<Release>,
+    /// The displayed instance when a manual install started.
+    manual_install_for: Option<instances::ManualInstallTarget>,
+    /// Pending downloads retain the reason and instance that requested them.
+    install_queue: VecDeque<QueuedInstall>,
     /// The Stable build Home's Update is installing (`nightly::install_stable`).
     stable_install: Option<Release>,
     /// A Stable build whose download failed: not offered again until the release list is read
@@ -317,6 +330,14 @@ struct Launcher {
     disk: Vec<(String, u64)>,
     storage_report: Option<storage::Report>,
     storage_pending: bool,
+    /// The Settings visit (`storage_visit`) the last count or cleanup started in: a count that
+    /// failed is tried again on the next visit, not on every frame of this one.
+    storage_tried: u64,
+    /// The cleanups lowered cache limits asked for and those that ran: one still owed (a count
+    /// was running, the build lock was busy, a newer limit came) runs before the next count.
+    storage_trims: crate::glass_storage::Trims,
+    /// The running storage work is such a cleanup, settling the requests up to this generation.
+    storage_trimming: Option<u64>,
     /// A Clear the player still has to confirm: `Some(None)` is Clear all.
     storage_confirm: Option<Option<storage::Category>>,
     storage_error: Option<String>,
@@ -430,6 +451,8 @@ struct Launcher {
     background_error: Option<String>,
     /// Settings' data relocation confirmation and the worker's last result.
     location_target: Option<std::path::PathBuf>,
+    /// A linked data target discovered at startup, reused while the Settings page redraws.
+    location_real_target: Option<std::path::PathBuf>,
     location_error: Option<String>,
     location_note: Option<String>,
     settings: Settings,
@@ -451,6 +474,12 @@ struct Launcher {
     client_started: Option<std::time::SystemTime>,
     /// The folder the running game keeps its settings in: the game home, or a modpack's.
     client_home: Option<std::path::PathBuf>,
+    /// The Horizon version the last game was started as, for the record of a graphics API
+    /// switched after its start crash (`backend::api_fallback`).
+    client_build: Option<String>,
+    /// A game folder's graphics API notice, read once (`Self::api_notice`); emptied when a game
+    /// ends or the player answers.
+    api_notice: std::cell::RefCell<Option<ApiNoticeOf>>,
     crash: Option<Crash>,
     /// The Servers page (`servers_page.rs`).
     servers: servers_page::Servers,
