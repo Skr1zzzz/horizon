@@ -592,6 +592,8 @@ pub struct Guest {
     pub advancements_changed: std::collections::BTreeSet<usize>,
     /// The server's scoreboard as this player's client has it (lan/scoreboard.rs).
     pub scoreboard: super::scoreboard::View,
+    /// Whether this guest has received its initial `updateEntireScoreboard` sync.
+    pub scoreboard_synced: bool,
     /// Recipes unlocked since the client was last told
     /// (`ServerRecipeBook.addRecipes` sends them).
     pub recipes_unlocked: Vec<String>,
@@ -726,6 +728,17 @@ impl Guest {
             && self
                 .center
                 .is_some_and(|(cx, cz)| super::hub::tracked(cx, cz, self.view_distance, x, z))
+    }
+
+    /// Whether this guest is currently tracking entity `id` in `dimension` (in its own level or
+    /// through a viewed level).
+    pub fn tracks_entity(&self, dimension: &str, id: i32) -> bool {
+        (self.dimension == dimension && self.tracker.is_tracking(id))
+            || self
+                .viewed
+                .views
+                .get(dimension)
+                .is_some_and(|view| view.tracker.is_tracking(id))
     }
 
     fn with_defaults(
@@ -931,6 +944,7 @@ impl Guest {
             advancements_visible: Vec::new(),
             advancements_changed: Default::default(),
             scoreboard: Default::default(),
+            scoreboard_synced: false,
             recipes_unlocked: Vec::new(),
         }
     }
