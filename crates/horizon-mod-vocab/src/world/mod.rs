@@ -9,7 +9,9 @@ pub(crate) mod biome_modifier;
 pub(crate) mod biome_region;
 pub(crate) mod biome_source;
 pub(crate) mod chunk_generator;
+pub(crate) mod biome_fill_refusal;
 pub(crate) mod chunk_refusal;
+pub(crate) mod feature_refusal;
 pub(crate) mod clock_adjustment;
 pub(crate) mod criteria;
 pub(crate) mod custom_spawners;
@@ -54,6 +56,7 @@ pub(crate) mod structure_type;
 #[doc(hidden)]
 pub mod survival;
 pub(crate) mod tags;
+pub(crate) mod terrain_view;
 pub(crate) mod ticket_controller;
 pub(crate) mod types;
 pub(crate) mod world_fluid;

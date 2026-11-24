@@ -6,7 +6,9 @@ impl Game<'_> {
     /// What the hub needs to know of the loaded mods each tick.
     pub(in crate::game) fn sync_hub_mod_flags(hub: &mut Hub) {
         hub.mods_loaded = !mod_api::__private::mods().is_empty();
+        hub.pong_listened = mod_api::__private::listened(mod_api::HookId::PlayerPong);
         hub.moves_listened = mod_api::__private::listened(mod_api::HookId::PlayerMove);
+        hub.move_packets_listened = mod_api::__private::listened(mod_api::HookId::PlayerMovePacket);
         hub.lan
             .shared
             .handshake

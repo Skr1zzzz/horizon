@@ -73,7 +73,8 @@ alone, with a warning. The check is still reported on the head.
 
 Failed harnesses' logs are uploaded as the `parity-logs` artifact.
 
-**Hosted parity.** A maintainer can also run harnesses on Blacksmith's runners, away from the Mac mini:
+**Hosted parity.** A push to main runs the full hosted selection on Blacksmith's runners, away from the Mac mini,
+at most every 3 hours, and a maintainer can run harnesses there too:
 `gh workflow run parity-hosted.yml --ref <branch> -f harnesses="..."`, or `-f base=<commit>` for what the branch's
 changes reach. The data comes encrypted from the maintainers' private `horizon-rust/vanilla-data`. The only thing
 that leaves the runner is the harness logs: the first-attempt and failure logs, holding compared values, log tails and
@@ -180,12 +181,25 @@ which runs them on main a batch of merges at a time, on the Mac mini's runner:
   fail on and, with `--comment`, comments on its pull request. It has 90 minutes (`--budget`), then says between
   which merges each harness broke; a later search from the same base goes on from there
   (`.local/parity-runner/bisect.json`).
+- Jobs on the self-hosted Mac take turns at compiling (`tools/compile_lock.py`, flock on files in
+  `/Users/Shared/horizon-compile-lock`): parity-main's probe prebuild, pull requests' parity prebuilds and the
+  Nightly's, releases' and the launcher's Mac compiles. A pull request's job is not given the turn while parity-main
+  or a Mac build is waiting or compiling; those wait only for the turn's holder, and a pull request's prebuild that
+  holds it gives it back after its current Cargo run. A holder that dies frees the turn at
+  once (the kernel drops its lock). Waits are bounded (parity-main 20 min and the Mac builds 60, each for all its
+  compiles together; pull requests 60 per prebuild), then the job compiles anyway and says who held the turn. parity-main's prebuild then has 240 minutes (`PREBUILD_LIMIT`),
+  past which its Cargo process group is stopped and the run fails.
 - The verdict report, `verdict-<run id>-<attempt>.json` (the run's `parity-main-verdict` artifact, uploaded best
   effort), holds the head, the base, the run id and attempt, the exit code, each failed harness's tries (the batch's,
   its retry if `tools/parity.py` gave one, the rerun at HEAD) and `repeat_flakers`: harnesses not on `known_flaky`
   that passed only when run again in 3 or more of the last 10 runs (kept in
   `.local/parity-runner/verdict-history.json` on the runner). The run's summary names each; they don't fail it: put
   one on `known_flaky` with its issue, or fix it. Neither the report nor the history can change the verdict.
+- The `parity-main-prebuild-timings` artifact (7 days, best effort) tells which crates take the probe prebuild's
+  minutes: Cargo's `--timings` report of each prebuild run (`cargo-NN.html`, the largest left out above 20 MB in
+  all) and `prebuild-calls.txt`, each run's `cargo N/M` line with the change in the machine's sccache hits and
+  misses since the reading before it. Only parity-main
+  collects them (`HORIZON_PARITY_PREBUILD_TIMINGS=1` on its harness step).
 - Nightlies build only on a commit both `checks` and `parity-main` passed on (`tools/release_train.py`,
   `tools/ci/nightly.py`, see below), so a broken merge holds them instead of reaching players. They take the
   newest such commit even when a later batch failed: that failure is in merges the green commit doesn't contain, so
@@ -264,7 +278,19 @@ concurrency group of their own ([When it releases](#when-it-releases)).
 gh workflow run prebuilt-game.yml --ref main                         # full dry run
 gh workflow run nightly-build.yml --ref main -f dry_run=true         # SDK + game dry run
 gh workflow run prebuilt-game.yml --ref main -f dry_run=false         # maintainer publication, after review/CI
+gh workflow run prebuilt-game.yml --ref main -f off_main=true -f commit=<full sha>   # dry run of a dry-run/* commit
 ```
+
+Its `commit` gets the Nightly's base rule (its dry run off main, under
+[Trusted reviewers pick the Nightly's pull requests](#trusted-reviewers-pick-the-nightlys-pull-requests): `nightly.py
+base`, run from this workflow's own commit, checked out beside the judged one and never inside it): on main, or, in a
+dry run with `off_main` only, a commit a
+freshly fetched `dry-run/*` branch holds. A pull request's head, another branch's commit or a bare SHA is refused, a
+dry run's too, and so is `off_main` with a commit on main or in a real run; the run's name says `(off main)`. A
+branch run's own commit, off main, needs the same: a `dry-run/*` branch holding it and `off_main`. The
+dry run runs the commit's own build scripts in jobs whose GitHub Actions cache scope is main's when dispatched from
+main, which is why the commit must be one somebody with push rights chose. No job on the route saves a cache: no
+`actions/cache`, Rust cache, sticky disk or compiler cache (tests/test_nightly.py pins it).
 
 These are publication machinery, not evidence that a candidate has shipped. Activate a candidate only after
 code-owner review, green exact-head CI and the real platform/native canaries. A Nightly predating this route may
@@ -312,7 +338,7 @@ There is no daily run: `daily.yml` and the workflows it called (`ignored-tests.y
 |---|---|---|
 | `ci.yml` (`verify (Rust tests)`) | A pull request that `tools/ci/rust_changes.py` selects (any change except `docs/`, Markdown, and Python under `tools/` and `tests/`; `rust_changes.py` and `release_train.py` themselves count); every merge-queue entry, manual dispatch and push to main (a push only builds when a merge-queue run already passed on its commit) | On Linux: the workspace's unit, binary, integration and doc tests, and the `#[ignore]`d `mod_content::tests::` (they pass at once without the vanilla data, which no GitHub runner holds) |
 | `ci.yml` (`verify (launcher)`) | A pull request or push to main that `rust_changes.py --launcher` selects, or whose earlier commit can't be read; every manual dispatch. Never in the merge queue (the job's condition), and a push to main only builds when a merge-queue run already passed on its commit | On Linux: the launcher's library and binary tests |
-| `ci.yml` (`verify (mod points)`) | A pull request that `rust_changes.py` selects for the mod points (see `needs_mod_points`: crate manifests count, for example); every merge-queue entry, manual dispatch and push to main | On Linux: `horizon-mod-points`' wire loopback test |
+| `ci.yml` (`verify (mod API)`) | A pull request that `rust_changes.py` selects for the mod API (see `needs_mod_api`: crate manifests count, for example); every merge-queue entry, manual dispatch and push to main | On Linux, pull requests only: the generated mod API against the base (`tools/check_mod_api_unchanged.py`) and the surface report |
 | `ci.yml` (`Windows ARM64 game and launcher`) | Manual dispatch with `-f arm64=true` only | The launcher's library tests and the `#[ignore]`d `rust_toolchain::tests::managed_arm64_toolchain_builds_the_game` |
 | `ci.yml` (`Windows x64 game and launcher tests`) | Manual dispatch with `-f windows=true` only, a [try run](ci-runners.md#try-runs) | On Windows x64: the launcher's tests; the game's release build, uploaded for 3 days |
 | `launcher.yml` (`build`) | See the workflow's `on:` (pushes to `main`, `launcher` and `launcher-*` within its path filter, a schedule, manual dispatch) and its `decide` job: it builds when a launcher release is due, and on every dry run (every run off main, and a dispatch with `dry_run`, the default), which publishes nothing | The launcher's tests on Linux, macOS (two builds, one for x86-64) and Windows (x64, ARM64) |
@@ -682,7 +708,10 @@ No SDK compilation is needed to evaluate this design.
 
 `.github/workflows/launcher.yml` releases the launcher the same way. It starts on a push to main that changes
 `launcher/`, `crates/horizon-prepare/` or `crates/horizon-theme/` (what the launcher builds in), every hour at :47,
-and by hand; pushes to `launcher` and `launcher-*` branches only build.
+and by hand; pushes to `launcher` and `launcher-*` branches only build. Branch builds of the launcher (any run off
+main) are unsigned and run on GitHub-hosted runners; signing stays on main. The notes and the signature check
+run on every run with a token that only reads; a separate publish job, only for main's real release, creates the
+release.
 
 - `tools/release_train.py decide --kind launcher` counts the pull requests merged since the last published
   launcher release that changed those paths (not `launcher/links.json`, which the launcher reads from main, nor
@@ -690,6 +719,11 @@ and by hand; pushes to `launcher` and `launcher-*` branches only build.
   5 minutes, or the oldest 1 hour: a fix to installs or updates starts its release at most ~70 minutes after it
   merges, as the decision runs every 10 minutes, then builds and publishes), `release-now`, `skip-release` and
   `RELEASES_PAUSED`.
+- A fix merged through a security advisory's private fork has no pull request, so the decision doesn't count it.
+  Release it by hand: `gh workflow run launcher --ref main -f dry_run=false -f force=true`, but only after the
+  `checks` run on the fix's commit on `main` has passed. The dispatch releases the newest commit on `main` whose
+  `checks` passed, so one sent earlier ships a commit without the fix. Confirm the release's commit contains the
+  fix, then publish the advisory.
 - The tag is `launcher@X.Y.Z` on the release line (`launcher@0.2.0` first; the game and the launcher count their
   patches separately). Without `.github/release-line.txt`, `launcher-vX.Y.Z`: the patch after the last launcher tag,
   or the next minor (`X.Y+1.0`) when one of those pull requests is labelled `feature`. `launcher-v0.2.0` was taken
@@ -767,7 +801,7 @@ Online5277 since 2026-10-27, levzzz5154 since 2026-10-28) and for Ludovic, with 
   linking the comment that asked; a refusal answers too. Claims are their own workflow
   (`.github/workflows/claim-command.yml`, `tools/ci/claim_command.py`), open to everyone for their own claim.
 - **Refused.** Any label with `release` in its name (`release-now`, `release-blocker`, `skip-release`) and
-  `full-parity`; anything on Ludovic's own issues and pull requests; a merged pull request; a locked thread; more
+  `full-parity`, `run-parity`, and removing `needs-proof` (adding it is fine); anything on Ludovic's own issues and pull requests; a merged pull request; a locked thread; more
   than 60 actions per reviewer in 24 hours (counted from the workflow's own comments).
 - **Safety.** Same as `/nightly`: main's copy of the workflow runs, no pull request's code is checked out or run,
   the comment reaches the script as env vars, and the token has `issues` and `pull-requests` write only.
@@ -783,6 +817,20 @@ Online5277 since 2026-10-27, levzzz5154 since 2026-10-28) and for Ludovic, with 
   `tools/ci/nightly_set.py`); each holds these owner powers. A line in any other form, a bare login included, grants nothing.
   `python3 tools/ci/resolve_reviewer_ids.py` fills in IDs for new lines; `--check` reports a listed ID whose login
   changed (a rename to look at) or whose account is gone.
+
+### Stale pull requests
+
+`.github/workflows/stale-prs.yml` (`tools/ci/stale_prs.py`, daily) closes pull requests left waiting on their author.
+An open, non-draft pull request to main gets the `stale` label and one comment naming the reason when it conflicts
+with main and saw no push, reopen, or person's comment, review or review-thread reply for 4 days, or when its head is
+still the commit a changes-requested review looked at 7 days later and that reviewer hasn't been asked to look again.
+Any push or person's comment takes the label off; unchanged 3 days after the notice, it is closed with a comment (its
+unfinished checks are cancelled, as `cancel-on-close.yml` would), and reopening it starts again. Drafts, the merge
+queue, other bases and the labels `keep-open`, `pinned`, `proposal`, `tracker` and `release-now` are never touched, nor
+is a pull request whose mergeable state GitHub hasn't worked out yet; each one is read again right before it is
+labelled or closed. At most 30 actions a run. A dry run by hand: `gh workflow run stale-prs.yml` (its `dry_run` box is
+ticked by default), or locally `python3 tools/ci/stale_prs.py`, which only reads. Before the first scheduled run,
+`python3 tools/ci/stale_prs.py create --apply` creates the labels.
 
 ### Trusted reviewers pick the Nightly's pull requests
 
@@ -843,12 +891,13 @@ comment on any issue or pull request (`.github/workflows/nightly-command.yml`, `
   merge with a read-only token that isn't kept in the checkout and no secrets; the runner's Developer ID keychain
   stays locked. `sign` is the only job with the key, and checks out only main's `tools/ci/sign_release.sh`, which
   hashes the archives with the runner's `sha256sum` and signs with its OpenSSL: it never runs what `build` made.
-  `publish` runs main's `horizon-release-sign`, never the archives. Nothing a nightly's build leaves reaches a
-  release either: `game-build.yml`'s `trusted` input is true only for `release.yml`. An untrusted build runs its
-  macOS jobs on the Mac mini's nightly runner (`horizon-nightly`, its own so a nightly never waits behind pull
-  requests' parity queue; same machine and trust as the `horizon-game` runner), never the release runner
-  (`MAC_RUNNER`), and its Rust cache has its own key and is never saved. A trusted build doesn't use the machine's
-  shared sccache, which pull requests' jobs write (`HORIZON_NO_SCCACHE`, `tools/ci/runner-env.sh`).
+  `publish` runs main's `horizon-release-sign`, never the archives.
+- **Where it builds.** `release.yml` starts `nightly-build.yml`, which calls `game-build.yml` with `trusted: false`
+  and `developer_id: false`, so releases build as Nightlies do. The macOS jobs run on the Mac mini's nightly runner
+  (`horizon-nightly`), never the release runner (`MAC_RUNNER`), and the Rust cache has its own key and is never
+  saved. They don't read machine-shared caches: no sccache (`HORIZON_NO_SCCACHE`, `tools/ci/runner-env.sh`) and no
+  cargo configuration from outside the checkout (`tools/ci/cargo_isolation.py` fails the job and names it), and
+  each run starts from a fresh cargo home.
 - **Players.** Every launcher and `horizon-server update` install the `nightly` pre-release
   ([Nightly only](#nightly-only)). It is never GitHub's latest: the last `vX.Y.Z` stays that, for launchers,
   servers and `install.sh` from before the switch.
@@ -880,13 +929,9 @@ failed or cancelled too (`dry-run-cleanup`, by that exact name).
 What it proves: the candidate's build, smoke test and SDK indexing. It still runs main's `nightly-build.yml`, the
 reusable workflows and `nightly.py pick`, so a fix to those can't be proven this way.
 
-Known limit, not solved: an off-main dry run runs the candidate's build scripts on the Mac mini's
-`ludovics-mac-mini-nightly` runner, the same persistent runner later real Nightlies use, and nothing isolates runner
-state outside the checkout. The control is who may push `dry-run/*`: the same people who can already dispatch the
-workflow from their own branch, which runs that branch's workflow on the same runner. So the option adds no new
-capability; it only removes the need to edit the workflow. As an untrusted build (`trusted: false`) it never uses the
-release runner and never saves the GitHub Actions Rust cache, but on the Mac it can read and write the machine's
-local compiler cache (sccache, `tools/ci/runner-env.sh`), which only trusted builds skip.
+An off-main dry run builds with `trusted: false` on the Mac mini's nightly runner (`ludovics-mac-mini-nightly`):
+it never uses the release runner, never saves the GitHub Actions Rust cache, doesn't read machine-shared caches
+(no sccache: `HORIZON_NO_SCCACHE`, `tools/ci/runner-env.sh`) and starts from a fresh cargo home.
 
 ## Nightly audit
 
@@ -925,5 +970,6 @@ Releases ship often, so nothing they leave behind may grow without bound.
   `ssh macmini 'cd ~/.actions-runners && for f in runner-gc.sh git-slim.sh; do curl -fsSL https://raw.githubusercontent.com/horizon-rust/horizon/main/tools/ci/$f -o $f; done'`.
 
 Guest-stack release note (arismoko/horizon#3232): game and server executables reserve 136 MiB
-for their main stack through MSVC `/STACK` or Apple `-stack_size` linker arguments;
-Linux raises RLIMIT_STACK and re-execs before initialization.
+(144 MiB on macOS) for their main stack through MSVC `/STACK` or Apple `-stack_size` linker arguments;
+Linux raises RLIMIT_STACK and re-execs before initialization. Rosetta 2 ignores `-stack_size`, so an
+Intel macOS program there runs its `main` on a stack its main thread allocates (`run_main`).
