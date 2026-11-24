@@ -20,9 +20,10 @@ use horizon_client::{
 use horizon_world::{level::LevelEvent, registry::BlockStateId};
 use std::{collections::HashSet, sync::Arc};
 
-/// Villagers 1, 2 and 3 in a row, of which only 2 ticks and may pick up
-/// loot, and items 11 to 13: an egg far off, bread a player threw at
-/// villager 2's feet, and a carrot far off the other way.
+/// Villagers 1, 2 and 3 in a row, of which 2 and 3 tick and may pick up
+/// loot, and items 11 to 14: an egg far off, bread a player threw at
+/// villager 2's feet, a carrot far off the other way, and bread nobody threw
+/// at villager 3's feet.
 struct Level {
     mobs: JoinList<Mob>,
     dropped: JoinList<ItemEntity>,
@@ -43,6 +44,8 @@ impl Level {
         let mob = |id: u32, x: f64| Mob::new(id, Arc::clone(&kind), Vec3::new(x, 64.0, 0.5), 0.0);
         let mut picker = mob(2, 0.5);
         picker.extra.pick_up_loot = true;
+        let mut last = mob(3, -10.5);
+        last.extra.pick_up_loot = true;
         let item = |id: u32, x: f64, stack: ItemStack| {
             let mut e = item_at(x, 64.0, 0.5);
             e.id = id;
@@ -72,15 +75,16 @@ impl Level {
             recipe_index: Default::default(),
         };
         Self {
-            mobs: [mob(1, 10.5), picker, mob(3, -10.5)].into_iter().collect(),
+            mobs: [mob(1, 10.5), picker, last].into_iter().collect(),
             dropped: [
                 item(11, 20.5, ItemStack::new("minecraft:egg", 1)),
                 bread,
                 item(13, -20.5, ItemStack::new("minecraft:carrot", 1)),
+                item(14, -10.5, ItemStack::new("minecraft:bread", 2)),
             ]
             .into_iter()
             .collect(),
-            ticked: [2].into_iter().collect(),
+            ticked: [2, 3].into_iter().collect(),
             items: Items::empty(),
             stations,
             facts: BlockFacts {
@@ -217,7 +221,10 @@ impl MobLevel for Level {
     }
     /// The thrower's advancement is done, and its reward function sends the
     /// first mob to another dimension and kills the first item.
-    fn on_item_pickup(&mut self, _: usize, _: &ItemEntity) {
+    fn on_item_pickup(&mut self, _: usize, item: &ItemEntity) {
+        if item.thrower.is_none() {
+            return;
+        }
         self.rewards += 1;
         self.mobs.remove(0);
         self.dropped.remove(0);
@@ -331,7 +338,8 @@ impl VillagerLevel for Level {
 /// stack after `onItemPickup`, whose advancement reward may run a function.
 /// One that sends a mob to another dimension and kills an item, both listed
 /// before the villager's own, leaves it the bread it reached for and every
-/// other mob and stack as they were.
+/// other mob and stack as they were, and the villager after it, now one
+/// place earlier in the list, still loots its own bread.
 #[test]
 fn a_pickup_reward_that_removes_a_mob_and_an_item_moves_only_the_bread() {
     let mut level = Level::new();
@@ -341,8 +349,8 @@ fn a_pickup_reward_that_removes_a_mob_and_an_item_moves_only_the_bread() {
         let m = level.mobs.iter().find(|m| m.id == id).unwrap();
         villager::ext(m).map_or(0, |x| x.count_item("minecraft:bread"))
     };
-    assert_eq!((bread(2), bread(3)), (3, 0), "the bread goes to villager 2");
+    assert_eq!((bread(2), bread(3)), (3, 2), "each takes its bread");
     let left: Vec<u32> = level.dropped.iter().map(|e| e.id).collect();
     assert_eq!(left, [13], "the carrot stays");
-    assert_eq!(level.taken, [(2, 12)]);
+    assert_eq!(level.taken, [(2, 12), (3, 14)]);
 }
